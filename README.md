@@ -10,7 +10,7 @@ A simple and stylish TUI client for various Nostr-based chats.
 
 ## What is strchat-tui?
 
-**strchat-tui** is a terminal-based chat client written in Go for Nostr. It's designed to be a lightweight, fast, and highly-functional way to participate in different kinds of Nostr chat rooms, all from the comfort of your terminal with a retro, hacker-style aesthetic.
+**strchat-tui** is a terminal-based Nostr chat client written in Go. It's designed to be a lightweight, fast, and highly-functional way to participate in different kinds of Nostr chat rooms, all from the comfort of your terminal with a retro, hacker-style aesthetic.
 
 The client features smart relay management to ensure your connection is always fast and reliable.
 
@@ -37,8 +37,10 @@ This client aims to support a wide range of Nostr chats.
 #### 🔜 Planned for Future Releases
 
 * **NIP-17:** Encrypted Direct Messages (DMs).
+* **NIP-28:** Public Chat.
 * **NIP-A0:** Voice Messages.
 * **NIP-C7:** Chats.
+* **NIP-EE:** E2EE Messaging using the Messaging Layer Security (MLS) Protocol.
 
 ## How to Run
 
