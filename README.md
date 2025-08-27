@@ -6,7 +6,7 @@
 
 A simple and stylish TUI client for various Nostr-based chats.
 
-
+![strchat-tui in action](./assets/screenshot.png)
 
 ## What is strchat-tui?
 
