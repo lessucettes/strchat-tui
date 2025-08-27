@@ -51,7 +51,7 @@ This client aims to support a wide range of Nostr chats.
 1.  Ensure you have [Go](https://golang.org/) (version 1.18 or newer) installed.
 2.  Clone the repository:
     ```bash
-    git clone [https://github.com/lessucettes/strchat-tui.git](https://github.com/lessucettes/strchat-tui.git)
+    git clone https://github.com/lessucettes/strchat-tui.git
     ```
 3.  Navigate into the project directory:
     ```bash
