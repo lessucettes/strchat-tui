@@ -1,0 +1,148 @@
+// georelay.go
+package client
+
+import (
+	"encoding/csv"
+	"fmt"
+	"io"
+	"math"
+	"net/http"
+	"os"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/mmcloughlin/geohash"
+)
+
+// relayEntry holds the parsed information for a single relay from the CSV file.
+type relayEntry struct {
+	Host string
+	Lat  float64
+	Lon  float64
+}
+
+const (
+	cacheFile = "georelays_cache.csv"
+	remoteURL = "https://raw.githubusercontent.com/permissionlesstech/georelays/refs/heads/main/nostr_relays.csv"
+	cacheTTL  = 24 * time.Hour
+)
+
+// haversine calculates the great-circle distance in kilometers between two points on the Earth.
+func haversine(lat1, lon1, lat2, lon2 float64) float64 {
+	const R = 6371.0 // Earth radius in kilometers
+	dLat := (lat2 - lat1) * math.Pi / 180
+	dLon := (lon2 - lon1) * math.Pi / 180
+	a := math.Sin(dLat/2)*math.Sin(dLat/2) +
+		math.Cos(lat1*math.Pi/180)*math.Cos(lat2*math.Pi/180)*
+			math.Sin(dLon/2)*math.Sin(dLon/2)
+	return 2 * R * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+}
+
+// loadRelays loads relay entries from the remote CSV, using a local cache if it's recent enough.
+func loadRelays() ([]relayEntry, error) {
+	// Check if a recent cache file exists.
+	info, err := os.Stat(cacheFile)
+	if err == nil && time.Since(info.ModTime()) < cacheTTL {
+		return parseCSV(cacheFile)
+	}
+
+	// If no cache, download the remote file.
+	resp, err := http.Get(remoteURL)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	out, err := os.Create(cacheFile)
+	if err != nil {
+		return nil, err
+	}
+	defer out.Close()
+
+	if _, err = io.Copy(out, resp.Body); err != nil {
+		return nil, err
+	}
+
+	return parseCSV(cacheFile)
+}
+
+// parseCSV opens and parses the CSV file at the given path.
+func parseCSV(path string) ([]relayEntry, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	r := csv.NewReader(f)
+	lines, err := r.ReadAll()
+	if err != nil {
+		return nil, err
+	}
+
+	var relays []relayEntry
+	for i, line := range lines {
+		// Skip header line.
+		if i == 0 && strings.Contains(strings.ToLower(line[0]), "relay") {
+			continue
+		}
+		if len(line) < 3 {
+			continue
+		}
+
+		// Use strconv.ParseFloat for more robust parsing than Sscanf.
+		lat, err := strconv.ParseFloat(strings.TrimSpace(line[1]), 64)
+		if err != nil {
+			continue // Skip lines with invalid latitude.
+		}
+		lon, err := strconv.ParseFloat(strings.TrimSpace(line[2]), 64)
+		if err != nil {
+			continue // Skip lines with invalid longitude.
+		}
+
+		host := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(line[0]), "wss://"), "ws://")
+		relays = append(relays, relayEntry{Host: host, Lat: lat, Lon: lon})
+	}
+	return relays, nil
+}
+
+// ClosestRelays finds the N closest relays to a given geohash.
+// It uses a locally cached CSV file of relays and their locations, refreshing it if it's older than 24 hours.
+// If it fails to load or parse the relay list, it returns an error.
+func ClosestRelays(geohashStr string, count int) ([]string, error) {
+	relays, err := loadRelays()
+	if err != nil {
+		return nil, fmt.Errorf("could not load geo-relays: %w", err)
+	}
+	lat, lon := geohash.DecodeCenter(geohashStr)
+
+	// A temporary struct to hold relays and their calculated distance for sorting.
+	type relayWithDistance struct {
+		url      string
+		distance float64
+	}
+
+	pairs := make([]relayWithDistance, len(relays))
+	for i, r := range relays {
+		d := haversine(lat, lon, r.Lat, r.Lon)
+		pairs[i] = relayWithDistance{url: "wss://" + r.Host, distance: d}
+	}
+
+	sort.Slice(pairs, func(i, j int) bool {
+		return pairs[i].distance < pairs[j].distance
+	})
+
+	// Take the first N results.
+	if count > len(pairs) {
+		count = len(pairs)
+	}
+
+	result := make([]string, count)
+	for i := 0; i < count; i++ {
+		result[i] = pairs[i].url
+	}
+
+	return result, nil
+}
