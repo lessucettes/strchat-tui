@@ -15,10 +15,11 @@ import (
 // TUI is the main struct that holds all TUI components and channels.
 type TUI struct {
 	app         *tview.Application
+	logs        *tview.TextView
 	output      *tview.TextView
+	bottomFlex  *tview.Flex
 	input       *tview.InputField
 	chatInput   *tview.InputField
-	logs        *tview.TextView
 	actionsChan chan<- client.UserAction
 }
 
@@ -42,6 +43,9 @@ func New(actions chan<- client.UserAction, events <-chan client.DisplayEvent) *T
 	// Set up handlers for user input and global key events.
 	t.setupHandlers()
 
+	// Set the initial focus borders correctly on startup.
+	t.updateFocusBorders()
+
 	// Start a goroutine to listen for events from the client.
 	go t.listenForEvents(events)
 
@@ -54,12 +58,13 @@ func (t *TUI) setupViews() {
 	t.output = tview.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true)
+	t.output.SetBorder(true) // Border color will be managed by updateFocusBorders
 
 	// --- Log Window ---
 	t.logs = tview.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true)
-	t.logs.SetBorder(true)
+	t.logs.SetBorder(true) // Border color will be managed by updateFocusBorders
 
 	// --- Input Fields ---
 	t.input = tview.NewInputField().
@@ -76,19 +81,18 @@ func (t *TUI) setupViews() {
 		SetFieldTextColor(tcell.ColorLime)                    // Input field text color (a bright green)
 	t.chatInput.SetBorderPadding(0, 0, 1, 0)
 
-	bottomFlex := tview.NewFlex().
+	t.bottomFlex = tview.NewFlex().
 		SetDirection(tview.FlexColumn).
 		AddItem(t.input, 0, 1, true).
 		AddItem(t.chatInput, 12, 0, false)
-	bottomFlex.SetBorder(true).
-		SetBorderColor(tcell.ColorLimeGreen) // Border around the input fields (a bright green)
+	t.bottomFlex.SetBorder(true)
 
 	// --- Main Layout ---
 	mainFlex := tview.NewFlex().
 		SetDirection(tview.FlexRow).
 		AddItem(t.logs, 12, 0, false).
 		AddItem(t.output, 0, 1, false).
-		AddItem(bottomFlex, 3, 0, true)
+		AddItem(t.bottomFlex, 3, 0, true)
 
 	t.app.SetRoot(mainFlex, true).SetFocus(t.input)
 }
@@ -143,6 +147,8 @@ func (t *TUI) setupHandlers() {
 			case t.logs:
 				t.app.SetFocus(t.input)
 			}
+			// After every focus change, update the border colors.
+			t.updateFocusBorders()
 			return nil // Consume the event.
 		}
 		return event // Pass other events through.
@@ -158,8 +164,8 @@ func (t *TUI) listenForEvents(events <-chan client.DisplayEvent) {
 			switch event.Type {
 			case "NEW_MESSAGE":
 				trimmedURL := strings.TrimPrefix(event.RelayURL, "wss://")
-				fmt.Fprintf(t.output, "[grey][%s][-] <%s%s#%s[-]> %s [grey](%s %s)[-]\n",
-					event.Timestamp, event.Color, event.Nick, event.PubKey, event.Content, event.ID, trimmedURL)
+				fmt.Fprintf(t.output, "[grey][%s][-] <%s%s#%s[-]> %s [grey](%s %s %s)[-]\n",
+					event.Timestamp, event.Color, event.Nick, event.PubKey, event.Content, event.ID, event.Chat, trimmedURL)
 			case "STATUS":
 				fmt.Fprintf(t.logs, "[yellow][%s] %s[-]\n", time.Now().Format("15:04:05"), event.Content)
 				// Smart autoscroll: only scroll if the user isn't actively looking at the logs.
@@ -181,4 +187,33 @@ func (t *TUI) listenForEvents(events <-chan client.DisplayEvent) {
 // Run starts the TUI application's main event loop.
 func (t *TUI) Run() error {
 	return t.app.Run()
+}
+
+// updateFocusBorders visually indicates which panel has focus by changing its border color.
+func (t *TUI) updateFocusBorders() {
+	currentFocus := t.app.GetFocus()
+
+	unfocusedColor := tview.Styles.BorderColor // Тускло-зелёный
+	focusedColor := tview.Styles.TitleColor    // Ярко-жёлтый для фокуса
+
+	// --- Handle Logs window ---
+	if currentFocus == t.logs {
+		t.logs.SetBorderColor(focusedColor)
+	} else {
+		t.logs.SetBorderColor(unfocusedColor)
+	}
+
+	// --- Handle Chat window ---
+	if currentFocus == t.output {
+		t.output.SetBorderColor(focusedColor)
+	} else {
+		t.output.SetBorderColor(unfocusedColor)
+	}
+
+	// --- Handle Input panel ---
+	if currentFocus == t.input || currentFocus == t.chatInput {
+		t.bottomFlex.SetBorderColor(focusedColor)
+	} else {
+		t.bottomFlex.SetBorderColor(unfocusedColor)
+	}
 }

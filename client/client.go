@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/mmcloughlin/geohash"
 	"github.com/nbd-wtf/go-nostr"
 )
@@ -30,6 +31,7 @@ type DisplayEvent struct {
 	PubKey    string
 	RelayURL  string
 	ID        string
+	Chat      string
 }
 
 // ManagedRelay wraps a standard nostr.Relay object to include
@@ -49,9 +51,8 @@ type Client struct {
 	relays   []*ManagedRelay
 	relaysMu sync.Mutex // relaysMu protects the relays slice from concurrent access.
 
-	// seenEvents tracks the IDs of events that have already been processed to prevent duplicates.
-	seenEvents map[string]bool
-	seenMu     sync.Mutex // seenMu protects the seenEvents map.
+	seenCache   *lru.Cache[string, bool] // Thread-safe LRU cache.
+	seenCacheMu sync.Mutex               // Protects the check-then-add logic for seenCache.
 
 	// failures tracks the number of consecutive failures for each relay URL.
 	failures   map[string]int
@@ -80,6 +81,13 @@ func New(actions <-chan UserAction, events chan<- DisplayEvent) (*Client, error)
 	}
 	n := npubToTokiPona(pk)
 
+	// LRU-cache
+	const maxCacheSize = 50000
+	cache, err := lru.New[string, bool](maxCacheSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create LRU cache: %w", err)
+	}
+
 	return &Client{
 		sk:          sk,
 		pk:          pk,
@@ -87,7 +95,7 @@ func New(actions <-chan UserAction, events chan<- DisplayEvent) (*Client, error)
 		chat:        "21m", // Default chat
 		actionsChan: actions,
 		eventsChan:  events,
-		seenEvents:  make(map[string]bool),
+		seenCache:   cache,
 		failures:    make(map[string]int),
 	}, nil
 }
@@ -251,10 +259,14 @@ func (c *Client) manageRelay(ctx context.Context, url string) {
 			c.relays = append(c.relays, managed)
 			c.relaysMu.Unlock()
 
+			subscriptionTime := nostr.Now()
+
 			filter := nostr.Filter{
 				Kinds: []int{c.chatKind},
 				Tags:  nostr.TagMap{c.chatTag: []string{c.chat}},
+				Since: &subscriptionTime,
 			}
+
 			sub, err := r.Subscribe(ctx, []nostr.Filter{filter})
 			if err != nil {
 				c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Error subscribing to %s: %v", url, err)}
@@ -304,14 +316,13 @@ func (c *Client) manageRelay(ctx context.Context, url string) {
 						break // Break from the inner loop to trigger reconnection in the outer loop.
 					}
 
-					// Deduplicate events.
-					c.seenMu.Lock()
-					if c.seenEvents[ev.ID] {
-						c.seenMu.Unlock()
+					c.seenCacheMu.Lock()
+					if c.seenCache.Contains(ev.ID) {
+						c.seenCacheMu.Unlock()
 						continue
 					}
-					c.seenEvents[ev.ID] = true
-					c.seenMu.Unlock()
+					c.seenCache.Add(ev.ID, true)
+					c.seenCacheMu.Unlock()
 
 					// Extract nickname or generate one.
 					nValue := ev.Tags.Find("n")
@@ -332,6 +343,7 @@ func (c *Client) manageRelay(ctx context.Context, url string) {
 						PubKey:    ev.PubKey[:4],
 						Content:   ev.Content,
 						ID:        ev.ID[:4],
+						Chat:      c.chat,
 						RelayURL:  url,
 					}
 				}
@@ -398,7 +410,12 @@ func npubToTokiPona(npub string) string {
 	idx2 := int(hash[1]) % len(tokiPonaNouns)
 	idx3 := int(hash[2]) % len(tokiPonaNouns)
 
-	return fmt.Sprintf("%s%s%s", tokiPonaNouns[idx1], tokiPonaNouns[idx2], tokiPonaNouns[idx3])
+	return fmt.Sprintf(
+		"%s-%s-%s",
+		tokiPonaNouns[idx1],
+		tokiPonaNouns[idx2],
+		tokiPonaNouns[idx3],
+	)
 }
 
 // tokiPonaNouns is a list of nouns from the Toki Pona language, used for name generation.
