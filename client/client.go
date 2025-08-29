@@ -343,7 +343,7 @@ func (c *Client) manageRelay(ctx context.Context, url string) {
 						PubKey:    ev.PubKey[:4],
 						Content:   ev.Content,
 						ID:        ev.ID[:4],
-						Chat:      c.chat,
+						Chat:      ev.Tags.Find(c.chatTag)[1],
 						RelayURL:  url,
 					}
 				}
