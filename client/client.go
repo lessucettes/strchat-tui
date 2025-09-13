@@ -142,7 +142,7 @@ func (c *Client) Run() {
 	}
 
 	if !identitySet {
-		log.Println("No views found on startup, generating initial ephemeral identity.")
+		log.Println("No chat/group found on startup, generating initial ephemeral identity.")
 		c.sk = nostr.GeneratePrivateKey()
 		c.pk, _ = nostr.GetPublicKey(c.sk)
 		if c.config.Nick != "" {
@@ -372,7 +372,7 @@ func (c *Client) setPoW(difficultyStr string) {
 
 	activeView := c.getActiveView()
 	if activeView == nil {
-		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "Cannot set PoW: no active view."}
+		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "Cannot set PoW: no active chat/group."}
 		return
 	}
 
@@ -428,9 +428,9 @@ func (c *Client) getActiveChat() {
 	activeView := c.getActiveView()
 	var content string
 	if activeView != nil {
-		content = fmt.Sprintf("Current active view is: %s", activeView.Name)
+		content = fmt.Sprintf("Current active chat/group is: %s", activeView.Name)
 	} else {
-		content = "There is no active view."
+		content = "There is no active chat/group."
 	}
 	c.eventsChan <- DisplayEvent{Type: "INFO", Content: content}
 }
@@ -482,7 +482,7 @@ func (c *Client) setActiveView(name string) {
 	}
 
 	if !viewExists {
-		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("View '%s' not found.", name)}
+		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Chat or group '%s' not found.", name)}
 		return
 	}
 
@@ -576,7 +576,7 @@ func (c *Client) updateAllSubscriptions() {
 		return
 	}
 
-	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Updating subscriptions for active view..."}
+	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Updating subscriptions for active chat/group..."}
 
 	desiredRelayToChats := make(map[string][]string)
 	for chat := range activeChats {
@@ -896,7 +896,7 @@ func (c *Client) publishMessage(message string) {
 	} else {
 		activeView := c.getActiveView()
 		if activeView == nil {
-			c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "No active view to send message to."}
+			c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "No active chat/group to send message to."}
 			return
 		}
 		if activeView.IsGroup {
@@ -935,7 +935,7 @@ func (c *Client) publishMessage(message string) {
 
 	activeView := c.getActiveView()
 	if activeView == nil {
-		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "Cannot determine PoW: No active view."}
+		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "Cannot determine PoW: No active chat/group."}
 		return
 	}
 	requiredPoW := activeView.PoW
@@ -1244,13 +1244,13 @@ var tokiPonaNouns = []string{
 }
 
 func (c *Client) getHelp() {
-	helpText := "COMMANDS:[-]\n" +
-		"[blue]*[-] /join <chat1> [chat2]... - Joins one or more chat channels. (Alias: /j)\n" +
-		"[blue]*[-] /set [name|names...] - Without args: shows active chat. With one name: activates a view. With multiple names: creates a group. (Alias: /s)\n" +
+	helpText := "COMMANDS:\n" +
+		"[blue]*[-] /join <chat1> [chat2]... - Joins one or more chats. (Alias: /j)\n" +
+		"[blue]*[-] /set [name|names...] - Without args: shows active chat. With one name: activates a chat/group. With multiple names: creates a group. (Alias: /s)\n" +
 		"[blue]*[-] /list - Lists all your chats and groups. (Alias: /l)\n" +
 		"[blue]*[-] /nick [new_nick] - Sets or clears your nickname. (Alias: /n)\n" +
-		"[blue]*[-] /pow [number] - Sets Proof-of-Work difficulty for the active view. 0 to disable. (Alias: /p)\n" +
-		"[blue]*[-] /del [name] - Deletes a chat/group. If no name, deletes the active view. (Alias: /d)\n" +
+		"[blue]*[-] /pow [number] - Sets Proof-of-Work difficulty for the active chat/group. 0 to disable. (Alias: /p)\n" +
+		"[blue]*[-] /del [name] - Deletes a chat/group. If no name, deletes the active chat/group. (Alias: /d)\n" +
 		"[blue]*[-] /quit - Exits the application. (Alias: /q)"
 
 	c.eventsChan <- DisplayEvent{Type: "INFO", Content: helpText}
