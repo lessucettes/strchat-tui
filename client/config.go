@@ -20,6 +20,7 @@ type View struct {
 // Config is the main structure of the configuration file.
 type Config struct {
 	PrivateKey     string `json:"private_key"`
+	Nick           string `json:"nick,omitempty"`
 	Views          []View `json:"views"`
 	ActiveViewName string `json:"active_view_name"`
 

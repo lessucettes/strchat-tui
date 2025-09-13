@@ -63,6 +63,7 @@ type DisplayEvent struct {
 type StateUpdate struct {
 	Views           []View
 	ActiveViewIndex int
+	Nick            string
 }
 
 type UserContext struct {
@@ -144,7 +145,11 @@ func (c *Client) Run() {
 		log.Println("No views found on startup, generating initial ephemeral identity.")
 		c.sk = nostr.GeneratePrivateKey()
 		c.pk, _ = nostr.GetPublicKey(c.sk)
-		c.n = npubToTokiPona(c.pk)
+		if c.config.Nick != "" {
+			c.n = c.config.Nick
+		} else {
+			c.n = npubToTokiPona(c.pk)
+		}
 		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("No chats joined. Initial identity: %s (%s...)", c.n, c.pk[:4])}
 	}
 
@@ -180,10 +185,20 @@ func (c *Client) handleAction(action UserAction) {
 		c.leaveChat(action.Payload)
 	case "DELETE_GROUP":
 		c.deleteGroup(action.Payload)
+	case "DELETE_VIEW":
+		c.deleteView(action.Payload)
 	case "REQUEST_NICK_COMPLETION":
 		c.handleNickCompletion(action.Payload)
 	case "SET_POW":
 		c.setPoW(action.Payload)
+	case "SET_NICK":
+		c.setNick(action.Payload)
+	case "LIST_CHATS":
+		c.listChats()
+	case "GET_ACTIVE_CHAT":
+		c.getActiveChat()
+	case "GET_HELP":
+		c.getHelp()
 	case "QUIT":
 		c.shutdown()
 	}
@@ -311,6 +326,38 @@ func (c *Client) deleteGroup(groupName string) {
 	c.updateAllSubscriptions()
 }
 
+func (c *Client) deleteView(viewName string) {
+	if viewName == "" {
+		activeView := c.getActiveView()
+		if activeView == nil {
+			c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "Cannot delete: there is no active chat."}
+			return
+		}
+		viewName = activeView.Name
+	}
+
+	var viewToDelete *View
+	for i := range c.config.Views {
+		if c.config.Views[i].Name == viewName {
+			viewToDelete = &c.config.Views[i]
+			break
+		}
+	}
+
+	if viewToDelete == nil {
+		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Chat or group '%s' not found.", viewName)}
+		return
+	}
+
+	if viewToDelete.IsGroup {
+		c.deleteGroup(viewName)
+		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Group '%s' deleted.", viewName)}
+	} else {
+		c.leaveChat(viewName)
+		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Left chat '%s'.", viewName)}
+	}
+}
+
 func (c *Client) setPoW(difficultyStr string) {
 	difficulty, err := strconv.Atoi(strings.TrimSpace(difficultyStr))
 	if err != nil {
@@ -344,6 +391,48 @@ func (c *Client) setPoW(difficultyStr string) {
 	} else {
 		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("PoW disabled for %s.", activeView.Name)}
 	}
+}
+
+func (c *Client) setNick(nick string) {
+	c.config.Nick = strings.TrimSpace(nick)
+	if c.config.Nick != "" {
+		c.n = c.config.Nick
+		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Nick set to: %s", c.n)}
+	} else {
+		c.n = npubToTokiPona(c.pk)
+		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Nick has been cleared."}
+	}
+	c.saveConfig()
+	c.sendStateUpdate()
+}
+
+func (c *Client) listChats() {
+	if len(c.config.Views) == 0 {
+		c.eventsChan <- DisplayEvent{Type: "INFO", Content: "You are not in any chats. Use /join <chat_name> to join one."}
+		return
+	}
+
+	var builder strings.Builder
+	builder.WriteString("Available chats and groups:\n")
+	for _, view := range c.config.Views {
+		if view.IsGroup {
+			builder.WriteString(fmt.Sprintf(" - %s (Group)\n", view.Name))
+		} else {
+			builder.WriteString(fmt.Sprintf(" - %s\n", view.Name))
+		}
+	}
+	c.eventsChan <- DisplayEvent{Type: "INFO", Content: builder.String()}
+}
+
+func (c *Client) getActiveChat() {
+	activeView := c.getActiveView()
+	var content string
+	if activeView != nil {
+		content = fmt.Sprintf("Current active view is: %s", activeView.Name)
+	} else {
+		content = "There is no active view."
+	}
+	c.eventsChan <- DisplayEvent{Type: "INFO", Content: content}
 }
 
 func (c *Client) handleNickCompletion(prefix string) {
@@ -406,7 +495,11 @@ func (c *Client) setActiveView(name string) {
 
 	c.sk = newSk
 	c.pk = newPk
-	c.n = npubToTokiPona(newPk)
+	if c.config.Nick != "" {
+		c.n = c.config.Nick
+	} else {
+		c.n = npubToTokiPona(newPk)
+	}
 
 	c.config.ActiveViewName = name
 	c.saveConfig()
@@ -431,6 +524,7 @@ func (c *Client) sendStateUpdate() {
 	state := StateUpdate{
 		Views:           c.config.Views,
 		ActiveViewIndex: activeIdx,
+		Nick:            c.n,
 	}
 	c.eventsChan <- DisplayEvent{Type: "STATE_UPDATE", Payload: state}
 }
@@ -1147,4 +1241,17 @@ var tokiPonaNouns = []string{
 	"pipi", "poki", "pona", "selo", "sewi", "sijelo", "sike", "sitelen", "sona", "soweli",
 	"suli", "suno", "supa", "suwi", "telo", "tenpo", "toki", "tomo", "unpa", "uta",
 	"utala", "waso", "wawa", "weka", "wile",
+}
+
+func (c *Client) getHelp() {
+	helpText := "COMMANDS:[-]\n" +
+		"[blue]*[-] /join <chat1> [chat2]... - Joins one or more chat channels. (Alias: /j)\n" +
+		"[blue]*[-] /set [name|names...] - Without args: shows active chat. With one name: activates a view. With multiple names: creates a group. (Alias: /s)\n" +
+		"[blue]*[-] /list - Lists all your chats and groups. (Alias: /l)\n" +
+		"[blue]*[-] /nick [new_nick] - Sets or clears your nickname. (Alias: /n)\n" +
+		"[blue]*[-] /pow [number] - Sets Proof-of-Work difficulty for the active view. 0 to disable. (Alias: /p)\n" +
+		"[blue]*[-] /del [name] - Deletes a chat/group. If no name, deletes the active view. (Alias: /d)\n" +
+		"[blue]*[-] /quit - Exits the application. (Alias: /q)"
+
+	c.eventsChan <- DisplayEvent{Type: "INFO", Content: helpText}
 }

@@ -34,9 +34,9 @@ type TUI struct {
 	selectedForGroup    map[string]bool
 	activeViewIndex     int
 	completionEntries   []string
-
-	recentRecipients []string
-	rrIdx            int
+	nick                string
+	recentRecipients    []string
+	rrIdx               int
 }
 
 // New creates and initializes the entire TUI application.
@@ -57,7 +57,7 @@ func New(actions chan<- client.UserAction, events <-chan client.DisplayEvent) *T
 
 	t.setupViews()
 	t.setupHandlers()
-
+	t.updateInputLabel()
 	t.app.SetRoot(t.mainFlex, true).SetFocus(t.input)
 	t.updateFocusBorders()
 	t.updateHints()
@@ -106,7 +106,7 @@ func (t *TUI) setupViews() {
 	t.output.SetBorder(true).SetTitle("Messages (Alt+O)").SetTitleAlign(tview.AlignLeft)
 
 	t.input = tview.NewInputField().
-		SetLabel("> ").
+		//		SetLabel("> ").
 		SetLabelStyle(tcell.StyleDefault.Foreground(tcell.ColorLimeGreen)).
 		SetFieldBackgroundColor(tcell.NewRGBColor(0, 40, 0)).
 		SetFieldTextColor(tcell.ColorLime)
@@ -204,12 +204,31 @@ func (t *TUI) setupHandlers() {
 				if payload != "" {
 					t.actionsChan <- client.UserAction{Type: "JOIN_CHATS", Payload: payload}
 				}
-			case "/pow":
+			case "/pow", "/p":
 				if payload != "" {
 					t.actionsChan <- client.UserAction{Type: "SET_POW", Payload: payload}
 				} else {
 					t.actionsChan <- client.UserAction{Type: "SET_POW", Payload: "0"}
 				}
+			case "/list", "/l":
+				t.actionsChan <- client.UserAction{Type: "LIST_CHATS"}
+			case "/set", "/s":
+				args := strings.Fields(payload)
+				switch len(args) {
+				case 0:
+					t.actionsChan <- client.UserAction{Type: "GET_ACTIVE_CHAT"}
+				case 1:
+					t.actionsChan <- client.UserAction{Type: "ACTIVATE_VIEW", Payload: args[0]}
+				default:
+					groupMembers := strings.Join(args, ",")
+					t.actionsChan <- client.UserAction{Type: "CREATE_GROUP", Payload: groupMembers}
+				}
+			case "/nick", "/n":
+				t.actionsChan <- client.UserAction{Type: "SET_NICK", Payload: payload}
+			case "/del", "/d":
+				t.actionsChan <- client.UserAction{Type: "DELETE_VIEW", Payload: payload}
+			case "/help", "/h":
+				t.actionsChan <- client.UserAction{Type: "GET_HELP"}
 			}
 		} else {
 			t.actionsChan <- client.UserAction{Type: "SEND_MESSAGE", Payload: text}
@@ -525,7 +544,6 @@ func (t *TUI) updateDetailsView() {
 		var builder strings.Builder
 		builder.WriteString("[yellow]Connected Relays:[-]\n")
 
-		// Sort for a stable display order.
 		sort.SliceStable(t.relays, func(i, j int) bool {
 			return t.relays[i].URL < t.relays[j].URL
 		})
@@ -585,6 +603,11 @@ func (t *TUI) listenForEvents(events <-chan client.DisplayEvent) {
 				if !t.outputMaximized {
 					t.output.ScrollToEnd()
 				}
+			case "INFO":
+				fmt.Fprintf(t.output, "[blue]-- %s[-]\n", strings.TrimSpace(event.Content))
+				if !t.outputMaximized {
+					t.output.ScrollToEnd()
+				}
 			case "STATUS", "ERROR":
 				color := "yellow"
 				if event.Type == "ERROR" {
@@ -604,8 +627,10 @@ func (t *TUI) listenForEvents(events <-chan client.DisplayEvent) {
 				}
 				t.views = state.Views
 				t.activeViewIndex = state.ActiveViewIndex
+				t.nick = state.Nick
 				t.updateChatList()
 				t.updateDetailsView()
+				t.updateInputLabel()
 			case "RELAYS_UPDATE":
 				relays, ok := event.Payload.([]client.RelayInfo)
 				if !ok {
@@ -632,6 +657,14 @@ func (t *TUI) listenForEvents(events <-chan client.DisplayEvent) {
 
 func (t *TUI) Run() error {
 	return t.app.Run()
+}
+
+func (t *TUI) updateInputLabel() {
+	if t.nick != "" {
+		t.input.SetLabel(fmt.Sprintf("%s > ", t.nick))
+	} else {
+		t.input.SetLabel("> ")
+	}
 }
 
 func (t *TUI) updateFocusBorders() {
