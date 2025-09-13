@@ -1,27 +1,52 @@
-// package client encapsulates all logic for interacting with the Nostr protocol,
-// including managing relay connections, handling subscriptions, and publishing events.
+// client/client.go
 package client
 
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"log"
+	"math/bits"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/mmcloughlin/geohash"
 	"github.com/nbd-wtf/go-nostr"
 )
 
-// UserAction represents an action initiated by the user in the TUI.
+const (
+	DefaultRelayCount    = 5
+	GeochatKind          = 20000
+	NamedChatKind        = 23333
+	SeenCacheSize        = 8192
+	UserContextCacheSize = 4096
+	MaxMsgLen            = 2000
+)
+
+var DefaultNamedChatRelays = []string{
+	"wss://relay.damus.io",
+	"wss://relay.primal.net",
+	"wss://nos.lol",
+	"wss://adre.su",
+}
+
 type UserAction struct {
 	Type    string
 	Payload string
 }
 
-// DisplayEvent represents a piece of information that should be rendered by the TUI.
+// RelayInfo holds status information about a single relay connection.
+type RelayInfo struct {
+	URL     string
+	Latency time.Duration
+}
+
 type DisplayEvent struct {
 	Type      string
 	Timestamp string
@@ -32,400 +57,1094 @@ type DisplayEvent struct {
 	RelayURL  string
 	ID        string
 	Chat      string
+	Payload   any
 }
 
-// ManagedRelay wraps a standard nostr.Relay object to include
-// custom metadata, such as connection latency.
+type StateUpdate struct {
+	Views           []View
+	ActiveViewIndex int
+}
+
+type UserContext struct {
+	Nick    string
+	Chat    string
+	ShortPK string
+}
+
 type ManagedRelay struct {
-	Relay   *nostr.Relay
-	Latency time.Duration
+	URL          string
+	Relay        *nostr.Relay
+	Latency      time.Duration
+	subscription *nostr.Subscription
+	mu           sync.Mutex
 }
 
-// Client is the main struct that manages the state of the Nostr client.
 type Client struct {
-	sk string // private key
-	pk string // public key
-	n  string // toki pona nickname
+	sk string
+	pk string
+	n  string
 
-	// relays holds the pool of currently active relay connections.
-	relays   []*ManagedRelay
-	relaysMu sync.Mutex // relaysMu protects the relays slice from concurrent access.
+	config *Config
 
-	seenCache   *lru.Cache[string, bool] // Thread-safe LRU cache.
-	seenCacheMu sync.Mutex               // Protects the check-then-add logic for seenCache.
+	relays      map[string]*ManagedRelay
+	relaysMu    sync.Mutex
+	seenCache   *lru.Cache[string, bool]
+	seenCacheMu sync.Mutex
+	userContext *lru.Cache[string, UserContext]
 
-	// failures tracks the number of consecutive failures for each relay URL.
-	failures   map[string]int
-	failuresMu sync.Mutex // failuresMu protects the failures map.
-
-	// subCtx and cancelSub manage the lifecycle of the current subscription.
-	subCtx    context.Context
-	cancelSub context.CancelFunc
-
-	// Channels for communicating with the TUI.
 	actionsChan <-chan UserAction
 	eventsChan  chan<- DisplayEvent
 
-	// Current chat state.
-	chat     string
-	chatKind int
-	chatTag  string
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
 }
 
-// New creates and initializes a new Client instance.
 func New(actions <-chan UserAction, events chan<- DisplayEvent) (*Client, error) {
-	sk := nostr.GeneratePrivateKey()
-	pk, err := nostr.GetPublicKey(sk)
+	cfg, err := LoadConfig()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get public key: %w", err)
+		return nil, fmt.Errorf("failed to load configuration: %w", err)
 	}
-	n := npubToTokiPona(pk)
 
-	// LRU-cache
-	const maxCacheSize = 50000
-	cache, err := lru.New[string, bool](maxCacheSize)
+	seenCache, err := lru.New[string, bool](SeenCacheSize)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create LRU cache: %w", err)
+		return nil, fmt.Errorf("failed to create seen cache: %w", err)
 	}
+
+	userContextCache, err := lru.New[string, UserContext](UserContextCacheSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create user context cache: %w", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Client{
-		sk:          sk,
-		pk:          pk,
-		n:           n,
-		chat:        "21m", // Default chat
+		config:      cfg,
 		actionsChan: actions,
 		eventsChan:  events,
-		seenCache:   cache,
-		failures:    make(map[string]int),
+		relays:      make(map[string]*ManagedRelay),
+		seenCache:   seenCache,
+		userContext: userContextCache,
+		ctx:         ctx,
+		cancel:      cancel,
 	}, nil
 }
 
-// Run starts the client's main loop, listening for and processing actions from the TUI.
 func (c *Client) Run() {
-	c.updateSubscription() // Initial subscription
-
-	for action := range c.actionsChan {
-		switch action.Type {
-		case "SEND_MESSAGE":
-			c.publishMessage(action.Payload)
-		case "SWITCH_CHAT":
-			c.chat = action.Payload
-			c.updateSubscription()
-		case "QUIT":
-			if c.cancelSub != nil {
-				c.cancelSub()
-			}
-			close(c.eventsChan)
-			return
-		}
-	}
-}
-
-// updateSubscription handles the logic of switching to a new chat room.
-// It cancels the previous subscription, determines the new chat parameters,
-// finds the appropriate relays, and launches new manageRelay goroutines.
-func (c *Client) updateSubscription() {
-	if c.cancelSub != nil {
-		// This is not the first run, so we are switching chats.
-		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Switching chat to '%s'. Disconnecting...", c.chat)}
-		c.cancelSub()
-	} else {
-		// This is the very first run.
-		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Connecting to chat '%s'...", c.chat)}
+	identitySet := false
+	if c.config.ActiveViewName != "" {
+		c.setActiveView(c.config.ActiveViewName)
+		identitySet = true
+	} else if len(c.config.Views) > 0 {
+		c.setActiveView(c.config.Views[0].Name)
+		identitySet = true
 	}
 
-	c.relaysMu.Lock()
-	c.relays = nil
-	c.relaysMu.Unlock()
-
-	c.subCtx, c.cancelSub = context.WithCancel(context.Background())
-
-	var relayURLs []string
-	var err error
-
-	// Check if the chat name is a valid geohash.
-	// If so, use geo-chat kinds and find the closest relays.
-	// Otherwise, treat it as a standard global chat.
-	if err = geohash.Validate(c.chat); err != nil {
-		c.chatKind = 23333
-		c.chatTag = "d"
-		relayURLs = []string{"wss://relay.primal.net", "wss://relay.damus.io", "wss://offchain.pub", "wss://nos.lol", "wss://adre.su"}
-	} else {
-		c.chatKind = 20000
-		c.chatTag = "g"
-		relayURLs, err = ClosestRelays(c.chat, 5)
-		if err != nil || len(relayURLs) == 0 {
-			// If geo-relays fail, fall back to a default list to ensure connectivity.
-			c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Failed to get geo-relays: %v. Using defaults.", err)}
-			relayURLs = []string{"wss://relay.damus.io", "wss://relay.primal.net", "wss://nos.lol"}
-		}
+	if !identitySet {
+		log.Println("No views found on startup, generating initial ephemeral identity.")
+		c.sk = nostr.GeneratePrivateKey()
+		c.pk, _ = nostr.GetPublicKey(c.sk)
+		c.n = npubToTokiPona(c.pk)
+		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("No chats joined. Initial identity: %s (%s...)", c.n, c.pk[:4])}
 	}
 
-	for _, url := range relayURLs {
-		go c.manageRelay(c.subCtx, url)
-	}
-}
-
-// publishMessage creates, signs, and publishes a new event to the fastest connected relays.
-func (c *Client) publishMessage(message string) {
-	ev := nostr.Event{
-		Kind:      c.chatKind,
-		CreatedAt: nostr.Timestamp(time.Now().Unix()),
-		Tags:      nostr.Tags{{c.chatTag, c.chat}, {"n", c.n}},
-		Content:   message,
-		PubKey:    c.pk,
-	}
-
-	_ = ev.Sign(c.sk)
-
-	pubCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	c.relaysMu.Lock()
-	currentRelays := make([]*ManagedRelay, len(c.relays))
-	copy(currentRelays, c.relays)
-	c.relaysMu.Unlock()
-
-	// Sort relays by latency to publish to the fastest ones first.
-	sort.Slice(currentRelays, func(i, j int) bool {
-		return currentRelays[i].Latency < currentRelays[j].Latency
-	})
-
-	numToPublish := 5
-	if len(currentRelays) < numToPublish {
-		numToPublish = len(currentRelays)
-	}
-
-	fastestRelays := currentRelays[:numToPublish]
-
-	if len(fastestRelays) == 0 {
-		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "No connected relays to publish to"}
-		return
-	}
-
-	success := false
-	for _, managed := range fastestRelays {
-		if err := managed.Relay.Publish(pubCtx, ev); err != nil {
-			c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Failed to publish to %s: %v", managed.Relay.URL, err)}
-			continue
-		}
-		statusMsg := fmt.Sprintf("Published event (id: %s) to %s", ev.ID[:4], managed.Relay.URL)
-		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: statusMsg}
-		success = true
-	}
-
-	if !success {
-		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "Failed to send message to any of the fastest relays"}
-	}
-}
-
-// manageRelay is a long-running goroutine that manages the connection and subscription
-// to a single relay for the duration of the parent context.
-func (c *Client) manageRelay(ctx context.Context, url string) {
-	const maxRetries = 3
-	const retryDelay = 5 * time.Second
-	const connectTimeout = 30 * time.Second
-	const failureThreshold = 3
+	c.sendStateUpdate()
+	c.updateAllSubscriptions()
 
 	for {
 		select {
-		case <-ctx.Done():
-			// The parent context was cancelled (e.g., switching chat), so this goroutine should exit.
+		case action, ok := <-c.actionsChan:
+			if !ok {
+				c.shutdown()
+				return
+			}
+			c.handleAction(action)
+		case <-c.ctx.Done():
 			return
-		default:
-			connectCtx, connectCancel := context.WithTimeout(ctx, connectTimeout)
-			r, latency, err := tryConnect(connectCtx, url, maxRetries)
-			connectCancel()
+		}
+	}
+}
 
-			if err != nil {
-				c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Failed to connect to %s: %v", url, err)}
-				time.Sleep(retryDelay)
-				continue
+func (c *Client) handleAction(action UserAction) {
+	switch action.Type {
+	case "SEND_MESSAGE":
+		go c.publishMessage(action.Payload)
+	case "ACTIVATE_VIEW":
+		c.setActiveView(action.Payload)
+		c.updateAllSubscriptions()
+	case "CREATE_GROUP":
+		c.createGroup(action.Payload)
+	case "JOIN_CHATS":
+		c.joinChats(action.Payload)
+	case "LEAVE_CHAT":
+		c.leaveChat(action.Payload)
+	case "DELETE_GROUP":
+		c.deleteGroup(action.Payload)
+	case "REQUEST_NICK_COMPLETION":
+		c.handleNickCompletion(action.Payload)
+	case "SET_POW":
+		c.setPoW(action.Payload)
+	case "QUIT":
+		c.shutdown()
+	}
+}
+
+// --- State Management ---
+
+func (c *Client) createGroup(payload string) {
+	members := strings.Split(payload, ",")
+	if len(members) < 2 {
+		return
+	}
+	for i := range members {
+		members[i] = strings.TrimSpace(members[i])
+	}
+	sort.Strings(members)
+
+	hash := sha256.Sum256([]byte(strings.Join(members, "")))
+	id := hex.EncodeToString(hash[:])[:6]
+	name := fmt.Sprintf("Group-%s", id)
+
+	for _, view := range c.config.Views {
+		if view.Name == name {
+			c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "Group with these chats already exists"}
+			return
+		}
+	}
+
+	newView := View{Name: name, IsGroup: true, Children: members}
+	c.config.Views = append(c.config.Views, newView)
+	c.config.ActiveViewName = name
+	c.saveConfig()
+
+	c.sendStateUpdate()
+	c.updateAllSubscriptions()
+}
+
+func (c *Client) joinChats(payload string) {
+	chatNames := strings.Fields(payload)
+	if len(chatNames) == 0 {
+		return
+	}
+
+	var firstNewChat string
+	addedCount := 0
+
+outer:
+	for _, name := range chatNames {
+		for _, view := range c.config.Views {
+			if !view.IsGroup && view.Name == name {
+				continue outer
 			}
+		}
+		newView := View{Name: name, IsGroup: false}
+		c.config.Views = append(c.config.Views, newView)
+		if firstNewChat == "" {
+			firstNewChat = name
+		}
+		addedCount++
+	}
 
-			// On a successful (re)connection, reset the failure counter for this relay.
-			c.failuresMu.Lock()
-			c.failures[url] = 0
-			c.failuresMu.Unlock()
+	if addedCount > 0 {
+		c.config.ActiveViewName = firstNewChat
+		c.saveConfig()
+		c.sendStateUpdate()
+		c.updateAllSubscriptions()
+		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Joined %d new chat(s). Active: %s", addedCount, firstNewChat)}
+	} else {
+		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Already in all specified chats."}
+	}
+}
 
-			managed := &ManagedRelay{
-				Relay:   r,
-				Latency: latency,
+func (c *Client) leaveChat(chatName string) {
+	var newViews []View
+	for _, view := range c.config.Views {
+		if !view.IsGroup && view.Name == chatName {
+			continue
+		}
+		newViews = append(newViews, view)
+	}
+
+	finalViews := make([]View, 0, len(newViews))
+	for _, view := range newViews {
+		if !view.IsGroup {
+			finalViews = append(finalViews, view)
+			continue
+		}
+
+		var newChildren []string
+		for _, child := range view.Children {
+			if child != chatName {
+				newChildren = append(newChildren, child)
 			}
-			statusMsg := fmt.Sprintf("Connected to relay: %s (%dms)", url, latency.Milliseconds())
-			c.eventsChan <- DisplayEvent{Type: "STATUS", Content: statusMsg}
+		}
 
-			c.relaysMu.Lock()
-			c.relays = append(c.relays, managed)
-			c.relaysMu.Unlock()
+		if len(newChildren) < 2 {
+			continue
+		}
+		view.Children = newChildren
+		finalViews = append(finalViews, view)
+	}
 
-			subscriptionTime := nostr.Now()
+	c.config.Views = finalViews
+	if c.config.ActiveViewName == chatName {
+		c.config.ActiveViewName = ""
+	}
+	c.saveConfig()
+	c.sendStateUpdate()
+	c.updateAllSubscriptions()
+}
 
-			filter := nostr.Filter{
-				Kinds: []int{c.chatKind},
-				Tags:  nostr.TagMap{c.chatTag: []string{c.chat}},
-				Since: &subscriptionTime,
-			}
+func (c *Client) deleteGroup(groupName string) {
+	var newViews []View
+	for _, view := range c.config.Views {
+		if view.Name != groupName {
+			newViews = append(newViews, view)
+		}
+	}
+	c.config.Views = newViews
+	if c.config.ActiveViewName == groupName {
+		c.config.ActiveViewName = ""
+	}
+	c.saveConfig()
+	c.sendStateUpdate()
+	c.updateAllSubscriptions()
+}
 
-			sub, err := r.Subscribe(ctx, []nostr.Filter{filter})
-			if err != nil {
-				c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Error subscribing to %s: %v", url, err)}
-				r.Close()
-				c.relaysMu.Lock()
-				c.relays = removeRelay(c.relays, r)
-				c.relaysMu.Unlock()
-				time.Sleep(retryDelay)
-				continue
-			}
+func (c *Client) setPoW(difficultyStr string) {
+	difficulty, err := strconv.Atoi(strings.TrimSpace(difficultyStr))
+	if err != nil {
+		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Invalid PoW difficulty: '%s'. Must be a number.", difficultyStr)}
+		return
+	}
 
-			// Inner loop for processing events from the subscription.
-			for {
-				select {
-				case <-ctx.Done():
-					// The parent context was cancelled. Clean up and exit.
-					r.Close()
-					c.relaysMu.Lock()
-					c.relays = removeRelay(c.relays, r)
-					c.relaysMu.Unlock()
-					return
-				case ev, ok := <-sub.Events:
-					if !ok {
-						// The event channel was closed by the library, likely due to a
-						// connection drop or a problematic event (poison pill).
-						c.failuresMu.Lock()
-						c.failures[url]++
-						failureCount := c.failures[url]
-						c.failuresMu.Unlock()
+	if difficulty < 0 {
+		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "PoW difficulty cannot be negative."}
+		return
+	}
 
-						// Implement a circuit breaker: if the relay fails too many times, abandon it.
-						if failureCount >= failureThreshold {
-							c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Relay %s is unstable, abandoning connection", url)}
-							r.Close()
-							c.relaysMu.Lock()
-							c.relays = removeRelay(c.relays, r)
-							c.relaysMu.Unlock()
-							return // Exit the goroutine permanently.
-						}
+	activeView := c.getActiveView()
+	if activeView == nil {
+		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "Cannot set PoW: no active view."}
+		return
+	}
 
-						c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Event channel closed for %s, reconnecting (attempt %d/%d)", url, failureCount, failureThreshold)}
-						r.Close()
-						c.relaysMu.Lock()
-						c.relays = removeRelay(c.relays, r)
-						c.relaysMu.Unlock()
-						time.Sleep(retryDelay)
-						break // Break from the inner loop to trigger reconnection in the outer loop.
-					}
+	for i := range c.config.Views {
+		if c.config.Views[i].Name == activeView.Name {
+			c.config.Views[i].PoW = difficulty
+			break
+		}
+	}
 
-					c.seenCacheMu.Lock()
-					if c.seenCache.Contains(ev.ID) {
-						c.seenCacheMu.Unlock()
-						continue
-					}
-					c.seenCache.Add(ev.ID, true)
-					c.seenCacheMu.Unlock()
+	c.saveConfig()
+	c.sendStateUpdate()
 
-					// Extract nickname or generate one.
-					nValue := ev.Tags.Find("n")
-					nick := ""
-					if len(nValue) > 1 {
-						nick = nValue[1]
-					} else {
-						nick = npubToTokiPona(ev.PubKey)
-					}
+	if difficulty > 0 {
+		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("PoW difficulty for %s set to %d.", activeView.Name, difficulty)}
+	} else {
+		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("PoW disabled for %s.", activeView.Name)}
+	}
+}
 
-					timestamp := time.Unix(int64(ev.CreatedAt), 0).Format("15:04:05")
-					color := pubkeyToColor(ev.PubKey)
-					c.eventsChan <- DisplayEvent{
-						Type:      "NEW_MESSAGE",
-						Timestamp: timestamp,
-						Nick:      nick,
-						Color:     color,
-						PubKey:    ev.PubKey[:4],
-						Content:   ev.Content,
-						ID:        ev.ID[:4],
-						Chat:      ev.Tags.Find(c.chatTag)[1],
-						RelayURL:  url,
-					}
+func (c *Client) handleNickCompletion(prefix string) {
+	prefix = strings.TrimPrefix(prefix, "@")
+	var entries []string
+
+	activeView := c.getActiveView()
+	if activeView == nil {
+		c.eventsChan <- DisplayEvent{Type: "NICK_COMPLETION_RESULT", Payload: []string{}}
+		return
+	}
+
+	relevantChats := make(map[string]struct{})
+	if activeView.IsGroup {
+		for _, child := range activeView.Children {
+			relevantChats[child] = struct{}{}
+		}
+	} else {
+		relevantChats[activeView.Name] = struct{}{}
+	}
+
+	for _, key := range c.userContext.Keys() {
+		if value, ok := c.userContext.Get(key); ok {
+			if _, isActiveChat := relevantChats[value.Chat]; isActiveChat {
+				if strings.HasPrefix(value.Nick, prefix) {
+					entries = append(entries, fmt.Sprintf("@%s#%s ", value.Nick, value.ShortPK))
 				}
 			}
 		}
 	}
+
+	sort.Strings(entries)
+	if len(entries) > 10 {
+		entries = entries[:10]
+	}
+
+	c.eventsChan <- DisplayEvent{Type: "NICK_COMPLETION_RESULT", Payload: entries}
 }
 
-// removeRelay safely removes a relay from the slice of managed relays.
-func removeRelay(relays []*ManagedRelay, r *nostr.Relay) []*ManagedRelay {
-	for i, managedRelay := range relays {
-		if managedRelay.Relay == r {
-			return append(relays[:i], relays[i+1:]...)
+func (c *Client) setActiveView(name string) {
+	viewExists := false
+	for _, view := range c.config.Views {
+		if view.Name == name {
+			viewExists = true
+			break
 		}
 	}
-	return relays
+
+	if !viewExists {
+		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("View '%s' not found.", name)}
+		return
+	}
+
+	newSk := nostr.GeneratePrivateKey()
+	newPk, err := nostr.GetPublicKey(newSk)
+	if err != nil {
+		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Failed to generate public key: %v", err)}
+		return
+	}
+
+	c.sk = newSk
+	c.pk = newPk
+	c.n = npubToTokiPona(newPk)
+
+	c.config.ActiveViewName = name
+	c.saveConfig()
+	c.sendStateUpdate()
+
+	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Generated new ephemeral identity for this session: %s (%s...)", c.n, c.pk[:4])}
 }
 
-// tryConnect attempts to connect to a relay URL with a specified number of retries and exponential backoff.
-// It returns the relay connection, the connection latency, and an error if all retries fail.
-func tryConnect(ctx context.Context, url string, retries int) (*nostr.Relay, time.Duration, error) {
-	for i := 0; i < retries; i++ {
-		start := time.Now()
-		r, err := nostr.RelayConnect(ctx, url)
-		latency := time.Since(start)
-
-		if err == nil {
-			return r, latency, nil
+func (c *Client) sendStateUpdate() {
+	activeIdx := -1
+	for i := range c.config.Views {
+		if c.config.Views[i].Name == c.config.ActiveViewName {
+			activeIdx = i
+			break
 		}
-		// Wait before the next retry, but also listen for context cancellation.
+	}
+	if activeIdx == -1 && len(c.config.Views) > 0 {
+		activeIdx = 0
+		c.config.ActiveViewName = c.config.Views[0].Name
+	}
+
+	state := StateUpdate{
+		Views:           c.config.Views,
+		ActiveViewIndex: activeIdx,
+	}
+	c.eventsChan <- DisplayEvent{Type: "STATE_UPDATE", Payload: state}
+}
+
+func (c *Client) sendRelaysUpdate() {
+	c.relaysMu.Lock()
+	defer c.relaysMu.Unlock()
+
+	statuses := make([]RelayInfo, 0, len(c.relays))
+	for _, mr := range c.relays {
+		statuses = append(statuses, RelayInfo{
+			URL:     mr.URL,
+			Latency: mr.Latency,
+		})
+	}
+
+	c.eventsChan <- DisplayEvent{Type: "RELAYS_UPDATE", Payload: statuses}
+}
+
+func (c *Client) saveConfig() {
+	if err := c.config.Save(); err != nil {
+		log.Printf("Error saving config: %v", err)
+		c.eventsChan <- DisplayEvent{
+			Type:    "ERROR",
+			Content: fmt.Sprintf("Failed to save configuration: %v", err),
+		}
+	}
+}
+
+// --- Nostr Logic ---
+
+func (c *Client) updateAllSubscriptions() {
+	activeView := c.getActiveView()
+
+	activeChats := make(map[string]struct{})
+	if activeView != nil {
+		if activeView.IsGroup {
+			for _, child := range activeView.Children {
+				activeChats[child] = struct{}{}
+			}
+		} else if activeView.Name != "" {
+			activeChats[activeView.Name] = struct{}{}
+		}
+	}
+
+	if len(activeChats) == 0 {
+		c.updateRelaySubscriptions(make(map[string][]string))
+		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "No active chat. Disconnected from relays."}
+		return
+	}
+
+	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Updating subscriptions for active view..."}
+
+	desiredRelayToChats := make(map[string][]string)
+	for chat := range activeChats {
+		var relayURLs []string
+		if geohash.Validate(chat) == nil {
+			var err error
+			relayURLs, err = ClosestRelays(chat, DefaultRelayCount)
+			if err != nil || len(relayURLs) == 0 {
+				relayURLs = DefaultNamedChatRelays
+			}
+		} else {
+			relayURLs = DefaultNamedChatRelays
+		}
+		for _, url := range relayURLs {
+			found := false
+			for _, existingChat := range desiredRelayToChats[url] {
+				if existingChat == chat {
+					found = true
+					break
+				}
+			}
+			if !found {
+				desiredRelayToChats[url] = append(desiredRelayToChats[url], chat)
+			}
+		}
+	}
+
+	c.updateRelaySubscriptions(desiredRelayToChats)
+}
+
+func (c *Client) updateRelaySubscriptions(desiredRelays map[string][]string) {
+	c.relaysMu.Lock()
+	currentRelays := make(map[string]*ManagedRelay, len(c.relays))
+	for url, mr := range c.relays {
+		currentRelays[url] = mr
+	}
+	c.relaysMu.Unlock()
+	var wg sync.WaitGroup
+	for url, chats := range desiredRelays {
+		if mr, exists := currentRelays[url]; exists {
+			wg.Add(1)
+			go func(mr *ManagedRelay, chats []string) {
+				defer wg.Done()
+				if _, err := c.replaceSubscription(mr, chats); err != nil {
+					c.eventsChan <- DisplayEvent{
+						Type:    "ERROR",
+						Content: fmt.Sprintf("Resubscribe failed on %s: %v", mr.URL, err),
+					}
+				}
+			}(mr, chats)
+		} else {
+			wg.Add(1)
+			go func(url string, chats []string) {
+				defer wg.Done()
+				c.manageRelayConnection(url, chats)
+			}(url, chats)
+		}
+	}
+	c.relaysMu.Lock()
+	for url, mr := range c.relays {
+		if _, needed := desiredRelays[url]; !needed {
+			log.Printf("Disconnecting from unneeded relay: %s", url)
+			mr.mu.Lock()
+			if mr.subscription != nil {
+				mr.subscription.Unsub()
+				mr.subscription = nil
+			}
+			if mr.Relay != nil {
+				mr.Relay.Close()
+			}
+			mr.mu.Unlock()
+			delete(c.relays, url)
+		}
+	}
+	c.relaysMu.Unlock()
+	wg.Wait()
+	c.sendRelaysUpdate()
+}
+
+func (c *Client) manageRelayConnection(url string, chats []string) {
+	start := time.Now()
+	relay, err := nostr.RelayConnect(c.ctx, url)
+	if err != nil {
+		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Failed to connect to %s: %v", url, err)}
+		return
+	}
+	latency := time.Since(start)
+
+	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Connected to %s (%dms)", url, latency.Milliseconds())}
+
+	mr := &ManagedRelay{
+		URL:     url,
+		Relay:   relay,
+		Latency: latency,
+	}
+
+	c.relaysMu.Lock()
+	if _, exists := c.relays[url]; exists {
+		c.relaysMu.Unlock()
+		relay.Close()
+		return
+	}
+	c.relays[url] = mr
+	c.relaysMu.Unlock()
+	c.sendRelaysUpdate()
+
+	if _, err := c.replaceSubscription(mr, chats); err != nil {
+		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Subscribe failed on %s: %v", url, err)}
+		c.relaysMu.Lock()
+		delete(c.relays, url)
+		c.relaysMu.Unlock()
+		relay.Close()
+		c.sendRelaysUpdate()
+		return
+	}
+
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		c.listenForEvents(mr)
+	}()
+}
+
+func (c *Client) replaceSubscription(mr *ManagedRelay, chats []string) (bool, error) {
+	mr.mu.Lock()
+	oldChats := mrCurrentChatsLocked(mr.subscription)
+	mr.mu.Unlock()
+
+	if sameStringSet(oldChats, chats) {
+		return false, nil
+	}
+
+	now := nostr.Now()
+	filters := make(nostr.Filters, 0, len(chats))
+	for _, ch := range chats {
+		since := now
+		if geohash.Validate(ch) == nil {
+			filters = append(filters, nostr.Filter{
+				Kinds: []int{GeochatKind},
+				Tags:  nostr.TagMap{"g": []string{ch}},
+				Since: &since,
+			})
+		} else {
+			filters = append(filters, nostr.Filter{
+				Kinds: []int{NamedChatKind},
+				Tags:  nostr.TagMap{"d": []string{ch}},
+				Since: &since,
+			})
+		}
+	}
+
+	newSub, err := mr.Relay.Subscribe(c.ctx, filters)
+	if err != nil {
+		return false, fmt.Errorf("subscribe failed: %w", err)
+	}
+
+	mr.mu.Lock()
+	oldSub := mr.subscription
+	mr.subscription = newSub
+	mr.mu.Unlock()
+
+	if oldSub != nil {
+		oldSub.Unsub()
+	}
+	log.Printf("Updated subscription for %s with %d chat(s)", mr.URL, len(chats))
+
+	c.sendRelaysUpdate()
+
+	return true, nil
+}
+
+func (c *Client) listenForEvents(mr *ManagedRelay) {
+	log.Printf("Listener started for relay: %s", mr.URL)
+	defer log.Printf("Listener stopped for relay: %s", mr.URL)
+
+	for {
+		if c.ctx.Err() != nil {
+			return
+		}
+
+		mr.mu.Lock()
+		sub := mr.subscription
+		mr.mu.Unlock()
+
+		if sub == nil {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+
 		select {
-		case <-ctx.Done():
-			return nil, 0, ctx.Err()
-		case <-time.After(time.Second * time.Duration(i+1)):
+		case <-c.ctx.Done():
+			return
+
+		case ev, ok := <-sub.Events:
+			if !ok {
+				log.Printf("Subscription object for %s is closed, will wait for a new one.", mr.URL)
+				mr.mu.Lock()
+				if mr.subscription == sub {
+					mr.subscription = nil
+				}
+				mr.mu.Unlock()
+				continue
+			}
+			if ev == nil {
+				continue
+			}
+			c.processEvent(ev, mr.URL)
 		}
 	}
-	return nil, 0, fmt.Errorf("failed to connect after %d retries", retries)
 }
 
-// pubkeyToColor generates a consistent color from a predefined palette based on the user's public key.
-func pubkeyToColor(pubkey string) string {
-	hackerPalette := []string{
-		"[#00ff00]", // Lime
-		"[#33ccff]", // Cyan
-		"[#ff00ff]", // Magenta
-		"[#ffff00]", // Yellow
-		"[#ff6600]", // Amber
-		"[#5fafd7]", // Light Blue
+func (c *Client) processEvent(ev *nostr.Event, relayURL string) {
+	c.seenCacheMu.Lock()
+	if c.seenCache.Contains(ev.ID) {
+		c.seenCacheMu.Unlock()
+		return
+	}
+	c.seenCache.Add(ev.ID, true)
+	c.seenCacheMu.Unlock()
+
+	var eventChat string
+	if gTag := ev.Tags.Find("g"); len(gTag) > 1 {
+		eventChat = gTag[1]
+	} else if dTag := ev.Tags.Find("d"); len(dTag) > 1 {
+		eventChat = dTag[1]
 	}
 
-	// Use a hash of the pubkey to deterministically pick a color from the palette.
-	hash := sha256.Sum256([]byte(pubkey))
-	colorIndex := int(hash[0]) % len(hackerPalette)
+	if eventChat == "" {
+		return
+	}
 
-	return hackerPalette[colorIndex]
+	activeView := c.getActiveView()
+	if activeView != nil {
+		isRelevantToActiveView := false
+		if activeView.IsGroup {
+			for _, child := range activeView.Children {
+				if child == eventChat {
+					isRelevantToActiveView = true
+					break
+				}
+			}
+		} else {
+			if activeView.Name == eventChat {
+				isRelevantToActiveView = true
+			}
+		}
+
+		if isRelevantToActiveView {
+			requiredPoW := activeView.PoW
+			if !IsPoWValid(ev, requiredPoW) {
+				log.Printf("Dropped event %s from %s for failing PoW check (required: %d)", ev.ID[len(ev.ID)-4:], eventChat, requiredPoW)
+				return // Drop the event.
+			}
+		}
+	}
+
+	nick := npubToTokiPona(ev.PubKey)
+	spk := ev.PubKey[:4]
+	if nickTag := ev.Tags.Find("n"); len(nickTag) > 1 {
+		if s := sanitizeString(nickTag[1]); s != "" {
+			nick = s
+		}
+		spk = ev.PubKey[len(ev.PubKey)-4:]
+	}
+
+	c.userContext.Add(ev.PubKey, UserContext{
+		Nick:    nick,
+		Chat:    eventChat,
+		ShortPK: spk,
+	})
+
+	timestamp := time.Unix(int64(ev.CreatedAt), 0).Format("15:04:05")
+
+	content := ev.Content
+	if len(content) > MaxMsgLen {
+		content = content[:MaxMsgLen] + "…"
+	}
+	content = sanitizeString(content)
+
+	c.eventsChan <- DisplayEvent{
+		Type:      "NEW_MESSAGE",
+		Timestamp: timestamp,
+		Nick:      nick,
+		Color:     pubkeyToColor(ev.PubKey),
+		PubKey:    spk,
+		Content:   content,
+		ID:        ev.ID[len(ev.ID)-4:],
+		Chat:      eventChat,
+		RelayURL:  relayURL,
+	}
 }
 
-// npubToTokiPona generates a memorable, three-word name from a public key using Toki Pona nouns.
+func (c *Client) publishMessage(message string) {
+	message = sanitizeString(message)
+
+	var targetChat string
+	var targetPubKey string
+	if strings.HasPrefix(message, "@") {
+		var matchedReplyTag string
+		for _, pk := range c.userContext.Keys() {
+			if ctx, ok := c.userContext.Get(pk); ok {
+				replyTag := fmt.Sprintf("@%s#%s", ctx.Nick, ctx.ShortPK)
+				if strings.HasPrefix(message, replyTag) {
+					if len(replyTag) > len(matchedReplyTag) {
+						matchedReplyTag = replyTag
+						targetPubKey = pk
+						targetChat = ctx.Chat
+					}
+				}
+			}
+		}
+
+		if targetPubKey == "" {
+			c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "Could not find a known user matching your message prefix."}
+			return
+		}
+	} else {
+		activeView := c.getActiveView()
+		if activeView == nil {
+			c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "No active view to send message to."}
+			return
+		}
+		if activeView.IsGroup {
+			c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "Broadcasting to a group is disabled. Use @nick to send a message."}
+			return
+		}
+		if activeView.Name == "" {
+			c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "The active chat is invalid."}
+			return
+		}
+		targetChat = activeView.Name
+	}
+
+	var kind int
+	var tagKey string
+	var relayURLs []string
+	if geohash.Validate(targetChat) == nil {
+		kind = GeochatKind
+		tagKey = "g"
+		var err error
+		relayURLs, err = ClosestRelays(targetChat, DefaultRelayCount)
+		if err != nil || len(relayURLs) == 0 {
+			c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("No relays found for chat %s", targetChat)}
+			return
+		}
+	} else {
+		kind = NamedChatKind
+		tagKey = "d"
+		relayURLs = DefaultNamedChatRelays
+	}
+
+	tags := nostr.Tags{{tagKey, targetChat}}
+	if targetPubKey != "" {
+		tags = append(tags, nostr.Tag{"p", targetPubKey})
+	}
+
+	activeView := c.getActiveView()
+	if activeView == nil {
+		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "Cannot determine PoW: No active view."}
+		return
+	}
+	requiredPoW := activeView.PoW
+
+	c.relaysMu.Lock()
+	var relaysForPublishing []*ManagedRelay
+	for _, url := range relayURLs {
+		if r, ok := c.relays[url]; ok {
+			relaysForPublishing = append(relaysForPublishing, r)
+		}
+	}
+	c.relaysMu.Unlock()
+
+	if len(relaysForPublishing) == 0 {
+		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Not connected to any suitable relays for chat %s", targetChat)}
+		return
+	}
+
+	ev := c.createEvent(message, kind, tags, requiredPoW)
+	if ev.ID == "" { // PoW was cancelled
+		return
+	}
+
+	c.publish(ev, targetChat, relaysForPublishing)
+}
+
+func (c *Client) publish(ev nostr.Event, targetChat string, relaysForPublishing []*ManagedRelay) {
+	sort.Slice(relaysForPublishing, func(i, j int) bool {
+		return relaysForPublishing[i].Latency < relaysForPublishing[j].Latency
+	})
+
+	var wg sync.WaitGroup
+	successCount := 0
+	var errorMessages []string
+	var mu sync.Mutex
+
+	for _, r := range relaysForPublishing {
+		wg.Add(1)
+		go func(r *ManagedRelay) {
+			defer wg.Done()
+			if err := r.Relay.Publish(c.ctx, ev); err == nil {
+				mu.Lock()
+				successCount++
+				mu.Unlock()
+			} else {
+				mu.Lock()
+				errorMessages = append(errorMessages, fmt.Sprintf("%s: %v", r.URL, err))
+				mu.Unlock()
+			}
+		}(r)
+	}
+	wg.Wait()
+
+	status := fmt.Sprintf("Event %s sent to %d/%d relays for chat %s.", ev.ID[len(ev.ID)-4:], successCount, len(relaysForPublishing), targetChat)
+	if len(errorMessages) > 0 {
+		status += " Errors: " + strings.Join(errorMessages, ", ")
+	}
+	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: status}
+}
+
+func (c *Client) createEvent(message string, kind int, tags nostr.Tags, difficulty int) nostr.Event {
+	baseTags := make(nostr.Tags, 0, len(tags)+2)
+	baseTags = append(baseTags, tags...)
+	baseTags = append(baseTags, nostr.Tag{"n", c.n})
+
+	ev := nostr.Event{
+		CreatedAt: nostr.Now(),
+		PubKey:    c.pk,
+		Content:   sanitizeString(message),
+		Kind:      kind,
+		Tags:      baseTags,
+	}
+
+	if difficulty > 0 {
+		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Calculating Proof-of-Work (difficulty %d)...", difficulty)}
+
+		powTags := append(baseTags, nostr.Tag{"nonce", "0", strconv.Itoa(difficulty)})
+		nonceTagIndex := len(powTags) - 1
+		ev.Tags = powTags
+
+		var nonceCounter uint64 = 0
+		for {
+			powTags[nonceTagIndex][1] = strconv.FormatUint(nonceCounter, 10)
+			ev.ID = ev.GetID()
+
+			if countLeadingZeroBits(ev.ID) >= difficulty {
+				break
+			}
+
+			nonceCounter++
+
+			if nonceCounter&0xFFFF == 0 {
+				select {
+				case <-c.ctx.Done():
+					c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "PoW calculation cancelled."}
+					return nostr.Event{}
+				default:
+				}
+			}
+		}
+	}
+
+	_ = ev.Sign(c.sk)
+	return ev
+}
+
+func (c *Client) getActiveView() *View {
+	for i := range c.config.Views {
+		if c.config.Views[i].Name == c.config.ActiveViewName {
+			return &c.config.Views[i]
+		}
+	}
+	if len(c.config.Views) > 0 {
+		return &c.config.Views[0]
+	}
+	return nil
+}
+
+func (c *Client) shutdown() {
+	c.cancel()
+	c.wg.Wait()
+	select {
+	case c.eventsChan <- DisplayEvent{Type: "SHUTDOWN"}:
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// --- helpers ---
+
+var hexToLeadingZeros [256]int
+
+func init() {
+	for i := 0; i < 256; i++ {
+		char := byte(i)
+		var val uint64
+		if char >= '0' && char <= '9' {
+			val, _ = strconv.ParseUint(string(char), 16, 4)
+		} else if char >= 'a' && char <= 'f' {
+			val, _ = strconv.ParseUint(string(char), 16, 4)
+		} else if char >= 'A' && char <= 'F' {
+			val, _ = strconv.ParseUint(string(char), 16, 4)
+		} else {
+			hexToLeadingZeros[i] = -1
+			continue
+		}
+		if val == 0 {
+			hexToLeadingZeros[i] = 4
+		} else {
+			hexToLeadingZeros[i] = bits.LeadingZeros8(uint8(val << 4))
+		}
+	}
+}
+
+func countLeadingZeroBits(hexString string) int {
+	count := 0
+	for i := 0; i < len(hexString); i++ {
+		char := hexString[i]
+		zeros := hexToLeadingZeros[char]
+
+		if zeros == -1 {
+			return count
+		}
+
+		count += zeros
+		if zeros != 4 {
+			break
+		}
+	}
+	return count
+}
+
+func IsPoWValid(event *nostr.Event, minDifficulty int) bool {
+	if minDifficulty <= 0 {
+		return true
+	}
+
+	nonceTag := event.Tags.FindLast("nonce")
+	if len(nonceTag) < 3 {
+		return false
+	}
+
+	claimedDifficulty, err := strconv.Atoi(strings.TrimSpace(nonceTag[2]))
+	if err != nil {
+		return false
+	}
+
+	if claimedDifficulty < minDifficulty {
+		return false
+	}
+
+	actualDifficulty := countLeadingZeroBits(event.ID)
+	if actualDifficulty < claimedDifficulty {
+		return false
+	}
+
+	return true
+}
+
+func sameStringSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	m := make(map[string]struct{}, len(a))
+	for _, s := range a {
+		m[s] = struct{}{}
+	}
+	for _, s := range b {
+		if _, ok := m[s]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func mrCurrentChatsLocked(sub *nostr.Subscription) []string {
+	if sub == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var out []string
+	for _, f := range sub.Filters {
+		tagsToCkeck := [][]string{}
+		if gTags, ok := f.Tags["g"]; ok {
+			tagsToCkeck = append(tagsToCkeck, gTags)
+		}
+		if dTags, ok := f.Tags["d"]; ok {
+			tagsToCkeck = append(tagsToCkeck, dTags)
+		}
+
+		for _, tagSet := range tagsToCkeck {
+			for _, ch := range tagSet {
+				if _, exists := seen[ch]; !exists {
+					seen[ch] = struct{}{}
+					out = append(out, ch)
+				}
+			}
+		}
+	}
+	return out
+}
+
+func pubkeyToColor(pubkey string) string {
+	hackerPalette := []string{"[#00ff00]", "[#33ccff]", "[#ff00ff]", "[#ffff00]", "[#6600ff]", "[#5fafd7]"}
+	hash := sha256.Sum256([]byte(pubkey))
+	return hackerPalette[int(hash[0])%len(hackerPalette)]
+}
+
+func sanitizeString(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+
+	var prevWasRI bool
+	for _, r := range s {
+		if r < 32 || r == 127 {
+			continue
+		}
+		if r < 128 {
+			b.WriteRune(r)
+			prevWasRI = false
+			continue
+		}
+
+		if unicode.Is(unicode.M, r) {
+			b.WriteRune('?')
+			continue
+		}
+
+		if !unicode.IsPrint(r) {
+			continue
+		}
+
+		if r >= 0x1F1E6 && r <= 0x1F1FF {
+			if prevWasRI {
+				b.WriteRune('?')
+				prevWasRI = false
+				continue
+			}
+			prevWasRI = true
+			continue
+		}
+
+		prevWasRI = false
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
 func npubToTokiPona(npub string) string {
 	hash := sha256.Sum256([]byte(npub))
-
-	// Take the first three bytes of the hash as indices.
-	idx1 := int(hash[0]) % len(tokiPonaNouns)
-	idx2 := int(hash[1]) % len(tokiPonaNouns)
-	idx3 := int(hash[2]) % len(tokiPonaNouns)
-
-	return fmt.Sprintf(
-		"%s-%s-%s",
-		tokiPonaNouns[idx1],
-		tokiPonaNouns[idx2],
-		tokiPonaNouns[idx3],
+	return fmt.Sprintf("%s-%s-%s",
+		tokiPonaNouns[int(hash[0])%len(tokiPonaNouns)],
+		tokiPonaNouns[int(hash[1])%len(tokiPonaNouns)],
+		tokiPonaNouns[int(hash[2])%len(tokiPonaNouns)],
 	)
 }
 
-// tokiPonaNouns is a list of nouns from the Toki Pona language, used for name generation.
 var tokiPonaNouns = []string{
 	"ijo", "ilo", "insa", "jan", "jelo", "jo", "kala", "kalama", "kasi", "ken",
 	"kili", "kiwen", "ko", "kon", "kulupu", "lape", "laso", "lawa", "len", "lili",
 	"linja", "lipu", "loje", "luka", "lukin", "lupa", "ma", "mama", "mani", "meli",
 	"mije", "moku", "moli", "monsi", "mun", "musi", "mute", "nanpa", "nasin", "nena",
-	"nimi", "noka", "oko", "olin", "open", "pakala", "pali", "palisa", "pan",
-	"pilin", "pipi", "poki", "pona", "selo", "sewi", "sijelo", "sike", "sitelen", "sona",
-	"soweli", "suli", "suno", "supa", "suwi", "telo", "tenpo", "toki", "tomo", "unpa",
-	"uta", "utala", "waso", "wawa", "weka", "wile",
+	"nimi", "noka", "oko", "olin", "open", "pakala", "pali", "palisa", "pan", "pilin",
+	"pipi", "poki", "pona", "selo", "sewi", "sijelo", "sike", "sitelen", "sona", "soweli",
+	"suli", "suno", "supa", "suwi", "telo", "tenpo", "toki", "tomo", "unpa", "uta",
+	"utala", "waso", "wawa", "weka", "wile",
 }
