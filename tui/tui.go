@@ -8,6 +8,7 @@ import (
 	"strchat-tui/client"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -114,6 +115,10 @@ func (t *TUI) setupViews() {
 	t.input.SetBorder(true).SetTitle("Input (Alt+I)").SetTitleAlign(tview.AlignLeft)
 
 	t.input.SetAutocompleteFunc(t.handleAutocomplete)
+
+	t.input.SetAcceptanceFunc(func(textToCheck string, lastChar rune) bool {
+		return utf8.RuneCountInString(textToCheck) <= client.MaxMsgLen
+	})
 
 	t.hints = tview.NewTextView().
 		SetDynamicColors(true).

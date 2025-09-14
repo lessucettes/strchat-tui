@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/mmcloughlin/geohash"
@@ -27,6 +28,7 @@ const (
 	SeenCacheSize        = 8192
 	UserContextCacheSize = 4096
 	MaxMsgLen            = 2000
+	MaxChatNameLen       = 12
 )
 
 var DefaultNamedChatRelays = []string{
@@ -222,7 +224,7 @@ func (c *Client) createGroup(payload string) {
 
 	for _, view := range c.config.Views {
 		if view.Name == name {
-			c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "Group with these chats already exists"}
+			c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Group with these chats already exists: '%s'", name)}
 			return
 		}
 	}
@@ -235,39 +237,70 @@ func (c *Client) createGroup(payload string) {
 	c.sendStateUpdate()
 	c.updateAllSubscriptions()
 }
-
 func (c *Client) joinChats(payload string) {
 	chatNames := strings.Fields(payload)
 	if len(chatNames) == 0 {
 		return
 	}
 
-	var firstNewChat string
-	addedCount := 0
+	var addedChats []string
+	var existingChats []string
 
 outer:
 	for _, name := range chatNames {
-		for _, view := range c.config.Views {
-			if !view.IsGroup && view.Name == name {
+		if geohash.Validate(name) != nil {
+			normalizedName, err := normalizeAndValidateChatName(name)
+			if err != nil {
+				c.eventsChan <- DisplayEvent{Type: "ERROR", Content: err.Error()}
 				continue outer
 			}
+			if utf8.RuneCountInString(normalizedName) > MaxChatNameLen {
+				c.eventsChan <- DisplayEvent{
+					Type:    "ERROR",
+					Content: fmt.Sprintf("Chat name '%s' is too long (max %d chars).", normalizedName, MaxChatNameLen),
+				}
+				continue outer
+			}
+			if len(normalizedName) == 0 {
+				continue outer
+			}
+			name = normalizedName
 		}
+
+		isExisting := false
+		for _, view := range c.config.Views {
+			if !view.IsGroup && view.Name == name {
+				isExisting = true
+				break
+			}
+		}
+
+		if isExisting {
+			existingChats = append(existingChats, name)
+			continue outer
+		}
+
 		newView := View{Name: name, IsGroup: false}
 		c.config.Views = append(c.config.Views, newView)
-		if firstNewChat == "" {
-			firstNewChat = name
+		if len(addedChats) == 0 {
+			c.config.ActiveViewName = name
 		}
-		addedCount++
+		addedChats = append(addedChats, name)
 	}
 
-	if addedCount > 0 {
-		c.config.ActiveViewName = firstNewChat
+	if len(addedChats) > 0 {
 		c.saveConfig()
 		c.sendStateUpdate()
 		c.updateAllSubscriptions()
-		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Joined %d new chat(s). Active: %s", addedCount, firstNewChat)}
-	} else {
-		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Already in all specified chats."}
+		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Joined %d new chat(s): %s. Active: %s", len(addedChats), strings.Join(addedChats, ", "), c.config.ActiveViewName)}
+	} else if len(existingChats) > 0 && len(chatNames) == len(existingChats) {
+		var content string
+		if len(existingChats) == 1 {
+			content = fmt.Sprintf("You are already in the '%s' chat.", existingChats[0])
+		} else {
+			content = fmt.Sprintf("You are already in all specified chats: %s.", strings.Join(existingChats, ", "))
+		}
+		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: content}
 	}
 }
 
@@ -572,7 +605,7 @@ func (c *Client) updateAllSubscriptions() {
 
 	if len(activeChats) == 0 {
 		c.updateRelaySubscriptions(make(map[string][]string))
-		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "No active chat. Disconnected from relays."}
+		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "No active chat/group. Relay connections are inactive."}
 		return
 	}
 
@@ -828,7 +861,7 @@ func (c *Client) processEvent(ev *nostr.Event, relayURL string) {
 			requiredPoW := activeView.PoW
 			if !IsPoWValid(ev, requiredPoW) {
 				log.Printf("Dropped event %s from %s for failing PoW check (required: %d)", ev.ID[len(ev.ID)-4:], eventChat, requiredPoW)
-				return // Drop the event.
+				return
 			}
 		}
 	}
@@ -850,10 +883,7 @@ func (c *Client) processEvent(ev *nostr.Event, relayURL string) {
 
 	timestamp := time.Unix(int64(ev.CreatedAt), 0).Format("15:04:05")
 
-	content := ev.Content
-	if len(content) > MaxMsgLen {
-		content = content[:MaxMsgLen] + "…"
-	}
+	content := truncateString(ev.Content, MaxMsgLen)
 	content = sanitizeString(content)
 
 	c.eventsChan <- DisplayEvent{
@@ -870,8 +900,6 @@ func (c *Client) processEvent(ev *nostr.Event, relayURL string) {
 }
 
 func (c *Client) publishMessage(message string) {
-	message = sanitizeString(message)
-
 	var targetChat string
 	var targetPubKey string
 	if strings.HasPrefix(message, "@") {
@@ -1004,7 +1032,7 @@ func (c *Client) createEvent(message string, kind int, tags nostr.Tags, difficul
 	ev := nostr.Event{
 		CreatedAt: nostr.Now(),
 		PubKey:    c.pk,
-		Content:   sanitizeString(message),
+		Content:   message,
 		Kind:      kind,
 		Tags:      baseTags,
 	}
@@ -1118,20 +1146,12 @@ func IsPoWValid(event *nostr.Event, minDifficulty int) bool {
 	}
 
 	claimedDifficulty, err := strconv.Atoi(strings.TrimSpace(nonceTag[2]))
-	if err != nil {
-		return false
-	}
-
-	if claimedDifficulty < minDifficulty {
+	if err != nil || claimedDifficulty < minDifficulty {
 		return false
 	}
 
 	actualDifficulty := countLeadingZeroBits(event.ID)
-	if actualDifficulty < claimedDifficulty {
-		return false
-	}
-
-	return true
+	return actualDifficulty >= claimedDifficulty
 }
 
 func sameStringSet(a, b []string) bool {
@@ -1181,6 +1201,46 @@ func pubkeyToColor(pubkey string) string {
 	hackerPalette := []string{"[#00ff00]", "[#33ccff]", "[#ff00ff]", "[#ffff00]", "[#6600ff]", "[#5fafd7]"}
 	hash := sha256.Sum256([]byte(pubkey))
 	return hackerPalette[int(hash[0])%len(hackerPalette)]
+}
+
+func truncateString(s string, maxRunes int) string {
+	if utf8.RuneCountInString(s) <= maxRunes {
+		return s
+	}
+
+	runesCounted := 0
+	for i := range s {
+		runesCounted++
+		if runesCounted > maxRunes {
+			return s[:i] + "..."
+		}
+	}
+
+	return s
+}
+
+func normalizeAndValidateChatName(name string) (string, error) {
+	normalized := strings.ToLower(name)
+
+	var builder strings.Builder
+	builder.Grow(len(normalized))
+
+	var lastWasDash bool
+	for _, r := range normalized {
+		if unicode.IsLetter(r) || unicode.IsNumber(r) {
+			builder.WriteRune(r)
+			lastWasDash = false
+		} else if unicode.IsSpace(r) || r == '-' {
+			if !lastWasDash {
+				builder.WriteRune('-')
+				lastWasDash = true
+			}
+		} else {
+			return "", fmt.Errorf("chat name contains invalid character: '%c'", r)
+		}
+	}
+
+	return strings.Trim(builder.String(), "-"), nil
 }
 
 func sanitizeString(s string) string {
