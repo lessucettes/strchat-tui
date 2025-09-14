@@ -1414,7 +1414,7 @@ func (c *Client) getHelp() {
 		"[blue]*[-] /del [name] - Deletes a chat/group. If no name, deletes the active chat/group. (Alias: /d)\n" +
 		"[blue]*[-] /block [@nick] - Blocks a user. Without nick, lists blocked users. (Alias: /b)\n" +
 		"[blue]*[-] /unblock [<num>|@nick|pubkey] - Unblocks a user. Without args, lists blocked users. (Alias: /ub)\n" +
-		"[blue]*[-] /quit - Exits the application. (Alias: /q)"
+		"[blue]*[-] /quit - Exits the application. (Alias: /q)\n"
 
 	c.eventsChan <- DisplayEvent{Type: "INFO", Content: helpText}
 }
