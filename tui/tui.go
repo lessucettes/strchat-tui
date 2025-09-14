@@ -3,6 +3,7 @@ package tui
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"sort"
 	"strchat-tui/client"
@@ -73,6 +74,16 @@ func New(actions chan<- client.UserAction, events <-chan client.DisplayEvent) *T
 	return t
 }
 
+type logWriter struct {
+	textViewWriter io.Writer
+}
+
+func (lw *logWriter) Write(p []byte) (n int, err error) {
+	message := strings.TrimSpace(string(p))
+	formattedMessage := fmt.Sprintf("\n[grey][%s] %s[-]", time.Now().Format("15:04:05"), message)
+	return lw.textViewWriter.Write([]byte(formattedMessage))
+}
+
 // setupViews creates and configures all the visual primitives of the TUI.
 func (t *TUI) setupViews() {
 	tview.Styles.PrimitiveBackgroundColor = tcell.ColorBlack
@@ -85,7 +96,8 @@ func (t *TUI) setupViews() {
 		SetScrollable(true).
 		SetChangedFunc(func() { t.app.Draw() })
 	t.logs.SetBorder(true).SetTitle("Logs (Alt+L)").SetTitleAlign(tview.AlignLeft)
-	log.SetOutput(tview.ANSIWriter(t.logs))
+	customWriter := &logWriter{textViewWriter: tview.ANSIWriter(t.logs)}
+	log.SetOutput(customWriter)
 	log.SetFlags(0)
 
 	t.chatList = tview.NewList().
@@ -142,7 +154,7 @@ func (t *TUI) setupViews() {
 
 	t.mainFlex = tview.NewFlex().
 		SetDirection(tview.FlexRow).
-		AddItem(t.logs, 4, 0, false).
+		AddItem(t.logs, 3, 0, false).
 		AddItem(contentGrid, 0, 1, false).
 		AddItem(bottomFlex, 4, 0, true)
 
@@ -654,7 +666,7 @@ func (t *TUI) listenForEvents(events <-chan client.DisplayEvent) {
 					t.output.ScrollToEnd()
 				}
 			case "INFO":
-				fmt.Fprintf(t.output, "[blue]-- %s[-]\n", strings.TrimSpace(event.Content))
+				fmt.Fprintf(t.output, "\n[blue]-- %s[-]", strings.TrimSpace(event.Content))
 				if !t.outputMaximized {
 					t.output.ScrollToEnd()
 				}
@@ -663,7 +675,7 @@ func (t *TUI) listenForEvents(events <-chan client.DisplayEvent) {
 				if event.Type == "ERROR" {
 					color = "red"
 				}
-				fmt.Fprintf(t.logs, "[%s][%s] %s: %s[-]\n", color, time.Now().Format("15:04:05"), event.Type, event.Content)
+				fmt.Fprintf(t.logs, "\n[%s][%s] %s: %s[-]", color, time.Now().Format("15:04:05"), event.Type, event.Content)
 
 				if !t.logsMaximized {
 					t.logs.ScrollToEnd()
@@ -672,7 +684,7 @@ func (t *TUI) listenForEvents(events <-chan client.DisplayEvent) {
 			case "STATE_UPDATE":
 				state, ok := event.Payload.(client.StateUpdate)
 				if !ok {
-					fmt.Fprintf(t.logs, "[red]ERROR: Invalid STATE_UPDATE payload[-]\n")
+					fmt.Fprintf(t.logs, "\n[red]ERROR: Invalid STATE_UPDATE payload[-]")
 					return
 				}
 				t.views = state.Views
@@ -684,7 +696,7 @@ func (t *TUI) listenForEvents(events <-chan client.DisplayEvent) {
 			case "RELAYS_UPDATE":
 				relays, ok := event.Payload.([]client.RelayInfo)
 				if !ok {
-					fmt.Fprintf(t.logs, "[red]ERROR: Invalid RELAYS_UPDATE payload[-]\n")
+					fmt.Fprintf(t.logs, "\n[red]ERROR: Invalid RELAYS_UPDATE payload[-]")
 					return
 				}
 				t.relays = relays
