@@ -110,6 +110,10 @@ func New(actions <-chan UserAction, events chan<- DisplayEvent) (*Client, error)
 		return nil, fmt.Errorf("failed to load configuration: %w", err)
 	}
 
+	if cfg.BlockedUsers == nil {
+		cfg.BlockedUsers = []BlockedUser{}
+	}
+
 	seenCache, err := lru.New[string, bool](SeenCacheSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create seen cache: %w", err)
@@ -200,6 +204,12 @@ func (c *Client) handleAction(action UserAction) {
 		c.listChats()
 	case "GET_ACTIVE_CHAT":
 		c.getActiveChat()
+	case "BLOCK_USER":
+		c.blockUser(action.Payload)
+	case "UNBLOCK_USER":
+		c.unblockUser(action.Payload)
+	case "LIST_BLOCKED":
+		c.listBlockedUsers()
 	case "GET_HELP":
 		c.getHelp()
 	case "QUIT":
@@ -390,6 +400,90 @@ func (c *Client) deleteView(viewName string) {
 		c.leaveChat(viewName)
 		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Left chat '%s'.", viewName)}
 	}
+}
+
+func (c *Client) blockUser(payload string) {
+	var pkToBlock, nickToBlock string
+
+	for _, pk := range c.userContext.Keys() {
+		if ctx, ok := c.userContext.Get(pk); ok {
+			userIdentifier := fmt.Sprintf("@%s#%s", ctx.Nick, ctx.ShortPK)
+			if strings.HasPrefix(userIdentifier, payload) {
+				pkToBlock = pk
+				nickToBlock = fmt.Sprintf("%s#%s", ctx.Nick, ctx.ShortPK)
+				break
+			}
+		}
+	}
+
+	if pkToBlock == "" {
+		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Could not find user matching '%s' to block.", payload)}
+		return
+	}
+
+	for _, blockedUser := range c.config.BlockedUsers {
+		if blockedUser.PubKey == pkToBlock {
+			c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("User %s is already blocked.", nickToBlock)}
+			return
+		}
+	}
+
+	c.config.BlockedUsers = append(c.config.BlockedUsers, BlockedUser{PubKey: pkToBlock, Nick: nickToBlock})
+	c.saveConfig()
+	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Blocked user %s. Their messages will now be hidden.", nickToBlock)}
+}
+
+func (c *Client) unblockUser(payload string) {
+	idxToRemove := -1
+
+	if num, err := strconv.Atoi(payload); err == nil {
+		if num > 0 && num <= len(c.config.BlockedUsers) {
+			idxToRemove = num - 1
+		} else {
+			c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Invalid number: %d. Use '/block' to see the list.", num)}
+			return
+		}
+	} else {
+		cleanPayload := strings.TrimPrefix(payload, "@")
+		for i, blockedUser := range c.config.BlockedUsers {
+			if strings.HasPrefix(blockedUser.Nick, cleanPayload) || strings.HasPrefix(blockedUser.PubKey, payload) {
+				idxToRemove = i
+				break
+			}
+		}
+	}
+
+	if idxToRemove == -1 {
+		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Could not find a blocked user matching '%s'.", payload)}
+		return
+	}
+
+	unblockedNick := c.config.BlockedUsers[idxToRemove].Nick
+	if unblockedNick == "" {
+		unblockedNick = c.config.BlockedUsers[idxToRemove].PubKey[:8] + "..."
+	}
+
+	c.config.BlockedUsers = append(c.config.BlockedUsers[:idxToRemove], c.config.BlockedUsers[idxToRemove+1:]...)
+	c.saveConfig()
+	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Unblocked user %s.", unblockedNick)}
+}
+
+func (c *Client) listBlockedUsers() {
+	if len(c.config.BlockedUsers) == 0 {
+		c.eventsChan <- DisplayEvent{Type: "INFO", Content: "Your block list is empty. Use /block <@nick> to block someone."}
+		return
+	}
+
+	var builder strings.Builder
+	builder.WriteString("Blocked Users:\n")
+	for i, user := range c.config.BlockedUsers {
+		nick := user.Nick
+		if nick == "" {
+			nick = "(no nick saved)"
+		}
+		builder.WriteString(fmt.Sprintf("[%d] - %s (%s...)\n", i+1, nick, user.PubKey[:8]))
+	}
+	c.eventsChan <- DisplayEvent{Type: "INFO", Content: builder.String()}
 }
 
 func (c *Client) setPoW(difficultyStr string) {
@@ -823,6 +917,12 @@ func (c *Client) listenForEvents(mr *ManagedRelay) {
 }
 
 func (c *Client) processEvent(ev *nostr.Event, relayURL string) {
+	for _, blockedUser := range c.config.BlockedUsers {
+		if ev.PubKey == blockedUser.PubKey {
+			return
+		}
+	}
+
 	c.seenCacheMu.Lock()
 	if c.seenCache.Contains(ev.ID) {
 		c.seenCacheMu.Unlock()
@@ -1312,6 +1412,8 @@ func (c *Client) getHelp() {
 		"[blue]*[-] /nick [new_nick] - Sets or clears your nickname. (Alias: /n)\n" +
 		"[blue]*[-] /pow [number] - Sets Proof-of-Work difficulty for the active chat/group. 0 to disable. (Alias: /p)\n" +
 		"[blue]*[-] /del [name] - Deletes a chat/group. If no name, deletes the active chat/group. (Alias: /d)\n" +
+		"[blue]*[-] /block [@nick] - Blocks a user. Without nick, lists blocked users. (Alias: /b)\n" +
+		"[blue]*[-] /unblock [<num>|@nick|pubkey] - Unblocks a user. Without args, lists blocked users. (Alias: /ub)\n" +
 		"[blue]*[-] /quit - Exits the application. (Alias: /q)"
 
 	c.eventsChan <- DisplayEvent{Type: "INFO", Content: helpText}

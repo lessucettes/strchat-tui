@@ -38,6 +38,9 @@ type TUI struct {
 	nick                string
 	recentRecipients    []string
 	rrIdx               int
+
+	// acPrefix keeps everything before the last '@' during autocomplete.
+	acPrefix string
 }
 
 // New creates and initializes the entire TUI application.
@@ -54,6 +57,7 @@ func New(actions chan<- client.UserAction, events <-chan client.DisplayEvent) *T
 		completionEntries: []string{},
 		recentRecipients:  []string{},
 		rrIdx:             -1,
+		acPrefix:          "",
 	}
 
 	t.setupViews()
@@ -107,7 +111,6 @@ func (t *TUI) setupViews() {
 	t.output.SetBorder(true).SetTitle("Messages (Alt+O)").SetTitleAlign(tview.AlignLeft)
 
 	t.input = tview.NewInputField().
-		//		SetLabel("> ").
 		SetLabelStyle(tcell.StyleDefault.Foreground(tcell.ColorLimeGreen)).
 		SetFieldBackgroundColor(tcell.NewRGBColor(0, 40, 0)).
 		SetFieldTextColor(tcell.ColorLime)
@@ -155,7 +158,35 @@ func (t *TUI) setupViews() {
 }
 
 func (t *TUI) handleAutocomplete(currentText string) []string {
+	trimmed := strings.TrimSpace(currentText)
+
+	if strings.HasPrefix(trimmed, "/block ") ||
+		strings.HasPrefix(trimmed, "/unblock ") ||
+		strings.HasPrefix(trimmed, "/b ") ||
+		strings.HasPrefix(trimmed, "/ub ") {
+
+		parts := strings.SplitN(currentText, " ", 2)
+		if len(parts) < 2 {
+			return nil
+		}
+		cmd := parts[0] + " "
+		nickPrefix := parts[1]
+
+		t.acPrefix = cmd
+		t.actionsChan <- client.UserAction{Type: "REQUEST_NICK_COMPLETION", Payload: nickPrefix}
+
+		if len(t.completionEntries) == 0 {
+			return nil
+		}
+		out := make([]string, 0, len(t.completionEntries))
+		for _, e := range t.completionEntries {
+			out = append(out, t.acPrefix+e)
+		}
+		return out
+	}
+
 	if !strings.Contains(currentText, "@") {
+		t.acPrefix = ""
 		t.completionEntries = nil
 		return nil
 	}
@@ -163,21 +194,23 @@ func (t *TUI) handleAutocomplete(currentText string) []string {
 	lastAt := strings.LastIndex(currentText, "@")
 	textAfterAt := currentText[lastAt:]
 
-	spaceIndex := strings.Index(textAfterAt, " ")
-
-	if spaceIndex != -1 && len(strings.TrimSpace(textAfterAt[spaceIndex:])) > 0 {
+	if spaceIndex := strings.Index(textAfterAt, " "); spaceIndex != -1 &&
+		len(strings.TrimSpace(textAfterAt[spaceIndex:])) > 0 {
+		t.acPrefix = ""
 		t.completionEntries = nil
 		return nil
 	}
 
-	var prefix string
-	if spaceIndex != -1 {
-		prefix = textAfterAt[1:spaceIndex]
+	var nickPrefix string
+	if spaceIndex := strings.Index(textAfterAt, " "); spaceIndex != -1 {
+		nickPrefix = textAfterAt[1:spaceIndex]
 	} else {
-		prefix = textAfterAt[1:]
+		nickPrefix = textAfterAt[1:]
 	}
 
-	t.actionsChan <- client.UserAction{Type: "REQUEST_NICK_COMPLETION", Payload: prefix}
+	t.acPrefix = currentText[:lastAt]
+	t.actionsChan <- client.UserAction{Type: "REQUEST_NICK_COMPLETION", Payload: nickPrefix}
+
 	return t.completionEntries
 }
 
@@ -232,6 +265,18 @@ func (t *TUI) setupHandlers() {
 				t.actionsChan <- client.UserAction{Type: "SET_NICK", Payload: payload}
 			case "/del", "/d":
 				t.actionsChan <- client.UserAction{Type: "DELETE_VIEW", Payload: payload}
+			case "/block", "/b":
+				if payload == "" {
+					t.actionsChan <- client.UserAction{Type: "LIST_BLOCKED"}
+				} else {
+					t.actionsChan <- client.UserAction{Type: "BLOCK_USER", Payload: payload}
+				}
+			case "/unblock", "/ub":
+				if payload == "" {
+					t.actionsChan <- client.UserAction{Type: "LIST_BLOCKED"}
+				} else {
+					t.actionsChan <- client.UserAction{Type: "UNBLOCK_USER", Payload: payload}
+				}
 			case "/help", "/h":
 				t.actionsChan <- client.UserAction{Type: "GET_HELP"}
 			}

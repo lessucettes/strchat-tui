@@ -17,12 +17,18 @@ type View struct {
 	PoW      int      `json:"pow,omitempty"`
 }
 
+type BlockedUser struct {
+	PubKey string `json:"pubkey"`
+	Nick   string `json:"nick,omitempty"`
+}
+
 // Config is the main structure of the configuration file.
 type Config struct {
-	PrivateKey     string `json:"private_key"`
-	Nick           string `json:"nick,omitempty"`
-	Views          []View `json:"views"`
-	ActiveViewName string `json:"active_view_name"`
+	PrivateKey     string        `json:"private_key"`
+	Nick           string        `json:"nick,omitempty"`
+	Views          []View        `json:"views"`
+	ActiveViewName string        `json:"active_view_name"`
+	BlockedUsers   []BlockedUser `json:"blocked_users,omitempty"`
 
 	path string `json:"-"`
 }
@@ -86,6 +92,7 @@ func createDefaultConfig(path string) (*Config, error) {
 		// The user starts with no channels or groups.
 		Views:          []View{},
 		ActiveViewName: "",
+		BlockedUsers:   []BlockedUser{},
 		path:           path,
 	}
 	// Save the newly created config to disk.
