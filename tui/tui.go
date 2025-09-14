@@ -658,7 +658,7 @@ func (t *TUI) listenForEvents(events <-chan client.DisplayEvent) {
 				}
 
 				if showMessage {
-					fmt.Fprintf(t.output, "[blue](%s)[-] <%s%s#%s[-]> [grey][%s %s][-]\n%s\n",
+					fmt.Fprintf(t.output, "\n[blue](%s)[-] <%s%s#%s[-]> [grey][%s %s][-]\n%s",
 						event.Chat, event.Color, event.Nick, event.PubKey, event.ID, event.Timestamp, event.Content)
 				}
 
