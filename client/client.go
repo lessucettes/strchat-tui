@@ -35,6 +35,7 @@ var DefaultNamedChatRelays = []string{
 	"wss://relay.damus.io",
 	"wss://relay.primal.net",
 	"wss://nos.lol",
+	"wss://offchain.pub",
 	"wss://adre.su",
 }
 

@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,9 +25,9 @@ type relayEntry struct {
 }
 
 const (
-	cacheFile = "georelays_cache.csv"
-	remoteURL = "https://raw.githubusercontent.com/permissionlesstech/georelays/refs/heads/main/nostr_relays.csv"
-	cacheTTL  = 24 * time.Hour
+	cacheFileName = "georelays_cache.csv"
+	remoteURL     = "https://raw.githubusercontent.com/permissionlesstech/georelays/refs/heads/main/nostr_relays.csv"
+	cacheTTL      = 24 * time.Hour
 )
 
 // haversine calculates the great-circle distance in kilometers between two points on the Earth.
@@ -41,21 +42,31 @@ func haversine(lat1, lon1, lat2, lon2 float64) float64 {
 }
 
 // loadRelays loads relay entries from the remote CSV, using a local cache if it's recent enough.
+// client/georelay.go
 func loadRelays() ([]relayEntry, error) {
-	// Check if a recent cache file exists.
-	info, err := os.Stat(cacheFile)
-	if err == nil && time.Since(info.ModTime()) < cacheTTL {
-		return parseCSV(cacheFile)
+	appDir, err := GetAppConfigDir()
+	if err != nil {
+		return nil, fmt.Errorf("cannot determine app config dir: %w", err)
 	}
 
-	// If no cache, download the remote file.
+	if err := os.MkdirAll(appDir, 0755); err != nil {
+		return nil, fmt.Errorf("could not create config directory: %w", err)
+	}
+
+	cachePath := filepath.Join(appDir, cacheFileName)
+
+	info, err := os.Stat(cachePath)
+	if err == nil && time.Since(info.ModTime()) < cacheTTL {
+		return parseCSV(cachePath)
+	}
+
 	resp, err := http.Get(remoteURL)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	out, err := os.Create(cacheFile)
+	out, err := os.Create(cachePath)
 	if err != nil {
 		return nil, err
 	}
@@ -65,7 +76,7 @@ func loadRelays() ([]relayEntry, error) {
 		return nil, err
 	}
 
-	return parseCSV(cacheFile)
+	return parseCSV(cachePath)
 }
 
 // parseCSV opens and parses the CSV file at the given path.

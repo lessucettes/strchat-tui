@@ -29,12 +29,11 @@ type Config struct {
 
 func LoadConfig() (*Config, error) {
 	// os.UserConfigDir() automatically returns the correct path for Windows, macOS, or Linux.
-	configDir, err := os.UserConfigDir()
+	appConfigDir, err := GetAppConfigDir()
 	if err != nil {
-		return nil, fmt.Errorf("could not get user config directory: %w", err)
+		return nil, err
 	}
 
-	appConfigDir := filepath.Join(configDir, "strchat-tui")
 	configPath := filepath.Join(appConfigDir, "config.json")
 
 	conf := &Config{path: configPath}
@@ -91,4 +90,12 @@ func createDefaultConfig(path string) (*Config, error) {
 	}
 	// Save the newly created config to disk.
 	return conf, conf.Save()
+}
+
+func GetAppConfigDir() (string, error) {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("could not get user config directory: %w", err)
+	}
+	return filepath.Join(configDir, "strchat-tui"), nil
 }
