@@ -30,11 +30,13 @@ type Config struct {
 	ActiveViewName string        `json:"active_view_name"`
 	BlockedUsers   []BlockedUser `json:"blocked_users,omitempty"`
 
+	Filters []string `json:"filters,omitempty"`
+	Mutes   []string `json:"mutes,omitempty"`
+
 	path string `json:"-"`
 }
 
 func LoadConfig() (*Config, error) {
-	// os.UserConfigDir() automatically returns the correct path for Windows, macOS, or Linux.
 	appConfigDir, err := GetAppConfigDir()
 	if err != nil {
 		return nil, err
@@ -46,7 +48,6 @@ func LoadConfig() (*Config, error) {
 
 	file, err := os.Open(configPath)
 	if err != nil {
-		// If the file doesn't exist, create a default one.
 		if os.IsNotExist(err) {
 			return createDefaultConfig(configPath)
 		}
@@ -63,7 +64,6 @@ func LoadConfig() (*Config, error) {
 
 // Save writes the current configuration back to the file.
 func (c *Config) Save() error {
-	// Ensure the parent directory exists before writing the file.
 	if err := os.MkdirAll(filepath.Dir(c.path), 0755); err != nil {
 		return fmt.Errorf("could not create config directory: %w", err)
 	}
@@ -75,7 +75,6 @@ func (c *Config) Save() error {
 	defer file.Close()
 
 	encoder := json.NewEncoder(file)
-	// Use indentation for a human-readable JSON file.
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(c); err != nil {
 		return fmt.Errorf("could not encode config file: %w", err)
@@ -88,14 +87,14 @@ func (c *Config) Save() error {
 func createDefaultConfig(path string) (*Config, error) {
 	sk := nostr.GeneratePrivateKey()
 	conf := &Config{
-		PrivateKey: sk,
-		// The user starts with no channels or groups.
+		PrivateKey:     sk,
 		Views:          []View{},
 		ActiveViewName: "",
 		BlockedUsers:   []BlockedUser{},
+		Filters:        []string{},
+		Mutes:          []string{},
 		path:           path,
 	}
-	// Save the newly created config to disk.
 	return conf, conf.Save()
 }
 

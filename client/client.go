@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"math/bits"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -83,6 +84,12 @@ type ManagedRelay struct {
 	mu           sync.Mutex
 }
 
+type compiledPattern struct {
+	raw     string
+	regex   *regexp.Regexp
+	literal string
+}
+
 type Client struct {
 	sk string
 	pk string
@@ -98,6 +105,9 @@ type Client struct {
 
 	actionsChan <-chan UserAction
 	eventsChan  chan<- DisplayEvent
+
+	filtersCompiled []compiledPattern
+	mutesCompiled   []compiledPattern
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -210,6 +220,22 @@ func (c *Client) handleAction(action UserAction) {
 		c.unblockUser(action.Payload)
 	case "LIST_BLOCKED":
 		c.listBlockedUsers()
+	case "ADD_FILTER":
+		c.addFilter(action.Payload)
+	case "LIST_FILTERS":
+		c.listFilters()
+	case "REMOVE_FILTER":
+		c.removeFilter(action.Payload)
+	case "CLEAR_FILTERS":
+		c.clearFilters()
+	case "ADD_MUTE":
+		c.addMute(action.Payload)
+	case "LIST_MUTES":
+		c.listMutes()
+	case "REMOVE_MUTE":
+		c.removeMute(action.Payload)
+	case "CLEAR_MUTES":
+		c.clearMutes()
 	case "GET_HELP":
 		c.getHelp()
 	case "QUIT":
@@ -220,16 +246,52 @@ func (c *Client) handleAction(action UserAction) {
 // --- State Management ---
 
 func (c *Client) createGroup(payload string) {
-	members := strings.Split(payload, ",")
-	if len(members) < 2 {
+	existingChats := make(map[string]struct{})
+	for _, view := range c.config.Views {
+		if !view.IsGroup {
+			existingChats[view.Name] = struct{}{}
+		}
+	}
+
+	rawMembers := strings.Split(payload, ",")
+	validMembers := make([]string, 0)
+	notFoundChats := make([]string, 0)
+	seenMembers := make(map[string]struct{})
+
+	for _, member := range rawMembers {
+		trimmedMember := strings.TrimSpace(member)
+		if trimmedMember == "" {
+			continue
+		}
+
+		if _, seen := seenMembers[trimmedMember]; seen {
+			continue
+		}
+		seenMembers[trimmedMember] = struct{}{}
+
+		if _, exists := existingChats[trimmedMember]; exists {
+			validMembers = append(validMembers, trimmedMember)
+		} else {
+			notFoundChats = append(notFoundChats, trimmedMember)
+		}
+	}
+
+	if len(notFoundChats) > 0 {
+		c.eventsChan <- DisplayEvent{
+			Type:    "ERROR",
+			Content: fmt.Sprintf("Cannot create group. The following chats were not found: %s", strings.Join(notFoundChats, ", ")),
+		}
 		return
 	}
-	for i := range members {
-		members[i] = strings.TrimSpace(members[i])
-	}
-	sort.Strings(members)
 
-	hash := sha256.Sum256([]byte(strings.Join(members, "")))
+	if len(validMembers) < 2 {
+		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "A group requires at least two unique, existing chats."}
+		return
+	}
+
+	sort.Strings(validMembers)
+
+	hash := sha256.Sum256([]byte(strings.Join(validMembers, "")))
 	id := hex.EncodeToString(hash[:])[:6]
 	name := fmt.Sprintf("Group-%s", id)
 
@@ -240,7 +302,7 @@ func (c *Client) createGroup(payload string) {
 		}
 	}
 
-	newView := View{Name: name, IsGroup: true, Children: members}
+	newView := View{Name: name, IsGroup: true, Children: validMembers}
 	c.config.Views = append(c.config.Views, newView)
 	c.config.ActiveViewName = name
 	c.saveConfig()
@@ -248,6 +310,7 @@ func (c *Client) createGroup(payload string) {
 	c.sendStateUpdate()
 	c.updateAllSubscriptions()
 }
+
 func (c *Client) joinChats(payload string) {
 	chatNames := strings.Fields(payload)
 	if len(chatNames) == 0 {
@@ -484,6 +547,129 @@ func (c *Client) listBlockedUsers() {
 		builder.WriteString(fmt.Sprintf("[%d] - %s (%s...)\n", i+1, nick, user.PubKey[:8]))
 	}
 	c.eventsChan <- DisplayEvent{Type: "INFO", Content: builder.String()}
+}
+
+func compilePattern(p string) compiledPattern {
+	p = strings.TrimSpace(p)
+	if len(p) > 1 && strings.HasPrefix(p, "/") && strings.HasSuffix(p, "/") {
+		body := p[1 : len(p)-1]
+		if re, err := regexp.Compile(body); err == nil {
+			return compiledPattern{raw: p, regex: re}
+		}
+		return compiledPattern{raw: p, literal: body}
+	}
+	return compiledPattern{raw: p, literal: p}
+}
+
+func (c *Client) matchesAny(content string, patterns []compiledPattern) bool {
+	for _, pat := range patterns {
+		if pat.regex != nil {
+			if pat.regex.MatchString(content) {
+				return true
+			}
+		} else if pat.literal != "" {
+			if strings.Contains(content, pat.literal) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (c *Client) addFilter(p string) {
+	if p == "" {
+		c.listFilters()
+		return
+	}
+	c.config.Filters = append(c.config.Filters, p)
+	c.saveConfig()
+	c.rebuildRegexCaches()
+	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Added filter: " + p}
+}
+
+func (c *Client) listFilters() {
+	if len(c.config.Filters) == 0 {
+		c.eventsChan <- DisplayEvent{Type: "INFO", Content: "No filters set."}
+		return
+	}
+	var b strings.Builder
+	b.WriteString("\nFilters:")
+	for i, f := range c.config.Filters {
+		b.WriteString(fmt.Sprintf("\n[%d] %s", i+1, f))
+	}
+	c.eventsChan <- DisplayEvent{Type: "INFO", Content: b.String()}
+}
+
+func (c *Client) removeFilter(p string) {
+	if p == "" {
+		c.clearFilters()
+		return
+	}
+	idx, err := strconv.Atoi(p)
+	if err != nil || idx < 1 || idx > len(c.config.Filters) {
+		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "Invalid filter number."}
+		return
+	}
+	removed := c.config.Filters[idx-1]
+	c.config.Filters = append(c.config.Filters[:idx-1], c.config.Filters[idx:]...)
+	c.saveConfig()
+	c.rebuildRegexCaches()
+	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Removed filter: " + removed}
+}
+
+func (c *Client) clearFilters() {
+	c.config.Filters = []string{}
+	c.saveConfig()
+	c.rebuildRegexCaches()
+	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Cleared all filters."}
+}
+
+func (c *Client) addMute(p string) {
+	if p == "" {
+		c.listMutes()
+		return
+	}
+	c.config.Mutes = append(c.config.Mutes, p)
+	c.saveConfig()
+	c.rebuildRegexCaches()
+	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Muted: " + p}
+}
+
+func (c *Client) listMutes() {
+	if len(c.config.Mutes) == 0 {
+		c.eventsChan <- DisplayEvent{Type: "INFO", Content: "No mutes set."}
+		return
+	}
+	var b strings.Builder
+	b.WriteString("\nMutes:")
+	for i, m := range c.config.Mutes {
+		b.WriteString(fmt.Sprintf("\n[%d] %s", i+1, m))
+	}
+	c.eventsChan <- DisplayEvent{Type: "INFO", Content: b.String()}
+}
+
+func (c *Client) removeMute(p string) {
+	if p == "" {
+		c.clearMutes()
+		return
+	}
+	idx, err := strconv.Atoi(p)
+	if err != nil || idx < 1 || idx > len(c.config.Mutes) {
+		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "Invalid mute number."}
+		return
+	}
+	removed := c.config.Mutes[idx-1]
+	c.config.Mutes = append(c.config.Mutes[:idx-1], c.config.Mutes[idx:]...)
+	c.saveConfig()
+	c.rebuildRegexCaches()
+	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Removed mute: " + removed}
+}
+
+func (c *Client) clearMutes() {
+	c.config.Mutes = []string{}
+	c.saveConfig()
+	c.rebuildRegexCaches()
+	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Cleared all mutes."}
 }
 
 func (c *Client) setPoW(difficultyStr string) {
@@ -987,6 +1173,13 @@ func (c *Client) processEvent(ev *nostr.Event, relayURL string) {
 	content := truncateString(ev.Content, MaxMsgLen)
 	content = sanitizeString(content)
 
+	if c.matchesAny(content, c.mutesCompiled) {
+		return
+	}
+	if len(c.filtersCompiled) > 0 && !c.matchesAny(content, c.filtersCompiled) {
+		return
+	}
+
 	c.eventsChan <- DisplayEvent{
 		Type:      "NEW_MESSAGE",
 		Timestamp: timestamp,
@@ -1344,6 +1537,18 @@ func normalizeAndValidateChatName(name string) (string, error) {
 	return strings.Trim(builder.String(), "-"), nil
 }
 
+func (c *Client) rebuildRegexCaches() {
+	compileAll := func(src []string) []compiledPattern {
+		out := make([]compiledPattern, 0, len(src))
+		for _, raw := range src {
+			out = append(out, compilePattern(raw))
+		}
+		return out
+	}
+	c.filtersCompiled = compileAll(c.config.Filters)
+	c.mutesCompiled = compileAll(c.config.Mutes)
+}
+
 func sanitizeString(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
@@ -1409,11 +1614,15 @@ func (c *Client) getHelp() {
 		"[blue]*[-] /join <chat1> [chat2]... - Joins one or more chats. (Alias: /j)\n" +
 		"[blue]*[-] /set [name|names...] - Without args: shows active chat. With one name: activates a chat/group. With multiple names: creates a group. (Alias: /s)\n" +
 		"[blue]*[-] /list - Lists all your chats and groups. (Alias: /l)\n" +
+		"[blue]*[-] /del [name] - Deletes a chat/group. If no name, deletes the active chat/group. (Alias: /d)\n" +
 		"[blue]*[-] /nick [new_nick] - Sets or clears your nickname. (Alias: /n)\n" +
 		"[blue]*[-] /pow [number] - Sets Proof-of-Work difficulty for the active chat/group. 0 to disable. (Alias: /p)\n" +
-		"[blue]*[-] /del [name] - Deletes a chat/group. If no name, deletes the active chat/group. (Alias: /d)\n" +
 		"[blue]*[-] /block [@nick] - Blocks a user. Without nick, lists blocked users. (Alias: /b)\n" +
 		"[blue]*[-] /unblock [<num>|@nick|pubkey] - Unblocks a user. Without args, lists blocked users. (Alias: /ub)\n" +
+		"[blue]*[-] /filter [word|regex] - Adds a filter. Without args, lists filters. (Alias: /f)\n" +
+		"[blue]*[-] /unfilter [<num>] - Removes a filter by number. Without args, clears all. (Alias: /uf)\n" +
+		"[blue]*[-] /mute [word|regex] - Adds a mute. Without args, lists mutes. (Alias: /m)\n" +
+		"[blue]*[-] /unmute [<num>] - Removes a mute by number. Without args, clears all. (Alias: /um)\n" +
 		"[blue]*[-] /quit - Exits the application. (Alias: /q)"
 
 	c.eventsChan <- DisplayEvent{Type: "INFO", Content: helpText}
