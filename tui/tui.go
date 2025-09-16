@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"slices"
 	"sort"
 	"strchat-tui/client"
 	"strings"
@@ -39,9 +40,8 @@ type TUI struct {
 	nick                string
 	recentRecipients    []string
 	rrIdx               int
-
-	// acPrefix keeps everything before the last '@' during autocomplete.
-	acPrefix string
+	lastNickQuery       string
+	acPrefix            string
 }
 
 // New creates and initializes the entire TUI application.
@@ -59,6 +59,7 @@ func New(actions chan<- client.UserAction, events <-chan client.DisplayEvent) *T
 		recentRecipients:  []string{},
 		rrIdx:             -1,
 		acPrefix:          "",
+		lastNickQuery:     "",
 	}
 
 	t.setupViews()
@@ -135,6 +136,27 @@ func (t *TUI) setupViews() {
 		return utf8.RuneCountInString(textToCheck) <= client.MaxMsgLen
 	})
 
+	t.input.SetChangedFunc(func(text string) {
+		nick, complete := extractNickPrefix(text)
+
+		if complete {
+			t.lastNickQuery = ""
+			return
+		}
+
+		if !complete && strings.Contains(text, "#") && t.lastNickQuery == "" {
+			return
+		}
+
+		if nick != "" && nick != t.lastNickQuery {
+			t.lastNickQuery = nick
+			t.actionsChan <- client.UserAction{
+				Type:    "REQUEST_NICK_COMPLETION",
+				Payload: nick,
+			}
+		}
+	})
+
 	t.hints = tview.NewTextView().
 		SetDynamicColors(true).
 		SetTextAlign(tview.AlignLeft)
@@ -176,54 +198,32 @@ func (t *TUI) handleAutocomplete(currentText string) []string {
 		strings.HasPrefix(trimmed, "/unblock ") ||
 		strings.HasPrefix(trimmed, "/b ") ||
 		strings.HasPrefix(trimmed, "/ub ") {
-
 		parts := strings.SplitN(currentText, " ", 2)
 		if len(parts) < 2 {
 			return nil
 		}
 		cmd := parts[0] + " "
-		nickPrefix := parts[1]
-
-		t.acPrefix = cmd
-		t.actionsChan <- client.UserAction{Type: "REQUEST_NICK_COMPLETION", Payload: nickPrefix}
 
 		if len(t.completionEntries) == 0 {
 			return nil
 		}
 		out := make([]string, 0, len(t.completionEntries))
 		for _, e := range t.completionEntries {
-			out = append(out, t.acPrefix+e)
+			out = append(out, cmd+e)
 		}
 		return out
 	}
 
-	if !strings.Contains(currentText, "@") {
-		t.acPrefix = ""
-		t.completionEntries = nil
+	nick, complete := extractNickPrefix(currentText)
+	if nick == "" || complete {
 		return nil
 	}
 
-	lastAt := strings.LastIndex(currentText, "@")
-	textAfterAt := currentText[lastAt:]
-
-	if spaceIndex := strings.Index(textAfterAt, " "); spaceIndex != -1 &&
-		len(strings.TrimSpace(textAfterAt[spaceIndex:])) > 0 {
-		t.acPrefix = ""
-		t.completionEntries = nil
+	if len(t.completionEntries) == 0 {
 		return nil
 	}
 
-	var nickPrefix string
-	if spaceIndex := strings.Index(textAfterAt, " "); spaceIndex != -1 {
-		nickPrefix = textAfterAt[1:spaceIndex]
-	} else {
-		nickPrefix = textAfterAt[1:]
-	}
-
-	t.acPrefix = currentText[:lastAt]
-	t.actionsChan <- client.UserAction{Type: "REQUEST_NICK_COMPLETION", Payload: nickPrefix}
-
-	return t.completionEntries
+	return append([]string(nil), t.completionEntries...)
 }
 
 func (t *TUI) setupHandlers() {
@@ -235,6 +235,9 @@ func (t *TUI) setupHandlers() {
 		if key != tcell.KeyEnter {
 			return
 		}
+
+		defer t.input.SetText("")
+
 		text := strings.TrimSpace(t.input.GetText())
 		if text == "" {
 			return
@@ -321,86 +324,45 @@ func (t *TUI) setupHandlers() {
 		}
 
 		if !strings.HasPrefix(text, "/") {
-			s := strings.TrimSpace(text)
-			if strings.HasPrefix(s, "@") {
-				nick := s[1:]
-				if i := strings.IndexByte(nick, ' '); i >= 0 {
-					nick = nick[:i]
+			nick, complete := extractNickPrefix(text)
+			if complete {
+				nick = strings.TrimPrefix(nick, "@")
+				for i, n := range t.recentRecipients {
+					if n == nick {
+						t.recentRecipients = append(t.recentRecipients[:i], t.recentRecipients[i+1:]...)
+						break
+					}
 				}
-				nick = strings.TrimSpace(nick)
-				if nick != "" {
-					for i, n := range t.recentRecipients {
-						if n == nick {
-							t.recentRecipients = append(t.recentRecipients[:i], t.recentRecipients[i+1:]...)
-							break
-						}
-					}
-					t.recentRecipients = append([]string{nick}, t.recentRecipients...)
-					if len(t.recentRecipients) > 20 {
-						t.recentRecipients = t.recentRecipients[:20]
-					}
+				t.recentRecipients = append([]string{nick}, t.recentRecipients...)
+				if len(t.recentRecipients) > 20 {
+					t.recentRecipients = t.recentRecipients[:20]
 				}
 			}
 		}
-		t.input.SetText("")
 	})
 
 	t.input.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
-		switch ev.Key() {
-		case tcell.KeyUp, tcell.KeyDown:
-			if len(t.completionEntries) > 0 {
-				return ev
-			}
-
-			txt := t.input.GetText()
-			trim := strings.TrimSpace(txt)
-
+		if ev.Key() == tcell.KeyCtrlP || ev.Key() == tcell.KeyCtrlN {
 			if len(t.recentRecipients) == 0 {
 				return ev
 			}
 
-			canCycle := false
-			startIdx := -1
-			if trim == "" || trim == "@" {
-				canCycle = true
-			} else if strings.HasSuffix(txt, " ") &&
-				strings.Count(strings.TrimSpace(txt), " ") == 0 &&
-				strings.HasPrefix(trim, "@") {
-				nick := trim[1:]
-				for i, n := range t.recentRecipients {
-					if n == nick {
-						canCycle, startIdx = true, i
-						break
-					}
-				}
-			}
-			if !canCycle {
-				return ev
-			}
-
-			if t.rrIdx < 0 {
-				if startIdx >= 0 {
-					t.rrIdx = startIdx
-				} else if ev.Key() == tcell.KeyUp {
-					t.rrIdx = 0
-				} else {
-					t.rrIdx = len(t.recentRecipients) - 1
-				}
+			if ev.Key() == tcell.KeyCtrlP {
+				t.rrIdx = (t.rrIdx + 1) % len(t.recentRecipients)
 			} else {
-				if ev.Key() == tcell.KeyUp {
-					t.rrIdx = (t.rrIdx + 1) % len(t.recentRecipients)
+				if t.rrIdx <= 0 {
+					t.rrIdx = len(t.recentRecipients) - 1
 				} else {
-					t.rrIdx = (t.rrIdx - 1 + len(t.recentRecipients)) % len(t.recentRecipients)
+					t.rrIdx--
 				}
 			}
 
 			t.input.SetText("@" + t.recentRecipients[t.rrIdx] + " ")
 			return nil
-
-		default:
-			t.rrIdx = -1
-			return ev
 		}
+
+		t.rrIdx = -1
+		return ev
 	})
 
 	t.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
@@ -669,11 +631,8 @@ func (t *TUI) listenForEvents(events <-chan client.DisplayEvent) {
 				activeView := t.views[t.activeViewIndex]
 				showMessage := false
 				if activeView.IsGroup {
-					for _, childChat := range activeView.Children {
-						if event.Chat == childChat {
-							showMessage = true
-							break
-						}
+					if slices.Contains(activeView.Children, event.Chat) {
+						showMessage = true
 					}
 				} else {
 					if event.Chat == activeView.Name {
@@ -682,8 +641,15 @@ func (t *TUI) listenForEvents(events <-chan client.DisplayEvent) {
 				}
 
 				if showMessage {
-					fmt.Fprintf(t.output, "\n[blue](%s)[-] <%s%s#%s[-]> [grey][%s %s][-]\n%s",
-						event.Chat, event.Color, event.Nick, event.PubKey, event.ID, event.Timestamp, event.Content)
+					mention := "@" + t.nick
+					content := event.Content
+
+					if t.nick != "" {
+						content = strings.ReplaceAll(content, mention, "[yellow::b]"+mention+"[-::-]")
+					}
+
+					fmt.Fprintf(t.output, "\n[blue](%s)[-] <%s%s[-]#%s> [grey][%s %s][-]\n%s",
+						event.Chat, event.Color, event.Nick, event.PubKey, event.ID, event.Timestamp, content)
 				}
 
 				if !t.outputMaximized {
@@ -788,7 +754,7 @@ func (t *TUI) updateHints() {
 	} else {
 		switch t.app.GetFocus() {
 		case t.input:
-			hintText = "[lime]Enter[-]: Send | [lime]Tab/Shift+Tab[-]: Cycle Focus | " + baseHints
+			hintText = "[lime]Enter[-]: Send | [lime]Ctrl+P/N[-]: History | [lime]Tab/Shift+Tab[-]: Cycle Focus | " + baseHints
 		case t.output:
 			hintText = "[lime]`[-]: Maximize | [lime]↑/↓[-]: Scroll | [lime]Tab/Shift+Tab[-]: Cycle Focus | " + baseHints
 		case t.detailsView:
@@ -802,4 +768,39 @@ func (t *TUI) updateHints() {
 		}
 	}
 	t.hints.SetText(hintText)
+}
+
+func extractNickPrefix(s string) (nick string, complete bool) {
+	lastAt := strings.LastIndexByte(s, '@')
+	if lastAt == -1 {
+		return "", false
+	}
+
+	after := s[lastAt+1:]
+	hashIdx := strings.LastIndexByte(after, '#')
+
+	for hashIdx != -1 {
+		if hashIdx+5 <= len(after) {
+			tag := after[hashIdx+1 : hashIdx+5]
+			ok := true
+			for j := range 4 {
+				c := tag[j]
+				if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+					ok = false
+					break
+				}
+			}
+
+			if ok && (hashIdx+5 == len(after) || after[hashIdx+5] == ' ') {
+				return after[:hashIdx+5], true
+			}
+		}
+		if hashIdx > 0 {
+			hashIdx = strings.LastIndexByte(after[:hashIdx], '#')
+		} else {
+			break
+		}
+	}
+
+	return after, false
 }

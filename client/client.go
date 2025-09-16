@@ -136,7 +136,7 @@ func New(actions <-chan UserAction, events chan<- DisplayEvent) (*Client, error)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	return &Client{
+	client := &Client{
 		config:      cfg,
 		actionsChan: actions,
 		eventsChan:  events,
@@ -145,7 +145,11 @@ func New(actions <-chan UserAction, events chan<- DisplayEvent) (*Client, error)
 		userContext: userContextCache,
 		ctx:         ctx,
 		cancel:      cancel,
-	}, nil
+	}
+
+	client.rebuildRegexCaches()
+
+	return client, nil
 }
 
 func (c *Client) Run() {
