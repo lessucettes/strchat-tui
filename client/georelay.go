@@ -42,7 +42,6 @@ func haversine(lat1, lon1, lat2, lon2 float64) float64 {
 }
 
 // loadRelays loads relay entries from the remote CSV, using a local cache if it's recent enough.
-// client/georelay.go
 func loadRelays() ([]relayEntry, error) {
 	appDir, err := GetAppConfigDir()
 	if err != nil {

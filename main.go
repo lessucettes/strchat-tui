@@ -2,12 +2,26 @@
 package main
 
 import (
+	"flag"
+	"fmt"
 	"log"
+	"os"
 	"strchat-tui/client"
 	"strchat-tui/tui"
 )
 
+var version = "dev"
+
 func main() {
+	versionFlag := flag.Bool("version", false, "Print the version and exit")
+	vFlag := flag.Bool("v", false, "Print the version and exit (shorthand)")
+	flag.Parse()
+
+	if *versionFlag || *vFlag {
+		fmt.Println(version)
+		os.Exit(0)
+	}
+
 	actionsChan := make(chan client.UserAction, 10)
 	eventsChan := make(chan client.DisplayEvent, 10)
 
