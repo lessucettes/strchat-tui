@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/nbd-wtf/go-nostr"
 )
@@ -43,7 +44,6 @@ func LoadConfig() (*Config, error) {
 	}
 
 	configPath := filepath.Join(appConfigDir, "config.json")
-
 	conf := &Config{path: configPath}
 
 	file, err := os.Open(configPath)
@@ -64,11 +64,19 @@ func LoadConfig() (*Config, error) {
 
 // Save writes the current configuration back to the file.
 func (c *Config) Save() error {
-	if err := os.MkdirAll(filepath.Dir(c.path), 0755); err != nil {
+	dirPerm := os.FileMode(0755)
+	filePerm := os.FileMode(0644)
+
+	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+		dirPerm = 0700
+		filePerm = 0600
+	}
+
+	if err := os.MkdirAll(filepath.Dir(c.path), dirPerm); err != nil {
 		return fmt.Errorf("could not create config directory: %w", err)
 	}
 
-	file, err := os.Create(c.path)
+	file, err := os.OpenFile(c.path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, filePerm)
 	if err != nil {
 		return fmt.Errorf("could not create config file: %w", err)
 	}

@@ -2,9 +2,11 @@
 package client
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"maps"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,6 +16,29 @@ import (
 	"github.com/mmcloughlin/geohash"
 	"github.com/nbd-wtf/go-nostr"
 )
+
+// --- Retry helper ---
+
+func retryWithBackoff(ctx context.Context, fn func() error) error {
+	delay := 500 * time.Millisecond
+	attempt := 1
+	for {
+		if err := fn(); err == nil {
+			return nil
+		}
+
+		log.Printf("Retry attempt %d failed, waiting %v before next attempt.", attempt, delay)
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+			if delay < 30*time.Second {
+				delay *= 2
+			}
+		}
+	}
+}
 
 // --- Nostr Logic ---
 
@@ -116,47 +141,54 @@ func (c *Client) updateRelaySubscriptions(desiredRelays map[string][]string) {
 }
 
 func (c *Client) manageRelayConnection(url string, chats []string) {
-	start := time.Now()
-	relay, err := nostr.RelayConnect(c.ctx, url)
-	if err != nil {
-		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Failed to connect to %s: %v", url, err)}
-		return
-	}
-	latency := time.Since(start)
+	err := retryWithBackoff(c.ctx, func() error {
+		start := time.Now()
+		relay, err := nostr.RelayConnect(c.ctx, url)
+		if err != nil {
+			c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Failed to connect to %s: %v", url, err)}
+			return err
+		}
+		latency := time.Since(start)
 
-	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Connected to %s (%dms)", url, latency.Milliseconds())}
+		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Connected to %s (%dms)", url, latency.Milliseconds())}
 
-	mr := &ManagedRelay{
-		URL:     url,
-		Relay:   relay,
-		Latency: latency,
-	}
+		mr := &ManagedRelay{
+			URL:     url,
+			Relay:   relay,
+			Latency: latency,
+		}
 
-	c.relaysMu.Lock()
-	if _, exists := c.relays[url]; exists {
-		c.relaysMu.Unlock()
-		relay.Close()
-		return
-	}
-	c.relays[url] = mr
-	c.relaysMu.Unlock()
-	c.sendRelaysUpdate()
-
-	if _, err := c.replaceSubscription(mr, chats); err != nil {
-		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Subscribe failed on %s: %v", url, err)}
 		c.relaysMu.Lock()
-		delete(c.relays, url)
+		if _, exists := c.relays[url]; exists {
+			c.relaysMu.Unlock()
+			relay.Close()
+			return nil
+		}
+		c.relays[url] = mr
 		c.relaysMu.Unlock()
-		relay.Close()
 		c.sendRelaysUpdate()
-		return
-	}
 
-	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
-		c.listenForEvents(mr)
-	}()
+		if _, err := c.replaceSubscription(mr, chats); err != nil {
+			relay.Close()
+			c.relaysMu.Lock()
+			delete(c.relays, url)
+			c.relaysMu.Unlock()
+			c.sendRelaysUpdate()
+			return err
+		}
+
+		c.wg.Add(1)
+		go func() {
+			defer c.wg.Done()
+			c.listenForEvents(mr)
+		}()
+
+		return nil
+	})
+
+	if err != nil {
+		log.Printf("Stopped trying to connect to %s: %v", url, err)
+	}
 }
 
 func (c *Client) replaceSubscription(mr *ManagedRelay, chats []string) (bool, error) {
@@ -221,7 +253,7 @@ func (c *Client) listenForEvents(mr *ManagedRelay) {
 		mr.mu.Unlock()
 
 		if sub == nil {
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(200 * time.Millisecond)
 			continue
 		}
 
@@ -231,12 +263,31 @@ func (c *Client) listenForEvents(mr *ManagedRelay) {
 
 		case ev, ok := <-sub.Events:
 			if !ok {
-				log.Printf("Subscription object for %s is closed, will wait for a new one.", mr.URL)
+				log.Printf("Subscription closed on %s, attempting to resubscribe...", mr.URL)
+				oldChats := mrCurrentChatsLocked(sub)
+
 				mr.mu.Lock()
-				if mr.subscription == sub {
-					mr.subscription = nil
+				if mr.subscription != sub {
+					mr.mu.Unlock()
+					continue
 				}
+				mr.subscription = nil
 				mr.mu.Unlock()
+
+				if len(oldChats) == 0 {
+					continue
+				}
+
+				err := retryWithBackoff(c.ctx, func() error {
+					_, err := c.replaceSubscription(mr, oldChats)
+					return err
+				})
+
+				if err != nil {
+					log.Printf("Could not re-establish subscription on %s: %v. Listener stopped.", mr.URL, err)
+					return
+				}
+				log.Printf("Successfully resubscribed to %s", mr.URL)
 				continue
 			}
 			if ev == nil {
@@ -277,11 +328,8 @@ func (c *Client) processEvent(ev *nostr.Event, relayURL string) {
 	if activeView != nil {
 		isRelevantToActiveView := false
 		if activeView.IsGroup {
-			for _, child := range activeView.Children {
-				if child == eventChat {
-					isRelevantToActiveView = true
-					break
-				}
+			if slices.Contains(activeView.Children, eventChat) {
+				isRelevantToActiveView = true
 			}
 		} else {
 			if activeView.Name == eventChat {
@@ -296,6 +344,16 @@ func (c *Client) processEvent(ev *nostr.Event, relayURL string) {
 				return
 			}
 		}
+	}
+
+	content := truncateString(ev.Content, MaxMsgLen)
+	content = sanitizeString(content)
+
+	if c.matchesAny(content, c.mutesCompiled) {
+		return
+	}
+	if len(c.filtersCompiled) > 0 && !c.matchesAny(content, c.filtersCompiled) {
+		return
 	}
 
 	nick := npubToTokiPona(ev.PubKey)
@@ -314,16 +372,6 @@ func (c *Client) processEvent(ev *nostr.Event, relayURL string) {
 	})
 
 	timestamp := time.Unix(int64(ev.CreatedAt), 0).Format("15:04:05")
-
-	content := truncateString(ev.Content, MaxMsgLen)
-	content = sanitizeString(content)
-
-	if c.matchesAny(content, c.mutesCompiled) {
-		return
-	}
-	if len(c.filtersCompiled) > 0 && !c.matchesAny(content, c.filtersCompiled) {
-		return
-	}
 
 	c.eventsChan <- DisplayEvent{
 		Type:      "NEW_MESSAGE",
@@ -422,11 +470,55 @@ func (c *Client) publishMessage(message string) {
 	}
 
 	ev := c.createEvent(message, kind, tags, requiredPoW)
-	if ev.ID == "" { // PoW was cancelled
+
+	if requiredPoW > 0 {
+		go c.minePoWAndPublish(ev, requiredPoW, targetChat, relaysForPublishing)
+	} else {
+		_ = ev.Sign(c.sk)
+		c.publish(ev, targetChat, relaysForPublishing)
+	}
+}
+
+func (c *Client) minePoWAndPublish(ev nostr.Event, difficulty int, targetChat string, relays []*ManagedRelay) {
+	clone := ev
+
+	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Calculating Proof-of-Work (difficulty %d)...", difficulty)}
+
+	nonceTagIndex := -1
+	for i, tag := range clone.Tags {
+		if len(tag) > 1 && tag[0] == "nonce" {
+			nonceTagIndex = i
+			break
+		}
+	}
+
+	if nonceTagIndex == -1 {
+		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "PoW mining failed: nonce tag not found."}
 		return
 	}
 
-	c.publish(ev, targetChat, relaysForPublishing)
+	var nonceCounter uint64 = 0
+	for {
+		clone.Tags[nonceTagIndex][1] = strconv.FormatUint(nonceCounter, 10)
+		clone.ID = clone.GetID()
+
+		if countLeadingZeroBits(clone.ID) >= difficulty {
+			break
+		}
+		nonceCounter++
+
+		if nonceCounter&0x3FF == 0 {
+			select {
+			case <-c.ctx.Done():
+				c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "PoW calculation cancelled."}
+				return
+			default:
+			}
+		}
+	}
+
+	_ = clone.Sign(c.sk)
+	c.publish(clone, targetChat, relays)
 }
 
 func (c *Client) publish(ev nostr.Event, targetChat string, relaysForPublishing []*ManagedRelay) {
@@ -477,35 +569,9 @@ func (c *Client) createEvent(message string, kind int, tags nostr.Tags, difficul
 	}
 
 	if difficulty > 0 {
-		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Calculating Proof-of-Work (difficulty %d)...", difficulty)}
-
-		powTags := append(baseTags, nostr.Tag{"nonce", "0", strconv.Itoa(difficulty)})
-		nonceTagIndex := len(powTags) - 1
-		ev.Tags = powTags
-
-		var nonceCounter uint64 = 0
-		for {
-			powTags[nonceTagIndex][1] = strconv.FormatUint(nonceCounter, 10)
-			ev.ID = ev.GetID()
-
-			if countLeadingZeroBits(ev.ID) >= difficulty {
-				break
-			}
-
-			nonceCounter++
-
-			if nonceCounter&0xFFFF == 0 {
-				select {
-				case <-c.ctx.Done():
-					c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "PoW calculation cancelled."}
-					return nostr.Event{}
-				default:
-				}
-			}
-		}
+		ev.Tags = append(ev.Tags, nostr.Tag{"nonce", "0", strconv.Itoa(difficulty)})
 	}
 
-	_ = ev.Sign(c.sk)
 	return ev
 }
 

@@ -351,8 +351,8 @@ func (t *TUI) handleNewMessage(event client.DisplayEvent) {
 			content = strings.ReplaceAll(content, mention, "[yellow::b]"+mention+"[-::-]")
 		}
 
-		fmt.Fprintf(t.output, "\n[blue](%s)[-] <%s%s[-]#%s> [grey][%s %s][-]\n%s",
-			event.Chat, event.Color, event.Nick, event.PubKey, event.ID, event.Timestamp, content)
+		fmt.Fprintf(t.output, "\n[blue](%s)[-] <%s%s[-]#%s> %s [grey][%s %s][-]",
+			event.Chat, event.Color, event.Nick, event.PubKey, content, event.ID, event.Timestamp)
 	}
 
 	if !t.outputMaximized {

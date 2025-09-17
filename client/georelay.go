@@ -48,10 +48,6 @@ func loadRelays() ([]relayEntry, error) {
 		return nil, fmt.Errorf("cannot determine app config dir: %w", err)
 	}
 
-	if err := os.MkdirAll(appDir, 0755); err != nil {
-		return nil, fmt.Errorf("could not create config directory: %w", err)
-	}
-
 	cachePath := filepath.Join(appDir, cacheFileName)
 
 	info, err := os.Stat(cachePath)
@@ -65,7 +61,11 @@ func loadRelays() ([]relayEntry, error) {
 	}
 	defer resp.Body.Close()
 
-	out, err := os.Create(cachePath)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to fetch relays: %s", resp.Status)
+	}
+
+	out, err := os.OpenFile(cachePath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
 		return nil, err
 	}
