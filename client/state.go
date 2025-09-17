@@ -337,7 +337,7 @@ func (c *Client) handleNickCompletion(prefix string) {
 		if value, ok := c.userContext.Get(key); ok {
 			if _, isActiveChat := relevantChats[value.Chat]; isActiveChat {
 				if strings.HasPrefix(value.Nick, prefix) {
-					entries = append(entries, fmt.Sprintf("@%s#%s ", value.Nick, value.ShortPK))
+					entries = append(entries, fmt.Sprintf("@%s#%s ", value.Nick, value.ShortPubKey))
 				}
 			}
 		}

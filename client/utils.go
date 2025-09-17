@@ -119,12 +119,6 @@ func mrCurrentChatsLocked(sub *nostr.Subscription) []string {
 	return out
 }
 
-func pubkeyToColor(pubkey string) string {
-	hackerPalette := []string{"[#00ff00]", "[#33ccff]", "[#ff00ff]", "[#ffff00]", "[#6600ff]", "[#5fafd7]"}
-	hash := sha256.Sum256([]byte(pubkey))
-	return hackerPalette[int(hash[0])%len(hackerPalette)]
-}
-
 func truncateString(s string, maxRunes int) string {
 	if utf8.RuneCountInString(s) <= maxRunes {
 		return s

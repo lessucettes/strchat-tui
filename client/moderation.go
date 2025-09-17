@@ -15,10 +15,10 @@ func (c *Client) blockUser(payload string) {
 
 	for _, pk := range c.userContext.Keys() {
 		if ctx, ok := c.userContext.Get(pk); ok {
-			userIdentifier := fmt.Sprintf("@%s#%s", ctx.Nick, ctx.ShortPK)
+			userIdentifier := fmt.Sprintf("@%s#%s", ctx.Nick, ctx.ShortPubKey)
 			if strings.HasPrefix(userIdentifier, payload) {
 				pkToBlock = pk
-				nickToBlock = fmt.Sprintf("%s#%s", ctx.Nick, ctx.ShortPK)
+				nickToBlock = fmt.Sprintf("%s#%s", ctx.Nick, ctx.ShortPubKey)
 				break
 			}
 		}

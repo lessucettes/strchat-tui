@@ -366,23 +366,26 @@ func (c *Client) processEvent(ev *nostr.Event, relayURL string) {
 	}
 
 	c.userContext.Add(ev.PubKey, UserContext{
-		Nick:    nick,
-		Chat:    eventChat,
-		ShortPK: spk,
+		Nick:        nick,
+		Chat:        eventChat,
+		ShortPubKey: spk,
 	})
 
 	timestamp := time.Unix(int64(ev.CreatedAt), 0).Format("15:04:05")
 
+	isOwn := ev.PubKey == c.pk
+
 	c.eventsChan <- DisplayEvent{
-		Type:      "NEW_MESSAGE",
-		Timestamp: timestamp,
-		Nick:      nick,
-		Color:     pubkeyToColor(ev.PubKey),
-		PubKey:    spk,
-		Content:   content,
-		ID:        ev.ID[len(ev.ID)-4:],
-		Chat:      eventChat,
-		RelayURL:  relayURL,
+		Type:         "NEW_MESSAGE",
+		Timestamp:    timestamp,
+		Nick:         nick,
+		FullPubKey:   ev.PubKey,
+		ShortPubKey:  spk,
+		IsOwnMessage: isOwn,
+		Content:      content,
+		ID:           ev.ID[len(ev.ID)-4:],
+		Chat:         eventChat,
+		RelayURL:     relayURL,
 	}
 }
 
@@ -393,7 +396,7 @@ func (c *Client) publishMessage(message string) {
 		var matchedReplyTag string
 		for _, pk := range c.userContext.Keys() {
 			if ctx, ok := c.userContext.Get(pk); ok {
-				replyTag := fmt.Sprintf("@%s#%s", ctx.Nick, ctx.ShortPK)
+				replyTag := fmt.Sprintf("@%s#%s", ctx.Nick, ctx.ShortPubKey)
 				if strings.HasPrefix(message, replyTag) {
 					if len(replyTag) > len(matchedReplyTag) {
 						matchedReplyTag = replyTag

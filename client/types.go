@@ -43,16 +43,17 @@ type RelayInfo struct {
 
 // DisplayEvent represents an event sent from the client to the TUI for display.
 type DisplayEvent struct {
-	Type      string
-	Timestamp string
-	Nick      string
-	Color     string
-	Content   string
-	PubKey    string
-	RelayURL  string
-	ID        string
-	Chat      string
-	Payload   any
+	Type         string
+	Timestamp    string
+	Nick         string
+	Content      string
+	FullPubKey   string
+	ShortPubKey  string
+	IsOwnMessage bool
+	RelayURL     string
+	ID           string
+	Chat         string
+	Payload      any
 }
 
 // StateUpdate is a specific payload for a DisplayEvent to update the TUI's state.
@@ -64,9 +65,9 @@ type StateUpdate struct {
 
 // UserContext holds cached information about a user in a specific chat.
 type UserContext struct {
-	Nick    string
-	Chat    string
-	ShortPK string
+	Nick        string
+	Chat        string
+	ShortPubKey string
 }
 
 // ManagedRelay wraps a nostr.Relay with additional state for management.

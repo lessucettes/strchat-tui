@@ -1,7 +1,10 @@
 // tui/utils.go
 package tui
 
-import "strings"
+import (
+	"crypto/sha256"
+	"strings"
+)
 
 // extractNickPrefix finds a potential nick prefix (e.g., "@user#1234") at the end of a string.
 // It returns the found nick and a boolean indicating if the nick is complete (has a valid tag).
@@ -38,4 +41,13 @@ func extractNickPrefix(s string) (nick string, complete bool) {
 	}
 
 	return after, false
+}
+
+// pubkeyToColor selects a color for a pubkey from a given palette.
+func pubkeyToColor(pubkey string, palette []string) string {
+	if len(palette) == 0 {
+		return "[white]" // Fallback
+	}
+	hash := sha256.Sum256([]byte(pubkey))
+	return palette[int(hash[0])%len(palette)]
 }
