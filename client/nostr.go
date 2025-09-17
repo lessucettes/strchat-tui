@@ -21,13 +21,10 @@ import (
 
 func retryWithBackoff(ctx context.Context, fn func() error) error {
 	delay := 500 * time.Millisecond
-	attempt := 1
 	for {
 		if err := fn(); err == nil {
 			return nil
 		}
-
-		log.Printf("Retry attempt %d failed, waiting %v before next attempt.", attempt, delay)
 
 		select {
 		case <-ctx.Done():
@@ -145,7 +142,7 @@ func (c *Client) manageRelayConnection(url string, chats []string) {
 		start := time.Now()
 		relay, err := nostr.RelayConnect(c.ctx, url)
 		if err != nil {
-			c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Failed to connect to %s: %v", url, err)}
+			c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Failed to connect to %s: %v", url, err)}
 			return err
 		}
 		latency := time.Since(start)
@@ -169,6 +166,7 @@ func (c *Client) manageRelayConnection(url string, chats []string) {
 		c.sendRelaysUpdate()
 
 		if _, err := c.replaceSubscription(mr, chats); err != nil {
+			c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Initial subscription to %s failed.", url)}
 			relay.Close()
 			c.relaysMu.Lock()
 			delete(c.relays, url)
@@ -263,7 +261,8 @@ func (c *Client) listenForEvents(mr *ManagedRelay) {
 
 		case ev, ok := <-sub.Events:
 			if !ok {
-				log.Printf("Subscription closed on %s, attempting to resubscribe...", mr.URL)
+				c.eventsChan <- DisplayEvent{Type: "STATUS",
+					Content: fmt.Sprintf("Subscription closed on %s, attempting to resubscribe...", mr.URL)}
 				oldChats := mrCurrentChatsLocked(sub)
 
 				mr.mu.Lock()
@@ -284,10 +283,11 @@ func (c *Client) listenForEvents(mr *ManagedRelay) {
 				})
 
 				if err != nil {
-					log.Printf("Could not re-establish subscription on %s: %v. Listener stopped.", mr.URL, err)
+					c.eventsChan <- DisplayEvent{Type: "ERROR",
+						Content: fmt.Sprintf("Could not re-establish subscription on %s. Listener stopped.", mr.URL)}
 					return
 				}
-				log.Printf("Successfully resubscribed to %s", mr.URL)
+				c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Successfully reconnected to %s!", mr.URL)}
 				continue
 			}
 			if ev == nil {
