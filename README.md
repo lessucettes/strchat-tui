@@ -1,7 +1,5 @@
 # strchat-tui
 
-[![Go Version](https://img.shields.io/badge/go-1.18+-blue.svg)](https://golang.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![My NIP-05](https://img.shields.io/badge/NIP--05-__@dukenukemmustdie.com-8E44AD?logo=nostr&logoColor=white)](https://dukenukemmustdie.com)
 
 A simple and stylish TUI client for various Nostr-based chats.
