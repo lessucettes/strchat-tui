@@ -261,7 +261,7 @@ func (c *Client) listMutes() {
 		} else {
 			statusSymbol = "-"
 		}
-		b.WriteString(fmt.Sprintf("\n[%d] [%s] %s", i+1, statusSymbol, m.Pattern))
+		b.WriteString(fmt.Sprintf("\n[%d] %s %s", i+1, statusSymbol, m.Pattern))
 	}
 	c.eventsChan <- DisplayEvent{Type: "INFO", Content: b.String()}
 }
