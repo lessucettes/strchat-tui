@@ -190,11 +190,7 @@ func (t *TUI) handleCommand(text string) {
 			t.actionsChan <- client.UserAction{Type: "UNBLOCK_USER", Payload: payload}
 		}
 	case "/filter", "/f":
-		if payload == "" {
-			t.actionsChan <- client.UserAction{Type: "LIST_FILTERS"}
-		} else {
-			t.actionsChan <- client.UserAction{Type: "ADD_FILTER", Payload: payload}
-		}
+		t.actionsChan <- client.UserAction{Type: "HANDLE_FILTER", Payload: payload}
 	case "/unfilter", "/uf":
 		if payload == "" {
 			t.actionsChan <- client.UserAction{Type: "CLEAR_FILTERS"}
@@ -202,11 +198,7 @@ func (t *TUI) handleCommand(text string) {
 			t.actionsChan <- client.UserAction{Type: "REMOVE_FILTER", Payload: payload}
 		}
 	case "/mute", "/m":
-		if payload == "" {
-			t.actionsChan <- client.UserAction{Type: "LIST_MUTES"}
-		} else {
-			t.actionsChan <- client.UserAction{Type: "ADD_MUTE", Payload: payload}
-		}
+		t.actionsChan <- client.UserAction{Type: "HANDLE_MUTE", Payload: payload}
 	case "/unmute", "/um":
 		if payload == "" {
 			t.actionsChan <- client.UserAction{Type: "CLEAR_MUTES"}

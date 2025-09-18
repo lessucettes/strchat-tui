@@ -221,9 +221,9 @@ func (c *Client) getHelp() {
 		"[blue]*[-] /pow [number] - Sets Proof-of-Work difficulty for the active chat/group. 0 to disable. (Alias: /p)\n" +
 		"[blue]*[-] /block [@nick] - Blocks a user. Without nick, lists blocked users. (Alias: /b)\n" +
 		"[blue]*[-] /unblock [<num>|@nick|pubkey] - Unblocks a user. Without args, lists blocked users. (Alias: /ub)\n" +
-		"[blue]*[-] /filter [word|regex] - Adds a filter. Without args, lists filters. (Alias: /f)\n" +
+		"[blue]*[-] /filter [word|regex|<num>] - Adds a filter. Without args, lists filters. With number, toggles off/on. (Alias: /f)\n" +
 		"[blue]*[-] /unfilter [<num>] - Removes a filter by number. Without args, clears all. (Alias: /uf)\n" +
-		"[blue]*[-] /mute [word|regex] - Adds a mute. Without args, lists mutes. (Alias: /m)\n" +
+		"[blue]*[-] /mute [word|regex|<num>] - Adds a mute. Without args, lists mutes. With number, toggles off/on. (Alias: /m)\n" +
 		"[blue]*[-] /unmute [<num>] - Removes a mute by number. Without args, clears all. (Alias: /um)\n" +
 		"[blue]*[-] /quit - Exits the application. (Alias: /q)"
 

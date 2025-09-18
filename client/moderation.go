@@ -121,15 +121,47 @@ func (c *Client) matchesAny(content string, patterns []compiledPattern) bool {
 	return false
 }
 
-func (c *Client) addFilter(p string) {
-	if p == "" {
+// --- Filter Management ---
+
+func (c *Client) handleFilter(payload string) {
+	if payload == "" {
 		c.listFilters()
 		return
 	}
-	c.config.Filters = append(c.config.Filters, p)
+
+	if idx, err := strconv.Atoi(payload); err == nil {
+		c.toggleFilter(idx)
+		return
+	}
+
+	c.addFilter(payload)
+}
+
+func (c *Client) addFilter(p string) {
+	newFilter := Filter{Pattern: p, Enabled: true}
+	c.config.Filters = append(c.config.Filters, newFilter)
 	c.saveConfig()
 	c.rebuildRegexCaches()
-	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Added filter: " + p}
+	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Added and enabled filter: " + p}
+}
+
+func (c *Client) toggleFilter(idx int) {
+	if idx < 1 || idx > len(c.config.Filters) {
+		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Invalid filter number: %d. Use '/filter' to see the list.", idx)}
+		return
+	}
+	filterIndex := idx - 1
+
+	c.config.Filters[filterIndex].Enabled = !c.config.Filters[filterIndex].Enabled
+
+	c.saveConfig()
+	c.rebuildRegexCaches()
+
+	status := "disabled"
+	if c.config.Filters[filterIndex].Enabled {
+		status = "enabled"
+	}
+	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Filter %d (%s) is now %s.", idx, c.config.Filters[filterIndex].Pattern, status)}
 }
 
 func (c *Client) listFilters() {
@@ -140,7 +172,13 @@ func (c *Client) listFilters() {
 	var b strings.Builder
 	b.WriteString("\nFilters:")
 	for i, f := range c.config.Filters {
-		b.WriteString(fmt.Sprintf("\n[%d] %s", i+1, f))
+		var statusSymbol string
+		if f.Enabled {
+			statusSymbol = "+"
+		} else {
+			statusSymbol = "-"
+		}
+		b.WriteString(fmt.Sprintf("\n[%d] %s %s", i+1, statusSymbol, f.Pattern))
 	}
 	c.eventsChan <- DisplayEvent{Type: "INFO", Content: b.String()}
 }
@@ -155,7 +193,7 @@ func (c *Client) removeFilter(p string) {
 		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "Invalid filter number."}
 		return
 	}
-	removed := c.config.Filters[idx-1]
+	removed := c.config.Filters[idx-1].Pattern
 	c.config.Filters = append(c.config.Filters[:idx-1], c.config.Filters[idx:]...)
 	c.saveConfig()
 	c.rebuildRegexCaches()
@@ -163,21 +201,50 @@ func (c *Client) removeFilter(p string) {
 }
 
 func (c *Client) clearFilters() {
-	c.config.Filters = []string{}
+	c.config.Filters = []Filter{}
 	c.saveConfig()
 	c.rebuildRegexCaches()
 	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Cleared all filters."}
 }
 
-func (c *Client) addMute(p string) {
-	if p == "" {
+// --- Mute Management ---
+
+func (c *Client) handleMute(payload string) {
+	if payload == "" {
 		c.listMutes()
 		return
 	}
-	c.config.Mutes = append(c.config.Mutes, p)
+	if idx, err := strconv.Atoi(payload); err == nil {
+		c.toggleMute(idx)
+		return
+	}
+	c.addMute(payload)
+}
+
+func (c *Client) addMute(p string) {
+	newMute := Filter{Pattern: p, Enabled: true}
+	c.config.Mutes = append(c.config.Mutes, newMute)
 	c.saveConfig()
 	c.rebuildRegexCaches()
-	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Muted: " + p}
+	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Muted and enabled: " + p}
+}
+
+func (c *Client) toggleMute(idx int) {
+	if idx < 1 || idx > len(c.config.Mutes) {
+		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Invalid mute number: %d. Use '/mute' to see the list.", idx)}
+		return
+	}
+	muteIndex := idx - 1
+
+	c.config.Mutes[muteIndex].Enabled = !c.config.Mutes[muteIndex].Enabled
+	c.saveConfig()
+	c.rebuildRegexCaches()
+
+	status := "disabled"
+	if c.config.Mutes[muteIndex].Enabled {
+		status = "enabled"
+	}
+	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Mute %d (%s) is now %s.", idx, c.config.Mutes[muteIndex].Pattern, status)}
 }
 
 func (c *Client) listMutes() {
@@ -188,7 +255,13 @@ func (c *Client) listMutes() {
 	var b strings.Builder
 	b.WriteString("\nMutes:")
 	for i, m := range c.config.Mutes {
-		b.WriteString(fmt.Sprintf("\n[%d] %s", i+1, m))
+		var statusSymbol string
+		if m.Enabled {
+			statusSymbol = "+"
+		} else {
+			statusSymbol = "-"
+		}
+		b.WriteString(fmt.Sprintf("\n[%d] [%s] %s", i+1, statusSymbol, m.Pattern))
 	}
 	c.eventsChan <- DisplayEvent{Type: "INFO", Content: b.String()}
 }
@@ -203,7 +276,7 @@ func (c *Client) removeMute(p string) {
 		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "Invalid mute number."}
 		return
 	}
-	removed := c.config.Mutes[idx-1]
+	removed := c.config.Mutes[idx-1].Pattern
 	c.config.Mutes = append(c.config.Mutes[:idx-1], c.config.Mutes[idx:]...)
 	c.saveConfig()
 	c.rebuildRegexCaches()
@@ -211,17 +284,19 @@ func (c *Client) removeMute(p string) {
 }
 
 func (c *Client) clearMutes() {
-	c.config.Mutes = []string{}
+	c.config.Mutes = []Filter{}
 	c.saveConfig()
 	c.rebuildRegexCaches()
 	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Cleared all mutes."}
 }
 
 func (c *Client) rebuildRegexCaches() {
-	compileAll := func(src []string) []compiledPattern {
+	compileAll := func(src []Filter) []compiledPattern {
 		out := make([]compiledPattern, 0, len(src))
-		for _, raw := range src {
-			out = append(out, compilePattern(raw))
+		for _, item := range src {
+			if item.Enabled {
+				out = append(out, compilePattern(item.Pattern))
+			}
 		}
 		return out
 	}

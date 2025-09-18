@@ -23,6 +23,12 @@ type BlockedUser struct {
 	Nick   string `json:"nick,omitempty"`
 }
 
+// Filter defines a pattern and its current state (enabled/disabled).
+type Filter struct {
+	Pattern string `json:"pattern"`
+	Enabled bool   `json:"enabled"`
+}
+
 // Config is the main structure of the configuration file.
 type Config struct {
 	PrivateKey     string        `json:"private_key"`
@@ -31,8 +37,8 @@ type Config struct {
 	ActiveViewName string        `json:"active_view_name"`
 	BlockedUsers   []BlockedUser `json:"blocked_users,omitempty"`
 
-	Filters []string `json:"filters,omitempty"`
-	Mutes   []string `json:"mutes,omitempty"`
+	Filters []Filter `json:"filters,omitempty"`
+	Mutes   []Filter `json:"mutes,omitempty"`
 
 	path string `json:"-"`
 }
@@ -99,9 +105,11 @@ func createDefaultConfig(path string) (*Config, error) {
 		Views:          []View{},
 		ActiveViewName: "",
 		BlockedUsers:   []BlockedUser{},
-		Filters:        []string{},
-		Mutes:          []string{},
-		path:           path,
+
+		Filters: []Filter{},
+		Mutes:   []Filter{},
+
+		path: path,
 	}
 	return conf, conf.Save()
 }

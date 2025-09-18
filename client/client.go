@@ -150,18 +150,14 @@ func (c *Client) handleAction(action UserAction) {
 		c.unblockUser(action.Payload)
 	case "LIST_BLOCKED":
 		c.listBlockedUsers()
-	case "ADD_FILTER":
-		c.addFilter(action.Payload)
-	case "LIST_FILTERS":
-		c.listFilters()
+	case "HANDLE_FILTER":
+		c.handleFilter(action.Payload)
 	case "REMOVE_FILTER":
 		c.removeFilter(action.Payload)
 	case "CLEAR_FILTERS":
 		c.clearFilters()
-	case "ADD_MUTE":
-		c.addMute(action.Payload)
-	case "LIST_MUTES":
-		c.listMutes()
+	case "HANDLE_MUTE":
+		c.handleMute(action.Payload)
 	case "REMOVE_MUTE":
 		c.removeMute(action.Payload)
 	case "CLEAR_MUTES":
