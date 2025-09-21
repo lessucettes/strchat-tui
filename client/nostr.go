@@ -595,11 +595,24 @@ func (c *client) publish(ev nostr.Event, targetChat string, relaysForPublishing 
 	}
 	wg.Wait()
 
-	status := fmt.Sprintf("Event %s sent to %d/%d relays for chat %s.", ev.ID[len(ev.ID)-4:], successCount, len(relaysForPublishing), targetChat)
-	if len(errorMessages) > 0 {
-		status += " Errors: " + strings.Join(errorMessages, ", ")
+	c.eventsChan <- DisplayEvent{
+		Type: "STATUS",
+		Content: fmt.Sprintf("Event %s sent to %d/%d relays for %s.",
+			ev.ID[len(ev.ID)-4:], successCount, len(relaysForPublishing), targetChat),
 	}
-	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: status}
+
+	for _, em := range errorMessages {
+		c.eventsChan <- DisplayEvent{
+			Type:    "ERROR",
+			Content: "Publish failed on " + em,
+		}
+		if pow, ok := parsePowHint(em); ok && pow > 0 {
+			c.eventsChan <- DisplayEvent{
+				Type:    "INFO",
+				Content: fmt.Sprintf("Hint: relay suggests PoW %d for %s. Try `/pow %d` and resend.", pow, targetChat, pow),
+			}
+		}
+	}
 }
 
 func (c *client) createEvent(message string, kind int, tags nostr.Tags, difficulty int) nostr.Event {

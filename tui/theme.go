@@ -39,14 +39,15 @@ var defaultTheme = &theme{
 
 // monochromeTheme is a simple black and white theme for high contrast.
 var monochromeTheme = &theme{
-	textColor:      tcell.ColorWhite,
-	borderColor:    tcell.ColorWhite,
-	titleColor:     tcell.ColorWhite,
-	inputBgColor:   tcell.ColorWhite,
-	inputTextColor: tcell.ColorBlack,
-	logInfoColor:   tcell.ColorWhite,
-	logWarnColor:   tcell.ColorWhite,
-	logErrorColor:  tcell.ColorWhite,
+	backgroundColor: tcell.ColorBlack,
+	textColor:       tcell.ColorWhite,
+	borderColor:     tcell.ColorWhite,
+	titleColor:      tcell.ColorWhite,
+	inputBgColor:    tcell.ColorWhite,
+	inputTextColor:  tcell.ColorBlack,
+	logInfoColor:    tcell.ColorWhite,
+	logWarnColor:    tcell.ColorWhite,
+	logErrorColor:   tcell.ColorWhite,
 	nickPalette: []string{
 		"[white]",
 	},

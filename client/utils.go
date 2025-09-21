@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"math/bits"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -74,6 +75,20 @@ func isPoWValid(event *nostr.Event, minDifficulty int) bool {
 
 	actualDifficulty := countLeadingZeroBits(event.ID)
 	return actualDifficulty >= claimedDifficulty
+}
+
+var powHintRe = regexp.MustCompile(`(?i)\b(?:attach|with)?\s*pow(?:\s+of)?\s+difficulty\s+(\d+)\b`)
+
+func parsePowHint(s string) (int, bool) {
+	m := powHintRe.FindStringSubmatch(s)
+	if len(m) < 2 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 func sameStringSet(a, b []string) bool {
