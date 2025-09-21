@@ -66,7 +66,7 @@ func New(actions chan<- client.UserAction, events <-chan client.DisplayEvent) *t
 		recentRecipients:  []string{},
 		rrIdx:             -1,
 		lastNickQuery:     "",
-		theme:             monochromeTheme,
+		theme:             defaultTheme,
 	}
 
 	t.setupViews()
