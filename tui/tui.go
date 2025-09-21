@@ -347,29 +347,46 @@ func (t *tui) handleNewMessage(event client.DisplayEvent) {
 
 	if showMessage {
 		nickColorTag := pubkeyToColor(event.FullPubKey, t.theme.nickPalette)
-		if event.IsOwnMessage {
-			nickColorTag = strings.Replace(nickColorTag, "]", "::b]", 1)
-		}
+
+		ownColorTag := fmt.Sprintf("[%s]", t.theme.inputTextColor)
+		ownNickTag := fmt.Sprintf("[%s::b]", t.theme.inputTextColor)
 
 		mention := "@" + t.nick
 		content := event.Content
 		if t.nick != "" && strings.Contains(content, mention) {
-			content = strings.ReplaceAll(content, mention, fmt.Sprintf("[%s::b]%s[-::-]", t.theme.titleColor, mention))
+			content = strings.ReplaceAll(
+				content,
+				mention,
+				fmt.Sprintf("[%s::b]%s[-::-]", t.theme.inputTextColor, mention),
+			)
 		}
 
 		label := ""
+		activeView := t.views[t.activeViewIndex]
 		if activeView.IsGroup {
 			label = fmt.Sprintf("[%s]%s[-] ", t.theme.titleColor, event.Chat)
 		}
 
-		fmt.Fprintf(
-			t.output,
-			"\n%s%s%s[-::-]#%s> %s [%s][%s %s][-]",
-			label, nickColorTag, event.Nick, event.ShortPubKey, content,
-			t.theme.logInfoColor, event.ID, event.Timestamp,
-		)
+		if event.IsOwnMessage {
+			fmt.Fprintf(
+				t.output,
+				"\n%s%s%s[-::-]#%s> %s%s[-] [%s][%s %s][-]",
+				label,
+				ownNickTag, event.Nick, event.ShortPubKey,
+				ownColorTag, content,
+				t.theme.logInfoColor, event.ID, event.Timestamp,
+			)
+		} else {
+			fmt.Fprintf(
+				t.output,
+				"\n%s%s%s[-::-]#%s> %s [%s][%s %s][-]",
+				label,
+				nickColorTag, event.Nick, event.ShortPubKey,
+				content,
+				t.theme.logInfoColor, event.ID, event.Timestamp,
+			)
+		}
 	}
-
 	if !t.outputMaximized {
 		t.output.ScrollToEnd()
 	}
