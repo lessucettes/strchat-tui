@@ -347,20 +347,27 @@ func (t *tui) handleNewMessage(event client.DisplayEvent) {
 
 	if showMessage {
 		nickColorTag := pubkeyToColor(event.FullPubKey, t.theme.nickPalette)
-
 		if event.IsOwnMessage {
 			nickColorTag = strings.Replace(nickColorTag, "]", "::b]", 1)
 		}
 
 		mention := "@" + t.nick
 		content := event.Content
-
 		if t.nick != "" && strings.Contains(content, mention) {
 			content = strings.ReplaceAll(content, mention, fmt.Sprintf("[%s::b]%s[-::-]", t.theme.titleColor, mention))
 		}
 
-		fmt.Fprintf(t.output, "\n[%s]%s[-] %s%s[-::-]#%s> %s [%s][%s %s][-]",
-			t.theme.titleColor, event.Chat, nickColorTag, event.Nick, event.ShortPubKey, content, t.theme.logInfoColor, event.ID, event.Timestamp)
+		label := ""
+		if activeView.IsGroup {
+			label = fmt.Sprintf("[%s]%s[-] ", t.theme.titleColor, event.Chat)
+		}
+
+		fmt.Fprintf(
+			t.output,
+			"\n%s%s%s[-::-]#%s> %s [%s][%s %s][-]",
+			label, nickColorTag, event.Nick, event.ShortPubKey, content,
+			t.theme.logInfoColor, event.ID, event.Timestamp,
+		)
 	}
 
 	if !t.outputMaximized {
