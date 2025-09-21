@@ -261,8 +261,8 @@ func (c *client) listenForEvents(mr *managedRelay) {
 
 		case ev, ok := <-sub.Events:
 			if !ok {
-				c.eventsChan <- DisplayEvent{Type: "STATUS",
-					Content: fmt.Sprintf("Subscription closed on %s", mr.url)}
+				//				c.eventsChan <- DisplayEvent{Type: "STATUS",
+				//	Content: fmt.Sprintf("Subscription closed on %s", mr.url)}
 				oldChats := mrCurrentChatsLocked(sub)
 
 				mr.mu.Lock()
