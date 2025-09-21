@@ -12,7 +12,7 @@ import (
 )
 
 // updateChatList refreshes the chat list view, indicating the active and selected chats.
-func (t *TUI) updateChatList() {
+func (t *tui) updateChatList() {
 	currentItem := t.chatList.GetCurrentItem()
 	t.chatList.Clear()
 	if len(t.views) == 0 {
@@ -52,8 +52,8 @@ func (t *TUI) updateChatList() {
 }
 
 // updateDetailsView refreshes the details panel, showing relays or group members.
-func (t *TUI) updateDetailsView() {
-	t.detailsView.SetTitle("Info (Alt+N)")
+func (t *tui) updateDetailsView() {
+	t.detailsView.SetTitle(titleInfo)
 	t.detailsView.Clear()
 
 	if t.chatList.GetItemCount() == 0 || len(t.views) == 0 {
@@ -67,31 +67,32 @@ func (t *TUI) updateDetailsView() {
 
 	if selectedView.IsGroup {
 		var builder strings.Builder
-		builder.WriteString(fmt.Sprintf(" [yellow]Chats of %s:[-]\n", selectedView.Name))
+		builder.WriteString(fmt.Sprintf(" [%s]Chats of %s:[-]\n", t.theme.logWarnColor, selectedView.Name))
 		for _, child := range selectedView.Children {
 			builder.WriteString(fmt.Sprintf(" - %s\n", child))
 		}
 		fmt.Fprint(t.detailsView, builder.String())
 	} else {
 		var builder strings.Builder
-		builder.WriteString("[yellow]Connected Relays:[-]\n")
+		builder.WriteString(fmt.Sprintf("[%s]Connected Relays:[-]\n", t.theme.logWarnColor))
 
 		sort.SliceStable(t.relays, func(i, j int) bool {
 			return t.relays[i].URL < t.relays[j].URL
 		})
 
 		if len(t.relays) == 0 {
-			builder.WriteString(" [grey]Not connected...[-]\n")
+			builder.WriteString(fmt.Sprintf(" [%s]Not connected...[-]\n", t.theme.logInfoColor))
 		} else {
 			for _, r := range t.relays {
-				var statusColor string
+				var statusColor tcell.Color
 				if r.Latency > 750*time.Millisecond {
-					statusColor = "yellow"
+					statusColor = t.theme.logWarnColor
 				} else {
-					statusColor = "green"
+					statusColor = t.theme.titleColor
 				}
+				host := strings.TrimPrefix(strings.TrimPrefix(r.URL, "wss://"), "ws://")
 				builder.WriteString(fmt.Sprintf(" [%s]●[-] %s [-]\n",
-					statusColor, r.URL[6:]))
+					statusColor, host))
 			}
 		}
 		fmt.Fprint(t.detailsView, builder.String())
@@ -99,7 +100,7 @@ func (t *TUI) updateDetailsView() {
 }
 
 // updateInputLabel sets the prompt label for the input field, including the user's nick.
-func (t *TUI) updateInputLabel() {
+func (t *tui) updateInputLabel() {
 	if t.nick != "" {
 		t.input.SetLabel(fmt.Sprintf("%s > ", t.nick))
 	} else {
@@ -108,7 +109,7 @@ func (t *TUI) updateInputLabel() {
 }
 
 // updateFocusBorders changes widget border colors to highlight the focused element.
-func (t *TUI) updateFocusBorders() {
+func (t *tui) updateFocusBorders() {
 	currentFocus := t.app.GetFocus()
 	unfocusedColor := tview.Styles.BorderColor
 	focusedColor := tview.Styles.TitleColor
@@ -133,26 +134,27 @@ func (t *TUI) updateFocusBorders() {
 }
 
 // updateHints displays context-sensitive hints for the user.
-func (t *TUI) updateHints() {
+func (t *tui) updateHints() {
 	var hintText string
-	baseHints := "[lime]Alt+...[-]: Focus | [lime]Ctrl+C[-]: Quit"
+	highlight := t.theme.titleColor
+	baseHints := fmt.Sprintf("[%[1]s]Alt+...[-]: Focus | [%[1]s]Ctrl+C[-]: Quit", highlight)
 
 	if t.logsMaximized {
-		hintText = "[lime]`[-]: Restore | [lime]↑/↓[-]: Scroll | [lime]Ctrl+C[-]: Quit"
+		hintText = fmt.Sprintf("[%[1]s]`[-]: Restore | [%[1]s]↑/↓[-]: Scroll | [%[1]s]Ctrl+C[-]: Quit", highlight)
 	} else if t.outputMaximized {
-		hintText = "[lime]`[-]: Restore | [lime]↑/↓[-]: Scroll | [lime]Ctrl+C[-]: Quit"
+		hintText = fmt.Sprintf("[%[1]s]`[-]: Restore | [%[1]s]↑/↓[-]: Scroll | [%[1]s]Ctrl+C[-]: Quit", highlight)
 	} else {
 		switch t.app.GetFocus() {
 		case t.input:
-			hintText = "[lime]Enter[-]: Send | [lime]Ctrl+P/N[-]: History | [lime]Tab/Shift+Tab[-]: Cycle Focus | " + baseHints
+			hintText = fmt.Sprintf("[%[1]s]Enter[-]: Send | [%[1]s]Ctrl+P/N[-]: History | [%[1]s]Tab/Shift+Tab[-]: Cycle Focus | %s", highlight, baseHints)
 		case t.output:
-			hintText = "[lime]`[-]: Maximize | [lime]↑/↓[-]: Scroll | [lime]Tab/Shift+Tab[-]: Cycle Focus | " + baseHints
+			hintText = fmt.Sprintf("[%[1]s]`[-]: Maximize | [%[1]s]↑/↓[-]: Scroll | [%[1]s]Tab/Shift+Tab[-]: Cycle Focus | %s", highlight, baseHints)
 		case t.detailsView:
-			hintText = "[lime]↑/↓[-]: Scroll | [lime]Tab/Shift+Tab[-]: Cycle Focus | " + baseHints
+			hintText = fmt.Sprintf("[%[1]s]↑/↓[-]: Scroll | [%[1]s]Tab/Shift+Tab[-]: Cycle Focus | %s", highlight, baseHints)
 		case t.chatList:
-			hintText = "[lime]Space[-]: Select | [lime]Enter[-]: Activate | [lime]Del[-]: Delete | [lime]Tab/Shift+Tab[-]: Cycle Focus | " + baseHints
+			hintText = fmt.Sprintf("[%[1]s]Space[-]: Select | [%[1]s]Enter[-]: Activate | [%[1]s]Del[-]: Delete | [%[1]s]Tab/Shift+Tab[-]: Cycle Focus | %s", highlight, baseHints)
 		case t.logs:
-			hintText = "[lime]`[-]: Maximize | [lime]Tab/Shift+Tab[-]: Cycle Focus | " + baseHints
+			hintText = fmt.Sprintf("[%[1]s]`[-]: Maximize | [%[1]s]Tab/Shift+Tab[-]: Cycle Focus | %s", highlight, baseHints)
 		default:
 			hintText = baseHints
 		}

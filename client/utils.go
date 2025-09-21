@@ -57,7 +57,7 @@ func countLeadingZeroBits(hexString string) int {
 	return count
 }
 
-func IsPoWValid(event *nostr.Event, minDifficulty int) bool {
+func isPoWValid(event *nostr.Event, minDifficulty int) bool {
 	if minDifficulty <= 0 {
 		return true
 	}
@@ -99,15 +99,15 @@ func mrCurrentChatsLocked(sub *nostr.Subscription) []string {
 	seen := make(map[string]struct{})
 	var out []string
 	for _, f := range sub.Filters {
-		tagsToCkeck := [][]string{}
+		tagsToCheck := [][]string{}
 		if gTags, ok := f.Tags["g"]; ok {
-			tagsToCkeck = append(tagsToCkeck, gTags)
+			tagsToCheck = append(tagsToCheck, gTags)
 		}
 		if dTags, ok := f.Tags["d"]; ok {
-			tagsToCkeck = append(tagsToCkeck, dTags)
+			tagsToCheck = append(tagsToCheck, dTags)
 		}
 
-		for _, tagSet := range tagsToCkeck {
+		for _, tagSet := range tagsToCheck {
 			for _, ch := range tagSet {
 				if _, exists := seen[ch]; !exists {
 					seen[ch] = struct{}{}
@@ -211,21 +211,21 @@ var tokiPonaNouns = []string{
 	"utala", "waso", "wawa", "weka", "wile",
 }
 
-func (c *Client) getHelp() {
+func (c *client) getHelp() {
 	helpText := "COMMANDS:\n" +
-		"[blue]*[-] /join <chat1> [chat2]... - Joins one or more chats. (Alias: /j)\n" +
-		"[blue]*[-] /set [name|names...] - Without args: shows active chat. With one name: activates a chat/group. With multiple names: creates a group. (Alias: /s)\n" +
-		"[blue]*[-] /list - Lists all your chats and groups. (Alias: /l)\n" +
-		"[blue]*[-] /del [name] - Deletes a chat/group. If no name, deletes the active chat/group. (Alias: /d)\n" +
-		"[blue]*[-] /nick [new_nick] - Sets or clears your nickname. (Alias: /n)\n" +
-		"[blue]*[-] /pow [number] - Sets Proof-of-Work difficulty for the active chat/group. 0 to disable. (Alias: /p)\n" +
-		"[blue]*[-] /block [@nick] - Blocks a user. Without nick, lists blocked users. (Alias: /b)\n" +
-		"[blue]*[-] /unblock [<num>|@nick|pubkey] - Unblocks a user. Without args, lists blocked users. (Alias: /ub)\n" +
-		"[blue]*[-] /filter [word|regex|<num>] - Adds a filter. Without args, lists filters. With number, toggles off/on. (Alias: /f)\n" +
-		"[blue]*[-] /unfilter [<num>] - Removes a filter by number. Without args, clears all. (Alias: /uf)\n" +
-		"[blue]*[-] /mute [word|regex|<num>] - Adds a mute. Without args, lists mutes. With number, toggles off/on. (Alias: /m)\n" +
-		"[blue]*[-] /unmute [<num>] - Removes a mute by number. Without args, clears all. (Alias: /um)\n" +
-		"[blue]*[-] /quit - Exits the application. (Alias: /q)"
+		"* /join <chat1> [chat2]... - Joins one or more chats. (Alias: /j)\n" +
+		"* /set [name|names...] - Without args: shows active chat. With one name: activates a chat/group. With multiple names: creates a group. (Alias: /s)\n" +
+		"* /list - Lists all your chats and groups. (Alias: /l)\n" +
+		"* /del [name] - Deletes a chat/group. If no name, deletes the active chat/group. (Alias: /d)\n" +
+		"* /nick [new_nick] - Sets or clears your nickname. (Alias: /n)\n" +
+		"* /pow [number] - Sets Proof-of-Work difficulty for the active chat/group. 0 to disable. (Alias: /p)\n" +
+		"* /block [@nick] - Blocks a user. Without nick, lists blocked users. (Alias: /b)\n" +
+		"* /unblock [<num>|@nick|pubkey] - Unblocks a user. Without args, lists blocked users. (Alias: /ub)\n" +
+		"* /filter [word|regex|<num>] - Adds a filter. Without args, lists filters. With number, toggles off/on. (Alias: /f)\n" +
+		"* /unfilter [<num>] - Removes a filter by number. Without args, clears all. (Alias: /uf)\n" +
+		"* /mute [word|regex|<num>] - Adds a mute. Without args, lists mutes. With number, toggles off/on. (Alias: /m)\n" +
+		"* /unmute [<num>] - Removes a mute by number. Without args, clears all. (Alias: /um)\n" +
+		"* /quit - Exits the application. (Alias: /q)"
 
 	c.eventsChan <- DisplayEvent{Type: "INFO", Content: helpText}
 }

@@ -11,17 +11,19 @@ import (
 
 // Constants for the client's operation.
 const (
-	DefaultRelayCount    = 5
-	GeochatKind          = 20000
-	NamedChatKind        = 23333
-	SeenCacheSize        = 8192
-	UserContextCacheSize = 4096
+	defaultRelayCount    = 5
+	geochatKind          = 20000
+	namedChatKind        = 23333
+	seenCacheSize        = 8192
+	userContextCacheSize = 4096
 	MaxMsgLen            = 2000
-	MaxChatNameLen       = 12
+	maxChatNameLen       = 12
+	orderingFlushDelay   = 200 * time.Millisecond
+	perStreamBufferMax   = 256
 )
 
-// DefaultNamedChatRelays provides a fallback list of relays for named chats.
-var DefaultNamedChatRelays = []string{
+// defaultNamedChatRelays provides a fallback list of relays for named chats.
+var defaultNamedChatRelays = []string{
 	"wss://relay.damus.io",
 	"wss://relay.primal.net",
 	"wss://nos.lol",
@@ -56,6 +58,12 @@ type DisplayEvent struct {
 	Payload      any
 }
 
+type orderItem struct {
+	ev        DisplayEvent
+	createdAt int64
+	id        string
+}
+
 // StateUpdate is a specific payload for a DisplayEvent to update the TUI's state.
 type StateUpdate struct {
 	Views           []View
@@ -63,18 +71,18 @@ type StateUpdate struct {
 	Nick            string
 }
 
-// UserContext holds cached information about a user in a specific chat.
-type UserContext struct {
-	Nick        string
-	Chat        string
-	ShortPubKey string
+// userContext holds cached information about a user in a specific chat.
+type userContext struct {
+	nick        string
+	chat        string
+	shortPubKey string
 }
 
-// ManagedRelay wraps a nostr.Relay with additional state for management.
-type ManagedRelay struct {
-	URL          string
-	Relay        *nostr.Relay
-	Latency      time.Duration
+// managedRelay wraps a nostr.Relay with additional state for management.
+type managedRelay struct {
+	url          string
+	relay        *nostr.Relay
+	latency      time.Duration
 	subscription *nostr.Subscription
 	mu           sync.Mutex
 }

@@ -15,8 +15,8 @@ import (
 	"github.com/rivo/tview"
 )
 
-// TUI is the main struct that holds all TUI components.
-type TUI struct {
+// tui is the main struct that holds all tui components.
+type tui struct {
 	app         *tview.Application
 	actionsChan chan<- client.UserAction
 
@@ -35,7 +35,7 @@ type TUI struct {
 	logsMaximized   bool
 	outputMaximized bool
 	narrowMode      bool
-	theme           *Theme
+	theme           *theme
 
 	// App Data
 	views            []client.View
@@ -49,12 +49,11 @@ type TUI struct {
 	recentRecipients  []string
 	rrIdx             int
 	lastNickQuery     string
-	acPrefix          string
 }
 
 // New creates and initializes the entire TUI application.
-func New(actions chan<- client.UserAction, events <-chan client.DisplayEvent) *TUI {
-	t := &TUI{
+func New(actions chan<- client.UserAction, events <-chan client.DisplayEvent) *tui {
+	t := &tui{
 		app:               tview.NewApplication(),
 		actionsChan:       actions,
 		logsMaximized:     false,
@@ -67,8 +66,7 @@ func New(actions chan<- client.UserAction, events <-chan client.DisplayEvent) *T
 		recentRecipients:  []string{},
 		rrIdx:             -1,
 		lastNickQuery:     "",
-		acPrefix:          "",
-		theme:             DefaultTheme,
+		theme:             monochromeTheme,
 	}
 
 	t.setupViews()
@@ -87,77 +85,81 @@ func New(actions chan<- client.UserAction, events <-chan client.DisplayEvent) *T
 // logWriter is a helper to redirect the standard logger to the logs TextView.
 type logWriter struct {
 	textViewWriter io.Writer
+	getColor       func() tcell.Color
 }
 
-func (lw *logWriter) Write(p []byte) (n int, err error) {
-	message := strings.TrimSpace(string(p))
-	formattedMessage := fmt.Sprintf("\n[grey][%s] %s[-]", time.Now().Format("15:04:05"), message)
-	return lw.textViewWriter.Write([]byte(formattedMessage))
+func (lw *logWriter) Write(p []byte) (int, error) {
+	msg := strings.TrimSpace(string(p))
+	ts := time.Now().Format("15:04:05")
+	return fmt.Fprintf(lw.textViewWriter, "\n[%s][%s] %s[-]", lw.getColor(), ts, msg)
 }
 
 // Widget titles.
 const (
-	TitleLogs     = "Logs (Alt+L)"
-	TitleChats    = "Chats (Alt+C)"
-	TitleInfo     = "Info (Alt+N)"
-	TitleMessages = "Messages (Alt+O)"
-	TitleInput    = "Input (Alt+I)"
+	titleLogs     = "Logs (Alt+L)"
+	titleChats    = "Chats (Alt+C)"
+	titleInfo     = "Info (Alt+N)"
+	titleMessages = "Messages (Alt+O)"
+	titleInput    = "Input (Alt+I)"
 
-	TitleLogsShort     = "Alt+L"
-	TitleChatsShort    = "Alt+C"
-	TitleInfoShort     = "Alt+N"
-	TitleMessagesShort = "Alt+O"
-	TitleInputShort    = "Alt+I"
+	titleLogsShort     = "Alt+L"
+	titleChatsShort    = "Alt+C"
+	titleInfoShort     = "Alt+N"
+	titleMessagesShort = "Alt+O"
+	titleInputShort    = "Alt+I"
 )
 
 // setupViews creates and configures all the visual primitives of the TUI.
-func (t *TUI) setupViews() {
+func (t *tui) setupViews() {
 	t.applyTheme()
 	t.initViews()
 	t.initLayout()
 }
 
 // applyTheme sets the global styles for the application based on the current theme.
-func (t *TUI) applyTheme() {
-	tview.Styles.PrimitiveBackgroundColor = t.theme.BackgroundColor
-	tview.Styles.PrimaryTextColor = t.theme.TextColor
-	tview.Styles.BorderColor = t.theme.BorderColor
-	tview.Styles.TitleColor = t.theme.TitleColor
+func (t *tui) applyTheme() {
+	tview.Styles.PrimitiveBackgroundColor = t.theme.backgroundColor
+	tview.Styles.PrimaryTextColor = t.theme.textColor
+	tview.Styles.BorderColor = t.theme.borderColor
+	tview.Styles.TitleColor = t.theme.titleColor
 }
 
 // initViews initializes all the individual widgets for the TUI.
-func (t *TUI) initViews() {
+func (t *tui) initViews() {
 	t.logs = tview.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true).
 		SetChangedFunc(func() { t.app.Draw() })
-	t.logs.SetBorder(true).SetTitle(TitleLogs).SetTitleAlign(tview.AlignLeft)
-	customWriter := &logWriter{textViewWriter: tview.ANSIWriter(t.logs)}
+	t.logs.SetBorder(true).SetTitle(titleLogs).SetTitleAlign(tview.AlignLeft)
+	customWriter := &logWriter{
+		textViewWriter: tview.ANSIWriter(t.logs),
+		getColor:       func() tcell.Color { return t.theme.logInfoColor },
+	}
 	log.SetOutput(customWriter)
 	log.SetFlags(0)
 
 	t.chatList = tview.NewList().
 		ShowSecondaryText(false).
-		SetSelectedBackgroundColor(t.theme.BorderColor)
-	t.chatList.SetBorder(true).SetTitle(TitleChats).SetTitleAlign(tview.AlignLeft)
+		SetSelectedBackgroundColor(t.theme.borderColor)
+	t.chatList.SetBorder(true).SetTitle(titleChats).SetTitleAlign(tview.AlignLeft)
 
 	t.detailsView = tview.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true).
 		SetChangedFunc(func() { t.app.Draw() })
-	t.detailsView.SetBorder(true).SetTitle(TitleInfo).SetTitleAlign(tview.AlignLeft)
+	t.detailsView.SetBorder(true).SetTitle(titleInfo).SetTitleAlign(tview.AlignLeft)
 
 	t.output = tview.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true).
 		SetChangedFunc(func() { t.app.Draw() })
-	t.output.SetBorder(true).SetTitle(TitleMessages).SetTitleAlign(tview.AlignLeft)
+	t.output.SetBorder(true).SetTitle(titleMessages).SetTitleAlign(tview.AlignLeft)
 
 	t.input = tview.NewInputField().
-		SetLabelStyle(tcell.StyleDefault.Foreground(t.theme.TitleColor)).
-		SetFieldBackgroundColor(t.theme.InputBgColor).
-		SetFieldTextColor(t.theme.InputTextColor)
-	t.input.SetBorder(true).SetTitle(TitleInput).SetTitleAlign(tview.AlignLeft)
+		SetLabelStyle(tcell.StyleDefault.Foreground(t.theme.titleColor)).
+		SetFieldBackgroundColor(t.theme.inputBgColor).
+		SetFieldTextColor(t.theme.inputTextColor)
+	t.input.SetBorder(true).SetTitle(titleInput).SetTitleAlign(tview.AlignLeft)
 	t.input.SetAutocompleteFunc(t.handleAutocomplete)
 	t.input.SetAcceptanceFunc(func(textToCheck string, lastChar rune) bool {
 		return utf8.RuneCountInString(textToCheck) <= client.MaxMsgLen
@@ -186,7 +188,7 @@ func (t *TUI) initViews() {
 }
 
 // initLayout composes the widgets into the final layout and sets up responsiveness.
-func (t *TUI) initLayout() {
+func (t *tui) initLayout() {
 	sidebarFlex := tview.NewFlex().
 		SetDirection(tview.FlexRow).
 		AddItem(t.chatList, 0, 1, true).
@@ -207,11 +209,11 @@ func (t *TUI) initLayout() {
 		if w < narrowWidth {
 			if !t.narrowMode {
 				t.narrowMode = true
-				t.logs.SetTitle(TitleLogsShort)
-				t.output.SetTitle(TitleMessagesShort)
-				t.chatList.SetTitle(TitleChatsShort)
-				t.detailsView.SetTitle(TitleInfoShort)
-				t.input.SetTitle(TitleInputShort)
+				t.logs.SetTitle(titleLogsShort)
+				t.output.SetTitle(titleMessagesShort)
+				t.chatList.SetTitle(titleChatsShort)
+				t.detailsView.SetTitle(titleInfoShort)
+				t.input.SetTitle(titleInputShort)
 				t.input.SetLabel("> ")
 			}
 			contentGrid.SetRows(0, 5)
@@ -221,11 +223,11 @@ func (t *TUI) initLayout() {
 		} else {
 			if t.narrowMode {
 				t.narrowMode = false
-				t.logs.SetTitle(TitleLogs)
-				t.output.SetTitle(TitleMessages)
-				t.chatList.SetTitle(TitleChats)
-				t.detailsView.SetTitle(TitleInfo)
-				t.input.SetTitle(TitleInput)
+				t.logs.SetTitle(titleLogs)
+				t.output.SetTitle(titleMessages)
+				t.chatList.SetTitle(titleChats)
+				t.detailsView.SetTitle(titleInfo)
+				t.input.SetTitle(titleInput)
 				t.updateInputLabel()
 			}
 			contentGrid.SetRows(0)
@@ -259,7 +261,7 @@ func (t *TUI) initLayout() {
 }
 
 // handleAutocomplete provides completion entries for the input field.
-func (t *TUI) handleAutocomplete(currentText string) []string {
+func (t *tui) handleAutocomplete(currentText string) []string {
 	trimmed := strings.TrimSpace(currentText)
 
 	if strings.HasPrefix(trimmed, "/block ") ||
@@ -299,7 +301,7 @@ func (t *TUI) handleAutocomplete(currentText string) []string {
 }
 
 // listenForEvents is the main event loop that processes events from the client.
-func (t *TUI) listenForEvents(events <-chan client.DisplayEvent) {
+func (t *tui) listenForEvents(events <-chan client.DisplayEvent) {
 	for event := range events {
 		if event.Type == "SHUTDOWN" {
 			break
@@ -326,7 +328,7 @@ func (t *TUI) listenForEvents(events <-chan client.DisplayEvent) {
 }
 
 // handleNewMessage processes and displays a new chat message.
-func (t *TUI) handleNewMessage(event client.DisplayEvent) {
+func (t *tui) handleNewMessage(event client.DisplayEvent) {
 	if len(t.views) == 0 || t.activeViewIndex < 0 || t.activeViewIndex >= len(t.views) {
 		return
 	}
@@ -344,7 +346,7 @@ func (t *TUI) handleNewMessage(event client.DisplayEvent) {
 	}
 
 	if showMessage {
-		nickColorTag := pubkeyToColor(event.FullPubKey, t.theme.NickPalette)
+		nickColorTag := pubkeyToColor(event.FullPubKey, t.theme.nickPalette)
 
 		if event.IsOwnMessage {
 			nickColorTag = strings.Replace(nickColorTag, "]", "::b]", 1)
@@ -354,11 +356,11 @@ func (t *TUI) handleNewMessage(event client.DisplayEvent) {
 		content := event.Content
 
 		if t.nick != "" && strings.Contains(content, mention) {
-			content = strings.ReplaceAll(content, mention, "[yellow::b]"+mention+"[-::-]")
+			content = strings.ReplaceAll(content, mention, fmt.Sprintf("[%s::b]%s[-::-]", t.theme.titleColor, mention))
 		}
 
-		fmt.Fprintf(t.output, "\n[blue](%s)[-] <%s%s[-::-]#%s> %s [grey][%s %s][-]",
-			event.Chat, nickColorTag, event.Nick, event.ShortPubKey, content, event.ID, event.Timestamp)
+		fmt.Fprintf(t.output, "\n[%s]%s[-] %s%s[-::-]#%s> %s [%s][%s %s][-]",
+			t.theme.titleColor, event.Chat, nickColorTag, event.Nick, event.ShortPubKey, content, t.theme.logInfoColor, event.ID, event.Timestamp)
 	}
 
 	if !t.outputMaximized {
@@ -367,31 +369,31 @@ func (t *TUI) handleNewMessage(event client.DisplayEvent) {
 }
 
 // handleInfoMessage displays a generic informational message in the output view.
-func (t *TUI) handleInfoMessage(event client.DisplayEvent) {
-	fmt.Fprintf(t.output, "\n[blue]-- %s[-]", strings.TrimSpace(event.Content))
+func (t *tui) handleInfoMessage(event client.DisplayEvent) {
+	content := tview.Escape(strings.TrimSpace(event.Content))
+	fmt.Fprintf(t.output, "\n[%s]-- %s[-]", t.theme.titleColor, content)
 	if !t.outputMaximized {
 		t.output.ScrollToEnd()
 	}
 }
 
 // handleLogMessage displays a status or error message in the logs view.
-func (t *TUI) handleLogMessage(event client.DisplayEvent) {
-	color := "yellow"
+func (t *tui) handleLogMessage(event client.DisplayEvent) {
+	color := t.theme.logWarnColor
 	if event.Type == "ERROR" {
-		color = "red"
+		color = t.theme.logErrorColor
 	}
 	fmt.Fprintf(t.logs, "\n[%s][%s] %s: %s[-]", color, time.Now().Format("15:04:05"), event.Type, event.Content)
-
 	if !t.logsMaximized {
 		t.logs.ScrollToEnd()
 	}
 }
 
 // handleStateUpdate updates the TUI's state based on data from the client.
-func (t *TUI) handleStateUpdate(event client.DisplayEvent) {
+func (t *tui) handleStateUpdate(event client.DisplayEvent) {
 	state, ok := event.Payload.(client.StateUpdate)
 	if !ok {
-		fmt.Fprintf(t.logs, "\n[red]ERROR: Invalid STATE_UPDATE payload[-]")
+		fmt.Fprintf(t.logs, "\n[%s]ERROR: Invalid STATE_UPDATE payload[-]", t.theme.logErrorColor)
 		return
 	}
 	t.views = state.Views
@@ -403,10 +405,10 @@ func (t *TUI) handleStateUpdate(event client.DisplayEvent) {
 }
 
 // handleRelaysUpdate refreshes the list of relays.
-func (t *TUI) handleRelaysUpdate(event client.DisplayEvent) {
+func (t *tui) handleRelaysUpdate(event client.DisplayEvent) {
 	relays, ok := event.Payload.([]client.RelayInfo)
 	if !ok {
-		fmt.Fprintf(t.logs, "\n[red]ERROR: Invalid RELAYS_UPDATE payload[-]")
+		fmt.Fprintf(t.logs, "\n[%s]ERROR: Invalid RELAYS_UPDATE payload[-]", t.theme.logErrorColor)
 		return
 	}
 	t.relays = relays
@@ -414,7 +416,7 @@ func (t *TUI) handleRelaysUpdate(event client.DisplayEvent) {
 }
 
 // handleNickCompletion provides completion entries to the input field.
-func (t *TUI) handleNickCompletion(event client.DisplayEvent) {
+func (t *tui) handleNickCompletion(event client.DisplayEvent) {
 	entries, ok := event.Payload.([]string)
 	if !ok {
 		return
@@ -427,6 +429,6 @@ func (t *TUI) handleNickCompletion(event client.DisplayEvent) {
 }
 
 // Run starts the TUI application.
-func (t *TUI) Run() error {
+func (t *tui) Run() error {
 	return t.app.Run()
 }

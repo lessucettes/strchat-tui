@@ -18,39 +18,37 @@ type View struct {
 	PoW      int      `json:"pow,omitempty"`
 }
 
-type BlockedUser struct {
+type blockedUser struct {
 	PubKey string `json:"pubkey"`
 	Nick   string `json:"nick,omitempty"`
 }
 
-// Filter defines a pattern and its current state (enabled/disabled).
-type Filter struct {
+// filter defines a pattern and its current state (enabled/disabled).
+type filter struct {
 	Pattern string `json:"pattern"`
 	Enabled bool   `json:"enabled"`
 }
 
-// Config is the main structure of the configuration file.
-type Config struct {
+// config is the main structure of the configuration file.
+type config struct {
 	PrivateKey     string        `json:"private_key"`
 	Nick           string        `json:"nick,omitempty"`
 	Views          []View        `json:"views"`
 	ActiveViewName string        `json:"active_view_name"`
-	BlockedUsers   []BlockedUser `json:"blocked_users,omitempty"`
-
-	Filters []Filter `json:"filters,omitempty"`
-	Mutes   []Filter `json:"mutes,omitempty"`
-
-	path string `json:"-"`
+	BlockedUsers   []blockedUser `json:"blocked_users,omitempty"`
+	Filters        []filter      `json:"filters,omitempty"`
+	Mutes          []filter      `json:"mutes,omitempty"`
+	path           string        `json:"-"`
 }
 
-func LoadConfig() (*Config, error) {
-	appConfigDir, err := GetAppConfigDir()
+func loadConfig() (*config, error) {
+	appConfigDir, err := getAppConfigDir()
 	if err != nil {
 		return nil, err
 	}
 
 	configPath := filepath.Join(appConfigDir, "config.json")
-	conf := &Config{path: configPath}
+	conf := &config{path: configPath}
 
 	file, err := os.Open(configPath)
 	if err != nil {
@@ -68,8 +66,8 @@ func LoadConfig() (*Config, error) {
 	return conf, nil
 }
 
-// Save writes the current configuration back to the file.
-func (c *Config) Save() error {
+// save writes the current configuration back to the file.
+func (c *config) save() error {
 	dirPerm := os.FileMode(0755)
 	filePerm := os.FileMode(0644)
 
@@ -98,23 +96,23 @@ func (c *Config) Save() error {
 }
 
 // createDefaultConfig generates a new private key and a default config file.
-func createDefaultConfig(path string) (*Config, error) {
+func createDefaultConfig(path string) (*config, error) {
 	sk := nostr.GeneratePrivateKey()
-	conf := &Config{
+	conf := &config{
 		PrivateKey:     sk,
 		Views:          []View{},
 		ActiveViewName: "",
-		BlockedUsers:   []BlockedUser{},
+		BlockedUsers:   []blockedUser{},
 
-		Filters: []Filter{},
-		Mutes:   []Filter{},
+		Filters: []filter{},
+		Mutes:   []filter{},
 
 		path: path,
 	}
-	return conf, conf.Save()
+	return conf, conf.save()
 }
 
-func GetAppConfigDir() (string, error) {
+func getAppConfigDir() (string, error) {
 	configDir, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("could not get user config directory: %w", err)

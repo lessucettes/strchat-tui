@@ -39,7 +39,7 @@ func retryWithBackoff(ctx context.Context, fn func() error) error {
 
 // --- Nostr Logic ---
 
-func (c *Client) updateAllSubscriptions() {
+func (c *client) updateAllSubscriptions() {
 	activeView := c.getActiveView()
 
 	activeChats := make(map[string]struct{})
@@ -66,12 +66,12 @@ func (c *Client) updateAllSubscriptions() {
 		var relayURLs []string
 		if geohash.Validate(chat) == nil {
 			var err error
-			relayURLs, err = ClosestRelays(chat, DefaultRelayCount)
+			relayURLs, err = closestRelays(chat, defaultRelayCount)
 			if err != nil || len(relayURLs) == 0 {
-				relayURLs = DefaultNamedChatRelays
+				relayURLs = defaultNamedChatRelays
 			}
 		} else {
-			relayURLs = DefaultNamedChatRelays
+			relayURLs = defaultNamedChatRelays
 		}
 		for _, url := range relayURLs {
 			found := false
@@ -90,21 +90,21 @@ func (c *Client) updateAllSubscriptions() {
 	c.updateRelaySubscriptions(desiredRelayToChats)
 }
 
-func (c *Client) updateRelaySubscriptions(desiredRelays map[string][]string) {
+func (c *client) updateRelaySubscriptions(desiredRelays map[string][]string) {
 	c.relaysMu.Lock()
-	currentRelays := make(map[string]*ManagedRelay, len(c.relays))
+	currentRelays := make(map[string]*managedRelay, len(c.relays))
 	maps.Copy(currentRelays, c.relays)
 	c.relaysMu.Unlock()
 	var wg sync.WaitGroup
 	for url, chats := range desiredRelays {
 		if mr, exists := currentRelays[url]; exists {
 			wg.Add(1)
-			go func(mr *ManagedRelay, chats []string) {
+			go func(mr *managedRelay, chats []string) {
 				defer wg.Done()
 				if _, err := c.replaceSubscription(mr, chats); err != nil {
 					c.eventsChan <- DisplayEvent{
 						Type:    "ERROR",
-						Content: fmt.Sprintf("Resubscribe failed on %s: %v", mr.URL, err),
+						Content: fmt.Sprintf("Resubscribe failed on %s: %v", mr.url, err),
 					}
 				}
 			}(mr, chats)
@@ -125,8 +125,8 @@ func (c *Client) updateRelaySubscriptions(desiredRelays map[string][]string) {
 				mr.subscription.Unsub()
 				mr.subscription = nil
 			}
-			if mr.Relay != nil {
-				mr.Relay.Close()
+			if mr.relay != nil {
+				mr.relay.Close()
 			}
 			mr.mu.Unlock()
 			delete(c.relays, url)
@@ -137,7 +137,7 @@ func (c *Client) updateRelaySubscriptions(desiredRelays map[string][]string) {
 	c.sendRelaysUpdate()
 }
 
-func (c *Client) manageRelayConnection(url string, chats []string) {
+func (c *client) manageRelayConnection(url string, chats []string) {
 	err := retryWithBackoff(c.ctx, func() error {
 		start := time.Now()
 		relay, err := nostr.RelayConnect(c.ctx, url)
@@ -149,10 +149,10 @@ func (c *Client) manageRelayConnection(url string, chats []string) {
 
 		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Connected to %s (%dms)", url, latency.Milliseconds())}
 
-		mr := &ManagedRelay{
-			URL:     url,
-			Relay:   relay,
-			Latency: latency,
+		mr := &managedRelay{
+			url:     url,
+			relay:   relay,
+			latency: latency,
 		}
 
 		c.relaysMu.Lock()
@@ -189,7 +189,7 @@ func (c *Client) manageRelayConnection(url string, chats []string) {
 	}
 }
 
-func (c *Client) replaceSubscription(mr *ManagedRelay, chats []string) (bool, error) {
+func (c *client) replaceSubscription(mr *managedRelay, chats []string) (bool, error) {
 	mr.mu.Lock()
 	oldChats := mrCurrentChatsLocked(mr.subscription)
 	mr.mu.Unlock()
@@ -204,20 +204,20 @@ func (c *Client) replaceSubscription(mr *ManagedRelay, chats []string) (bool, er
 		since := now
 		if geohash.Validate(ch) == nil {
 			filters = append(filters, nostr.Filter{
-				Kinds: []int{GeochatKind},
+				Kinds: []int{geochatKind},
 				Tags:  nostr.TagMap{"g": []string{ch}},
 				Since: &since,
 			})
 		} else {
 			filters = append(filters, nostr.Filter{
-				Kinds: []int{NamedChatKind},
+				Kinds: []int{namedChatKind},
 				Tags:  nostr.TagMap{"d": []string{ch}},
 				Since: &since,
 			})
 		}
 	}
 
-	newSub, err := mr.Relay.Subscribe(c.ctx, filters)
+	newSub, err := mr.relay.Subscribe(c.ctx, filters)
 	if err != nil {
 		return false, fmt.Errorf("subscribe failed: %w", err)
 	}
@@ -230,16 +230,16 @@ func (c *Client) replaceSubscription(mr *ManagedRelay, chats []string) (bool, er
 	if oldSub != nil {
 		oldSub.Unsub()
 	}
-	log.Printf("Updated subscription for %s with %d chat(s)", mr.URL, len(chats))
+	log.Printf("Updated subscription for %s with %d chat(s)", mr.url, len(chats))
 
 	c.sendRelaysUpdate()
 
 	return true, nil
 }
 
-func (c *Client) listenForEvents(mr *ManagedRelay) {
-	log.Printf("Listener started for relay: %s", mr.URL)
-	defer log.Printf("Listener stopped for relay: %s", mr.URL)
+func (c *client) listenForEvents(mr *managedRelay) {
+	log.Printf("Listener started for relay: %s", mr.url)
+	defer log.Printf("Listener stopped for relay: %s", mr.url)
 
 	for {
 		if c.ctx.Err() != nil {
@@ -262,7 +262,7 @@ func (c *Client) listenForEvents(mr *ManagedRelay) {
 		case ev, ok := <-sub.Events:
 			if !ok {
 				c.eventsChan <- DisplayEvent{Type: "STATUS",
-					Content: fmt.Sprintf("Subscription closed on %s, attempting to resubscribe...", mr.URL)}
+					Content: fmt.Sprintf("Subscription closed on %s, attempting to resubscribe...", mr.url)}
 				oldChats := mrCurrentChatsLocked(sub)
 
 				mr.mu.Lock()
@@ -284,21 +284,21 @@ func (c *Client) listenForEvents(mr *ManagedRelay) {
 
 				if err != nil {
 					c.eventsChan <- DisplayEvent{Type: "ERROR",
-						Content: fmt.Sprintf("Could not re-establish subscription on %s. Listener stopped.", mr.URL)}
+						Content: fmt.Sprintf("Could not re-establish subscription on %s. Listener stopped.", mr.url)}
 					return
 				}
-				c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Successfully reconnected to %s!", mr.URL)}
+				c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Successfully reconnected to %s!", mr.url)}
 				continue
 			}
 			if ev == nil {
 				continue
 			}
-			c.processEvent(ev, mr.URL)
+			c.processEvent(ev, mr.url)
 		}
 	}
 }
 
-func (c *Client) processEvent(ev *nostr.Event, relayURL string) {
+func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 	for _, blockedUser := range c.config.BlockedUsers {
 		if ev.PubKey == blockedUser.PubKey {
 			return
@@ -339,11 +339,16 @@ func (c *Client) processEvent(ev *nostr.Event, relayURL string) {
 
 		if isRelevantToActiveView {
 			requiredPoW := activeView.PoW
-			if !IsPoWValid(ev, requiredPoW) {
+			if !isPoWValid(ev, requiredPoW) {
 				log.Printf("Dropped event %s from %s for failing PoW check (required: %d)", ev.ID[len(ev.ID)-4:], eventChat, requiredPoW)
 				return
 			}
 		}
+	}
+
+	streamKey := "chat:" + eventChat
+	if av := c.getActiveView(); av != nil && av.IsGroup && slices.Contains(av.Children, eventChat) {
+		streamKey = "group:" + av.Name
 	}
 
 	content := truncateString(ev.Content, MaxMsgLen)
@@ -365,17 +370,17 @@ func (c *Client) processEvent(ev *nostr.Event, relayURL string) {
 		spk = ev.PubKey[len(ev.PubKey)-4:]
 	}
 
-	c.userContext.Add(ev.PubKey, UserContext{
-		Nick:        nick,
-		Chat:        eventChat,
-		ShortPubKey: spk,
+	c.userContext.Add(ev.PubKey, userContext{
+		nick:        nick,
+		chat:        eventChat,
+		shortPubKey: spk,
 	})
 
 	timestamp := time.Unix(int64(ev.CreatedAt), 0).Format("15:04:05")
 
 	isOwn := ev.PubKey == c.pk
 
-	c.eventsChan <- DisplayEvent{
+	c.enqueueOrdered(streamKey, DisplayEvent{
 		Type:         "NEW_MESSAGE",
 		Timestamp:    timestamp,
 		Nick:         nick,
@@ -386,22 +391,61 @@ func (c *Client) processEvent(ev *nostr.Event, relayURL string) {
 		ID:           ev.ID[len(ev.ID)-4:],
 		Chat:         eventChat,
 		RelayURL:     relayURL,
+	}, int64(ev.CreatedAt), ev.ID)
+}
+
+func (c *client) enqueueOrdered(streamKey string, de DisplayEvent, createdAt int64, id string) {
+	c.orderMu.Lock()
+	if len(c.orderBuf[streamKey]) >= perStreamBufferMax {
+		c.orderBuf[streamKey] = c.orderBuf[streamKey][1:]
+	}
+	c.orderBuf[streamKey] = append(c.orderBuf[streamKey], orderItem{ev: de, createdAt: createdAt, id: id})
+	if _, ok := c.orderTimers[streamKey]; !ok {
+		c.orderTimers[streamKey] = time.AfterFunc(orderingFlushDelay, func() { c.flushOrdered(streamKey) })
+	}
+	c.orderMu.Unlock()
+}
+
+func (c *client) flushOrdered(streamKey string) {
+	c.orderMu.Lock()
+	buf := c.orderBuf[streamKey]
+	delete(c.orderBuf, streamKey)
+	delete(c.orderTimers, streamKey)
+	c.orderMu.Unlock()
+
+	if len(buf) == 0 {
+		return
+	}
+
+	sort.Slice(buf, func(i, j int) bool {
+		if buf[i].createdAt == buf[j].createdAt {
+			return buf[i].id < buf[j].id
+		}
+		return buf[i].createdAt < buf[j].createdAt
+	})
+
+	for _, it := range buf {
+		select {
+		case c.eventsChan <- it.ev:
+		case <-c.ctx.Done():
+			return
+		}
 	}
 }
 
-func (c *Client) publishMessage(message string) {
+func (c *client) publishMessage(message string) {
 	var targetChat string
 	var targetPubKey string
 	if strings.HasPrefix(message, "@") {
 		var matchedReplyTag string
 		for _, pk := range c.userContext.Keys() {
 			if ctx, ok := c.userContext.Get(pk); ok {
-				replyTag := fmt.Sprintf("@%s#%s", ctx.Nick, ctx.ShortPubKey)
+				replyTag := fmt.Sprintf("@%s#%s", ctx.nick, ctx.shortPubKey)
 				if strings.HasPrefix(message, replyTag) {
 					if len(replyTag) > len(matchedReplyTag) {
 						matchedReplyTag = replyTag
 						targetPubKey = pk
-						targetChat = ctx.Chat
+						targetChat = ctx.chat
 					}
 				}
 			}
@@ -432,18 +476,18 @@ func (c *Client) publishMessage(message string) {
 	var tagKey string
 	var relayURLs []string
 	if geohash.Validate(targetChat) == nil {
-		kind = GeochatKind
+		kind = geochatKind
 		tagKey = "g"
 		var err error
-		relayURLs, err = ClosestRelays(targetChat, DefaultRelayCount)
+		relayURLs, err = closestRelays(targetChat, defaultRelayCount)
 		if err != nil || len(relayURLs) == 0 {
 			c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("No relays found for chat %s", targetChat)}
 			return
 		}
 	} else {
-		kind = NamedChatKind
+		kind = namedChatKind
 		tagKey = "d"
-		relayURLs = DefaultNamedChatRelays
+		relayURLs = defaultNamedChatRelays
 	}
 
 	tags := nostr.Tags{{tagKey, targetChat}}
@@ -459,7 +503,7 @@ func (c *Client) publishMessage(message string) {
 	requiredPoW := activeView.PoW
 
 	c.relaysMu.Lock()
-	var relaysForPublishing []*ManagedRelay
+	var relaysForPublishing []*managedRelay
 	for _, url := range relayURLs {
 		if r, ok := c.relays[url]; ok {
 			relaysForPublishing = append(relaysForPublishing, r)
@@ -482,7 +526,7 @@ func (c *Client) publishMessage(message string) {
 	}
 }
 
-func (c *Client) minePoWAndPublish(ev nostr.Event, difficulty int, targetChat string, relays []*ManagedRelay) {
+func (c *client) minePoWAndPublish(ev nostr.Event, difficulty int, targetChat string, relays []*managedRelay) {
 	clone := ev
 
 	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Calculating Proof-of-Work (difficulty %d)...", difficulty)}
@@ -524,9 +568,9 @@ func (c *Client) minePoWAndPublish(ev nostr.Event, difficulty int, targetChat st
 	c.publish(clone, targetChat, relays)
 }
 
-func (c *Client) publish(ev nostr.Event, targetChat string, relaysForPublishing []*ManagedRelay) {
+func (c *client) publish(ev nostr.Event, targetChat string, relaysForPublishing []*managedRelay) {
 	sort.Slice(relaysForPublishing, func(i, j int) bool {
-		return relaysForPublishing[i].Latency < relaysForPublishing[j].Latency
+		return relaysForPublishing[i].latency < relaysForPublishing[j].latency
 	})
 
 	var wg sync.WaitGroup
@@ -536,15 +580,15 @@ func (c *Client) publish(ev nostr.Event, targetChat string, relaysForPublishing 
 
 	for _, r := range relaysForPublishing {
 		wg.Add(1)
-		go func(r *ManagedRelay) {
+		go func(r *managedRelay) {
 			defer wg.Done()
-			if err := r.Relay.Publish(c.ctx, ev); err == nil {
+			if err := r.relay.Publish(c.ctx, ev); err == nil {
 				mu.Lock()
 				successCount++
 				mu.Unlock()
 			} else {
 				mu.Lock()
-				errorMessages = append(errorMessages, fmt.Sprintf("%s: %v", r.URL, err))
+				errorMessages = append(errorMessages, fmt.Sprintf("%s: %v", r.url, err))
 				mu.Unlock()
 			}
 		}(r)
@@ -558,7 +602,7 @@ func (c *Client) publish(ev nostr.Event, targetChat string, relaysForPublishing 
 	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: status}
 }
 
-func (c *Client) createEvent(message string, kind int, tags nostr.Tags, difficulty int) nostr.Event {
+func (c *client) createEvent(message string, kind int, tags nostr.Tags, difficulty int) nostr.Event {
 	baseTags := make(nostr.Tags, 0, len(tags)+2)
 	baseTags = append(baseTags, tags...)
 	baseTags = append(baseTags, nostr.Tag{"n", c.n})
@@ -578,15 +622,15 @@ func (c *Client) createEvent(message string, kind int, tags nostr.Tags, difficul
 	return ev
 }
 
-func (c *Client) sendRelaysUpdate() {
+func (c *client) sendRelaysUpdate() {
 	c.relaysMu.Lock()
 	defer c.relaysMu.Unlock()
 
 	statuses := make([]RelayInfo, 0, len(c.relays))
 	for _, mr := range c.relays {
 		statuses = append(statuses, RelayInfo{
-			URL:     mr.URL,
-			Latency: mr.Latency,
+			URL:     mr.url,
+			Latency: mr.latency,
 		})
 	}
 

@@ -10,7 +10,7 @@ import (
 )
 
 // setupHandlers configures all the logic for handling user input.
-func (t *TUI) setupHandlers() {
+func (t *tui) setupHandlers() {
 	// Configure the handler for the main input field.
 	t.input.SetDoneFunc(func(key tcell.Key) {
 		if key != tcell.KeyEnter {
@@ -140,7 +140,7 @@ func (t *TUI) setupHandlers() {
 }
 
 // handleCommand parses and dispatches actions for slash-commands.
-func (t *TUI) handleCommand(text string) {
+func (t *tui) handleCommand(text string) {
 	parts := strings.SplitN(text, " ", 2)
 	command := parts[0]
 	payload := ""
@@ -211,7 +211,7 @@ func (t *TUI) handleCommand(text string) {
 }
 
 // cycleFocus cycles the focus between the main UI primitives.
-func (t *TUI) cycleFocus(forward bool) {
+func (t *tui) cycleFocus(forward bool) {
 	primitives := []tview.Primitive{t.input, t.chatList, t.output, t.logs, t.detailsView}
 	for i, p := range primitives {
 		if p.HasFocus() {
@@ -230,7 +230,7 @@ func (t *TUI) cycleFocus(forward bool) {
 }
 
 // handleMaximizedViewKeys handles key events when a view is maximized.
-func (t *TUI) handleMaximizedViewKeys(event *tcell.EventKey) *tcell.EventKey {
+func (t *tui) handleMaximizedViewKeys(event *tcell.EventKey) *tcell.EventKey {
 	currentFocus := t.app.GetFocus()
 	switch event.Key() {
 	case tcell.KeyRune:
@@ -258,7 +258,7 @@ func (t *TUI) handleMaximizedViewKeys(event *tcell.EventKey) *tcell.EventKey {
 }
 
 // handleChatListKeys handles key events for the chat list view.
-func (t *TUI) handleChatListKeys(event *tcell.EventKey) *tcell.EventKey {
+func (t *tui) handleChatListKeys(event *tcell.EventKey) *tcell.EventKey {
 	if key := event.Key(); key == tcell.KeyUp || key == tcell.KeyDown || key == tcell.KeyHome || key == tcell.KeyEnd {
 		return event
 	}

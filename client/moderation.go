@@ -10,15 +10,15 @@ import (
 
 // --- Moderation Logic ---
 
-func (c *Client) blockUser(payload string) {
+func (c *client) blockUser(payload string) {
 	var pkToBlock, nickToBlock string
 
 	for _, pk := range c.userContext.Keys() {
 		if ctx, ok := c.userContext.Get(pk); ok {
-			userIdentifier := fmt.Sprintf("@%s#%s", ctx.Nick, ctx.ShortPubKey)
+			userIdentifier := fmt.Sprintf("@%s#%s", ctx.nick, ctx.shortPubKey)
 			if strings.HasPrefix(userIdentifier, payload) {
 				pkToBlock = pk
-				nickToBlock = fmt.Sprintf("%s#%s", ctx.Nick, ctx.ShortPubKey)
+				nickToBlock = fmt.Sprintf("%s#%s", ctx.nick, ctx.shortPubKey)
 				break
 			}
 		}
@@ -36,12 +36,12 @@ func (c *Client) blockUser(payload string) {
 		}
 	}
 
-	c.config.BlockedUsers = append(c.config.BlockedUsers, BlockedUser{PubKey: pkToBlock, Nick: nickToBlock})
+	c.config.BlockedUsers = append(c.config.BlockedUsers, blockedUser{PubKey: pkToBlock, Nick: nickToBlock})
 	c.saveConfig()
 	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Blocked user %s. Their messages will now be hidden.", nickToBlock)}
 }
 
-func (c *Client) unblockUser(payload string) {
+func (c *client) unblockUser(payload string) {
 	idxToRemove := -1
 
 	if num, err := strconv.Atoi(payload); err == nil {
@@ -76,7 +76,7 @@ func (c *Client) unblockUser(payload string) {
 	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Unblocked user %s.", unblockedNick)}
 }
 
-func (c *Client) listBlockedUsers() {
+func (c *client) listBlockedUsers() {
 	if len(c.config.BlockedUsers) == 0 {
 		c.eventsChan <- DisplayEvent{Type: "INFO", Content: "Your block list is empty. Use /block <@nick> to block someone."}
 		return
@@ -106,7 +106,7 @@ func compilePattern(p string) compiledPattern {
 	return compiledPattern{raw: p, literal: p}
 }
 
-func (c *Client) matchesAny(content string, patterns []compiledPattern) bool {
+func (c *client) matchesAny(content string, patterns []compiledPattern) bool {
 	for _, pat := range patterns {
 		if pat.regex != nil {
 			if pat.regex.MatchString(content) {
@@ -123,7 +123,7 @@ func (c *Client) matchesAny(content string, patterns []compiledPattern) bool {
 
 // --- Filter Management ---
 
-func (c *Client) handleFilter(payload string) {
+func (c *client) handleFilter(payload string) {
 	if payload == "" {
 		c.listFilters()
 		return
@@ -137,15 +137,15 @@ func (c *Client) handleFilter(payload string) {
 	c.addFilter(payload)
 }
 
-func (c *Client) addFilter(p string) {
-	newFilter := Filter{Pattern: p, Enabled: true}
+func (c *client) addFilter(p string) {
+	newFilter := filter{Pattern: p, Enabled: true}
 	c.config.Filters = append(c.config.Filters, newFilter)
 	c.saveConfig()
 	c.rebuildRegexCaches()
 	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Added and enabled filter: " + p}
 }
 
-func (c *Client) toggleFilter(idx int) {
+func (c *client) toggleFilter(idx int) {
 	if idx < 1 || idx > len(c.config.Filters) {
 		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Invalid filter number: %d. Use '/filter' to see the list.", idx)}
 		return
@@ -164,7 +164,7 @@ func (c *Client) toggleFilter(idx int) {
 	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Filter %d (%s) is now %s.", idx, c.config.Filters[filterIndex].Pattern, status)}
 }
 
-func (c *Client) listFilters() {
+func (c *client) listFilters() {
 	if len(c.config.Filters) == 0 {
 		c.eventsChan <- DisplayEvent{Type: "INFO", Content: "No filters set."}
 		return
@@ -183,7 +183,7 @@ func (c *Client) listFilters() {
 	c.eventsChan <- DisplayEvent{Type: "INFO", Content: b.String()}
 }
 
-func (c *Client) removeFilter(p string) {
+func (c *client) removeFilter(p string) {
 	if p == "" {
 		c.clearFilters()
 		return
@@ -200,8 +200,8 @@ func (c *Client) removeFilter(p string) {
 	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Removed filter: " + removed}
 }
 
-func (c *Client) clearFilters() {
-	c.config.Filters = []Filter{}
+func (c *client) clearFilters() {
+	c.config.Filters = []filter{}
 	c.saveConfig()
 	c.rebuildRegexCaches()
 	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Cleared all filters."}
@@ -209,7 +209,7 @@ func (c *Client) clearFilters() {
 
 // --- Mute Management ---
 
-func (c *Client) handleMute(payload string) {
+func (c *client) handleMute(payload string) {
 	if payload == "" {
 		c.listMutes()
 		return
@@ -221,15 +221,15 @@ func (c *Client) handleMute(payload string) {
 	c.addMute(payload)
 }
 
-func (c *Client) addMute(p string) {
-	newMute := Filter{Pattern: p, Enabled: true}
+func (c *client) addMute(p string) {
+	newMute := filter{Pattern: p, Enabled: true}
 	c.config.Mutes = append(c.config.Mutes, newMute)
 	c.saveConfig()
 	c.rebuildRegexCaches()
 	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Muted and enabled: " + p}
 }
 
-func (c *Client) toggleMute(idx int) {
+func (c *client) toggleMute(idx int) {
 	if idx < 1 || idx > len(c.config.Mutes) {
 		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Invalid mute number: %d. Use '/mute' to see the list.", idx)}
 		return
@@ -247,7 +247,7 @@ func (c *Client) toggleMute(idx int) {
 	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Mute %d (%s) is now %s.", idx, c.config.Mutes[muteIndex].Pattern, status)}
 }
 
-func (c *Client) listMutes() {
+func (c *client) listMutes() {
 	if len(c.config.Mutes) == 0 {
 		c.eventsChan <- DisplayEvent{Type: "INFO", Content: "No mutes set."}
 		return
@@ -266,7 +266,7 @@ func (c *Client) listMutes() {
 	c.eventsChan <- DisplayEvent{Type: "INFO", Content: b.String()}
 }
 
-func (c *Client) removeMute(p string) {
+func (c *client) removeMute(p string) {
 	if p == "" {
 		c.clearMutes()
 		return
@@ -283,15 +283,15 @@ func (c *Client) removeMute(p string) {
 	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Removed mute: " + removed}
 }
 
-func (c *Client) clearMutes() {
-	c.config.Mutes = []Filter{}
+func (c *client) clearMutes() {
+	c.config.Mutes = []filter{}
 	c.saveConfig()
 	c.rebuildRegexCaches()
 	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Cleared all mutes."}
 }
 
-func (c *Client) rebuildRegexCaches() {
-	compileAll := func(src []Filter) []compiledPattern {
+func (c *client) rebuildRegexCaches() {
+	compileAll := func(src []filter) []compiledPattern {
 		out := make([]compiledPattern, 0, len(src))
 		for _, item := range src {
 			if item.Enabled {

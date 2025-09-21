@@ -17,7 +17,7 @@ import (
 
 // --- State Management ---
 
-func (c *Client) createGroup(payload string) {
+func (c *client) createGroup(payload string) {
 	existingChats := make(map[string]struct{})
 	for _, view := range c.config.Views {
 		if !view.IsGroup {
@@ -83,7 +83,7 @@ func (c *Client) createGroup(payload string) {
 	c.updateAllSubscriptions()
 }
 
-func (c *Client) joinChats(payload string) {
+func (c *client) joinChats(payload string) {
 	chatNames := strings.Fields(payload)
 	if len(chatNames) == 0 {
 		return
@@ -100,10 +100,10 @@ outer:
 				c.eventsChan <- DisplayEvent{Type: "ERROR", Content: err.Error()}
 				continue outer
 			}
-			if utf8.RuneCountInString(normalizedName) > MaxChatNameLen {
+			if utf8.RuneCountInString(normalizedName) > maxChatNameLen {
 				c.eventsChan <- DisplayEvent{
 					Type:    "ERROR",
-					Content: fmt.Sprintf("Chat name '%s' is too long (max %d chars).", normalizedName, MaxChatNameLen),
+					Content: fmt.Sprintf("Chat name '%s' is too long (max %d chars).", normalizedName, maxChatNameLen),
 				}
 				continue outer
 			}
@@ -150,7 +150,7 @@ outer:
 	}
 }
 
-func (c *Client) leaveChat(chatName string) {
+func (c *client) leaveChat(chatName string) {
 	var newViews []View
 	for _, view := range c.config.Views {
 		if !view.IsGroup && view.Name == chatName {
@@ -189,7 +189,7 @@ func (c *Client) leaveChat(chatName string) {
 	c.updateAllSubscriptions()
 }
 
-func (c *Client) deleteGroup(groupName string) {
+func (c *client) deleteGroup(groupName string) {
 	var newViews []View
 	for _, view := range c.config.Views {
 		if view.Name != groupName {
@@ -205,7 +205,7 @@ func (c *Client) deleteGroup(groupName string) {
 	c.updateAllSubscriptions()
 }
 
-func (c *Client) deleteView(viewName string) {
+func (c *client) deleteView(viewName string) {
 	if viewName == "" {
 		activeView := c.getActiveView()
 		if activeView == nil {
@@ -237,7 +237,7 @@ func (c *Client) deleteView(viewName string) {
 	}
 }
 
-func (c *Client) setPoW(difficultyStr string) {
+func (c *client) setPoW(difficultyStr string) {
 	difficulty, err := strconv.Atoi(strings.TrimSpace(difficultyStr))
 	if err != nil {
 		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Invalid PoW difficulty: '%s'. Must be a number.", difficultyStr)}
@@ -272,7 +272,7 @@ func (c *Client) setPoW(difficultyStr string) {
 	}
 }
 
-func (c *Client) setNick(nick string) {
+func (c *client) setNick(nick string) {
 	c.config.Nick = strings.TrimSpace(nick)
 	if c.config.Nick != "" {
 		c.n = c.config.Nick
@@ -285,7 +285,7 @@ func (c *Client) setNick(nick string) {
 	c.sendStateUpdate()
 }
 
-func (c *Client) listChats() {
+func (c *client) listChats() {
 	if len(c.config.Views) == 0 {
 		c.eventsChan <- DisplayEvent{Type: "INFO", Content: "You are not in any chats. Use /join <chat_name> to join one."}
 		return
@@ -303,7 +303,7 @@ func (c *Client) listChats() {
 	c.eventsChan <- DisplayEvent{Type: "INFO", Content: builder.String()}
 }
 
-func (c *Client) getActiveChat() {
+func (c *client) getActiveChat() {
 	activeView := c.getActiveView()
 	var content string
 	if activeView != nil {
@@ -314,7 +314,7 @@ func (c *Client) getActiveChat() {
 	c.eventsChan <- DisplayEvent{Type: "INFO", Content: content}
 }
 
-func (c *Client) handleNickCompletion(prefix string) {
+func (c *client) handleNickCompletion(prefix string) {
 	prefix = strings.TrimPrefix(prefix, "@")
 	var entries []string
 
@@ -335,9 +335,9 @@ func (c *Client) handleNickCompletion(prefix string) {
 
 	for _, key := range c.userContext.Keys() {
 		if value, ok := c.userContext.Get(key); ok {
-			if _, isActiveChat := relevantChats[value.Chat]; isActiveChat {
-				if strings.HasPrefix(value.Nick, prefix) {
-					entries = append(entries, fmt.Sprintf("@%s#%s ", value.Nick, value.ShortPubKey))
+			if _, isActiveChat := relevantChats[value.chat]; isActiveChat {
+				if strings.HasPrefix(value.nick, prefix) {
+					entries = append(entries, fmt.Sprintf("@%s#%s ", value.nick, value.shortPubKey))
 				}
 			}
 		}
@@ -351,7 +351,7 @@ func (c *Client) handleNickCompletion(prefix string) {
 	c.eventsChan <- DisplayEvent{Type: "NICK_COMPLETION_RESULT", Payload: entries}
 }
 
-func (c *Client) setActiveView(name string) {
+func (c *client) setActiveView(name string) {
 	viewExists := false
 	for _, view := range c.config.Views {
 		if view.Name == name {
@@ -387,7 +387,7 @@ func (c *Client) setActiveView(name string) {
 	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Generated new ephemeral identity for this session: %s (%s...)", c.n, c.pk[:4])}
 }
 
-func (c *Client) sendStateUpdate() {
+func (c *client) sendStateUpdate() {
 	activeIdx := -1
 	for i := range c.config.Views {
 		if c.config.Views[i].Name == c.config.ActiveViewName {
@@ -408,8 +408,8 @@ func (c *Client) sendStateUpdate() {
 	c.eventsChan <- DisplayEvent{Type: "STATE_UPDATE", Payload: state}
 }
 
-func (c *Client) saveConfig() {
-	if err := c.config.Save(); err != nil {
+func (c *client) saveConfig() {
+	if err := c.config.save(); err != nil {
 		log.Printf("Error saving config: %v", err)
 		c.eventsChan <- DisplayEvent{
 			Type:    "ERROR",
@@ -418,7 +418,7 @@ func (c *Client) saveConfig() {
 	}
 }
 
-func (c *Client) getActiveView() *View {
+func (c *client) getActiveView() *View {
 	for i := range c.config.Views {
 		if c.config.Views[i].Name == c.config.ActiveViewName {
 			return &c.config.Views[i]

@@ -3,27 +3,32 @@ package tui
 
 import "github.com/gdamore/tcell/v2"
 
-// Theme holds the color definitions for the application's UI.
-type Theme struct {
-	BackgroundColor tcell.Color
-	TextColor       tcell.Color
-	BorderColor     tcell.Color
-	TitleColor      tcell.Color
-	InputBgColor    tcell.Color
-	InputTextColor  tcell.Color
-	NickPalette     []string
+// theme holds the color definitions for the application's UI.
+type theme struct {
+	backgroundColor tcell.Color
+	textColor       tcell.Color
+	borderColor     tcell.Color
+	titleColor      tcell.Color
+	inputBgColor    tcell.Color
+	inputTextColor  tcell.Color
+	logInfoColor    tcell.Color
+	logWarnColor    tcell.Color
+	logErrorColor   tcell.Color
+	nickPalette     []string
 }
 
-// DefaultTheme is the standard green-on-black theme.
-var DefaultTheme = &Theme{
-	BackgroundColor: tcell.ColorBlack,
-	TextColor:       tcell.ColorGainsboro,
-	BorderColor:     tcell.ColorDarkOliveGreen,
-	TitleColor:      tcell.ColorLimeGreen,
-	InputBgColor:    tcell.NewRGBColor(0, 40, 0),
-	InputTextColor:  tcell.ColorLime,
-	NickPalette: []string{
-		"[#00ff00]", // Green
+// defaultTheme is the standard green-on-black theme.
+var defaultTheme = &theme{
+	backgroundColor: tcell.ColorBlack,
+	textColor:       tcell.ColorGainsboro,
+	borderColor:     tcell.ColorDarkOliveGreen,
+	titleColor:      tcell.ColorLimeGreen,
+	inputBgColor:    tcell.NewRGBColor(0, 40, 0),
+	inputTextColor:  tcell.ColorLime,
+	logInfoColor:    tcell.ColorGrey,
+	logWarnColor:    tcell.ColorYellow,
+	logErrorColor:   tcell.ColorRed,
+	nickPalette: []string{
 		"[#33ccff]", // Cyan
 		"[#ff00ff]", // Magenta
 		"[#ffff00]", // Yellow
@@ -32,15 +37,17 @@ var DefaultTheme = &Theme{
 	},
 }
 
-// MonochromeTheme is a simple black and white theme for high contrast.
-var MonochromeTheme = &Theme{
-	BackgroundColor: tcell.ColorBlack,
-	TextColor:       tcell.ColorWhite,
-	BorderColor:     tcell.ColorWhite,
-	TitleColor:      tcell.ColorWhite,
-	InputBgColor:    tcell.ColorWhite,
-	InputTextColor:  tcell.ColorBlack,
-	NickPalette: []string{
+// monochromeTheme is a simple black and white theme for high contrast.
+var monochromeTheme = &theme{
+	textColor:      tcell.ColorWhite,
+	borderColor:    tcell.ColorWhite,
+	titleColor:     tcell.ColorWhite,
+	inputBgColor:   tcell.ColorWhite,
+	inputTextColor: tcell.ColorBlack,
+	logInfoColor:   tcell.ColorWhite,
+	logWarnColor:   tcell.ColorWhite,
+	logErrorColor:  tcell.ColorWhite,
+	nickPalette: []string{
 		"[white]",
 	},
 }

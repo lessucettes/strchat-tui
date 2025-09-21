@@ -43,7 +43,7 @@ func haversine(lat1, lon1, lat2, lon2 float64) float64 {
 
 // loadRelays loads relay entries from the remote CSV, using a local cache if it's recent enough.
 func loadRelays() ([]relayEntry, error) {
-	appDir, err := GetAppConfigDir()
+	appDir, err := getAppConfigDir()
 	if err != nil {
 		return nil, fmt.Errorf("cannot determine app config dir: %w", err)
 	}
@@ -118,10 +118,10 @@ func parseCSV(path string) ([]relayEntry, error) {
 	return relays, nil
 }
 
-// ClosestRelays finds the N closest relays to a given geohash.
+// closestRelays finds the N closest relays to a given geohash.
 // It uses a locally cached CSV file of relays and their locations, refreshing it if it's older than 24 hours.
 // If it fails to load or parse the relay list, it returns an error.
-func ClosestRelays(geohashStr string, count int) ([]string, error) {
+func closestRelays(geohashStr string, count int) ([]string, error) {
 	relays, err := loadRelays()
 	if err != nil {
 		return nil, fmt.Errorf("could not load geo-relays: %w", err)

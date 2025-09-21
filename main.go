@@ -25,7 +25,6 @@ func main() {
 	actionsChan := make(chan client.UserAction, 10)
 	eventsChan := make(chan client.DisplayEvent, 10)
 
-	// The client now loads its own configuration.
 	nostrClient, err := client.New(actionsChan, eventsChan)
 	if err != nil {
 		log.Fatalf("Failed to create nostr client: %v", err)
