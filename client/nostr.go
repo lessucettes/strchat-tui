@@ -95,6 +95,7 @@ func (c *client) updateRelaySubscriptions(desiredRelays map[string][]string) {
 	currentRelays := make(map[string]*managedRelay, len(c.relays))
 	maps.Copy(currentRelays, c.relays)
 	c.relaysMu.Unlock()
+
 	var wg sync.WaitGroup
 	for url, chats := range desiredRelays {
 		if mr, exists := currentRelays[url]; exists {
@@ -109,13 +110,10 @@ func (c *client) updateRelaySubscriptions(desiredRelays map[string][]string) {
 				}
 			}(mr, chats)
 		} else {
-			wg.Add(1)
-			go func(url string, chats []string) {
-				defer wg.Done()
-				c.manageRelayConnection(url, chats)
-			}(url, chats)
+			go c.manageRelayConnection(url, chats)
 		}
 	}
+
 	c.relaysMu.Lock()
 	for url, mr := range c.relays {
 		if _, needed := desiredRelays[url]; !needed {
@@ -133,60 +131,65 @@ func (c *client) updateRelaySubscriptions(desiredRelays map[string][]string) {
 		}
 	}
 	c.relaysMu.Unlock()
+
 	wg.Wait()
 	c.sendRelaysUpdate()
 }
 
 func (c *client) manageRelayConnection(url string, chats []string) {
-	err := retryWithBackoff(c.ctx, func() error {
-		start := time.Now()
-		relay, err := nostr.RelayConnect(c.ctx, url)
-		if err != nil {
-			c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Failed to connect to %s: %v", url, err)}
-			return err
+	ctx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	relay, err := nostr.RelayConnect(ctx, url)
+	if err != nil {
+		c.eventsChan <- DisplayEvent{
+			Type:    "STATUS",
+			Content: fmt.Sprintf("Failed to connect to %s: %v", url, err),
 		}
-		latency := time.Since(start)
+		return
+	}
+	latency := time.Since(start)
 
-		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Connected to %s (%dms)", url, latency.Milliseconds())}
+	c.eventsChan <- DisplayEvent{
+		Type:    "STATUS",
+		Content: fmt.Sprintf("Connected to %s (%dms)", url, latency.Milliseconds()),
+	}
 
-		mr := &managedRelay{
-			url:     url,
-			relay:   relay,
-			latency: latency,
+	mr := &managedRelay{
+		url:     url,
+		relay:   relay,
+		latency: latency,
+	}
+
+	c.relaysMu.Lock()
+	if _, exists := c.relays[url]; exists {
+		c.relaysMu.Unlock()
+		relay.Close()
+		return
+	}
+	c.relays[url] = mr
+	c.relaysMu.Unlock()
+	c.sendRelaysUpdate()
+
+	if _, err := c.replaceSubscription(mr, chats); err != nil {
+		c.eventsChan <- DisplayEvent{
+			Type:    "STATUS",
+			Content: fmt.Sprintf("Initial subscription to %s failed.", url),
 		}
-
+		relay.Close()
 		c.relaysMu.Lock()
-		if _, exists := c.relays[url]; exists {
-			c.relaysMu.Unlock()
-			relay.Close()
-			return nil
-		}
-		c.relays[url] = mr
+		delete(c.relays, url)
 		c.relaysMu.Unlock()
 		c.sendRelaysUpdate()
-
-		if _, err := c.replaceSubscription(mr, chats); err != nil {
-			c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Initial subscription to %s failed.", url)}
-			relay.Close()
-			c.relaysMu.Lock()
-			delete(c.relays, url)
-			c.relaysMu.Unlock()
-			c.sendRelaysUpdate()
-			return err
-		}
-
-		c.wg.Add(1)
-		go func() {
-			defer c.wg.Done()
-			c.listenForEvents(mr)
-		}()
-
-		return nil
-	})
-
-	if err != nil {
-		log.Printf("Stopped trying to connect to %s: %v", url, err)
+		return
 	}
+
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		c.listenForEvents(mr)
+	}()
 }
 
 func (c *client) replaceSubscription(mr *managedRelay, chats []string) (bool, error) {
