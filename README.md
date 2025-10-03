@@ -6,7 +6,7 @@ A simple and stylish TUI client for various Nostr-based chats.
 
 ## What is strchat-tui?
 
-**strchat-tui** is a terminal-based Nostr chat client written in Go. It's designed to be a lightweight, fast, and highly-functional way to participate in different kinds of Nostr chat rooms, all from the comfort of your terminal with a retro, hacker-style aesthetic.
+**strchat-tui** is a terminal-based Nostr chat client. It's designed to be a lightweight, fast, and highly-functional way to participate in different kinds of Nostr chat rooms, all from the comfort of your terminal with a retro, hacker-style aesthetic.
 
 The client features smart relay management to ensure your connection is always fast and reliable.
 
@@ -46,7 +46,7 @@ This client aims to support a wide range of Nostr chats.
 
 ## How to Build from Source
 
-1.  Ensure you have [Go](https://golang.org/) (version 1.21 or newer) installed.
+1.  Ensure you have [Go](https://golang.org/) (version 1.25 or newer) installed.
 2.  Clone the repository:
     ```bash
     git clone https://github.com/lessucettes/strchat-tui.git
