@@ -3,10 +3,10 @@ package tui
 import (
 	"strings"
 
-	"github.com/lessucettes/strchat-tui/internal/client"
-
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
+
+	"github.com/lessucettes/strchat-tui/internal/client"
 )
 
 // setupHandlers configures all the logic for handling user input.

@@ -9,10 +9,10 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/lessucettes/strchat-tui/internal/client"
-
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
+
+	"github.com/lessucettes/strchat-tui/internal/client"
 )
 
 // tui is the main struct that holds all tui components.
