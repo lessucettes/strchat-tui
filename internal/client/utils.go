@@ -76,7 +76,7 @@ func isPoWValid(event *nostr.Event, minDifficulty int) bool {
 	return actualDifficulty >= claimedDifficulty
 }
 
-var powHintRe = regexp.MustCompile(`(?i)\b(?:attach|with)?\s*pow(?:\s+of)?\s+difficulty\s+(\d+)\b`)
+var powHintRe = regexp.MustCompile(`(?i)pow[^0-9]{0,10}(\d+)`)
 
 func parsePowHint(s string) (int, bool) {
 	m := powHintRe.FindStringSubmatch(s)

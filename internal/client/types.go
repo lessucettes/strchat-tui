@@ -38,8 +38,9 @@ type UserAction struct {
 
 // RelayInfo holds status information about a single relay connection.
 type RelayInfo struct {
-	URL     string
-	Latency time.Duration
+	URL       string
+	Latency   time.Duration
+	Connected bool
 }
 
 // DisplayEvent represents an event sent from the client to the TUI for display.
@@ -83,6 +84,7 @@ type managedRelay struct {
 	relay        *nostr.Relay
 	latency      time.Duration
 	subscription *nostr.Subscription
+	connected    bool
 	mu           sync.Mutex
 }
 

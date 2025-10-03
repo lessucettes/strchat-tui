@@ -84,14 +84,20 @@ func (t *tui) updateDetailsView() {
 		} else {
 			for _, r := range t.relays {
 				var statusColor tcell.Color
-				if r.Latency > 750*time.Millisecond {
+				var symbol string
+				switch {
+				case !r.Connected:
+					statusColor = t.theme.logErrorColor
+					symbol = "×"
+				case r.Latency > 750*time.Millisecond:
 					statusColor = t.theme.logWarnColor
-				} else {
+					symbol = "●"
+				default:
 					statusColor = t.theme.titleColor
+					symbol = "●"
 				}
 				host := strings.TrimPrefix(strings.TrimPrefix(r.URL, "wss://"), "ws://")
-				builder.WriteString(fmt.Sprintf(" [%s]●[-] %s [-]\n",
-					statusColor, host))
+				builder.WriteString(fmt.Sprintf(" [%s]%s[-] %s\n", statusColor, symbol, host))
 			}
 		}
 		fmt.Fprint(t.detailsView, builder.String())

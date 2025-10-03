@@ -150,9 +150,10 @@ func (c *client) manageRelayConnection(url string, chats []string) {
 	}
 
 	mr := &managedRelay{
-		url:     url,
-		relay:   relay,
-		latency: latency,
+		url:       url,
+		relay:     relay,
+		latency:   latency,
+		connected: true,
 	}
 
 	c.relaysMu.Lock()
@@ -257,8 +258,6 @@ func (c *client) listenForEvents(mr *managedRelay) {
 
 		case ev, ok := <-sub.Events:
 			if !ok {
-				//				c.eventsChan <- DisplayEvent{Type: "STATUS",
-				//	Content: fmt.Sprintf("Subscription closed on %s", mr.url)}
 				oldChats := mrCurrentChatsLocked(sub)
 
 				mr.mu.Lock()
@@ -267,7 +266,10 @@ func (c *client) listenForEvents(mr *managedRelay) {
 					continue
 				}
 				mr.subscription = nil
+				mr.connected = false
 				mr.mu.Unlock()
+
+				c.sendRelaysUpdate()
 
 				if len(oldChats) == 0 {
 					continue
@@ -279,13 +281,24 @@ func (c *client) listenForEvents(mr *managedRelay) {
 				})
 
 				if err != nil {
-					c.eventsChan <- DisplayEvent{Type: "ERROR",
-						Content: fmt.Sprintf("Could not re-establish subscription on %s. Listener stopped.", mr.url)}
+					c.eventsChan <- DisplayEvent{
+						Type:    "ERROR",
+						Content: fmt.Sprintf("Could not re-establish subscription on %s. Listener stopped.", mr.url),
+					}
 					return
 				}
-				c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Successfully reconnected to %s!", mr.url)}
+
+				mr.mu.Lock()
+				mr.connected = true
+				mr.mu.Unlock()
+				c.sendRelaysUpdate()
+				c.eventsChan <- DisplayEvent{
+					Type:    "STATUS",
+					Content: fmt.Sprintf("Successfully reconnected to %s!", mr.url),
+				}
 				continue
 			}
+
 			if ev == nil {
 				continue
 			}
@@ -586,6 +599,11 @@ func (c *client) publish(ev nostr.Event, targetChat string, relaysForPublishing 
 				mu.Lock()
 				errorMessages = append(errorMessages, fmt.Sprintf("%s: %v", r.url, err))
 				mu.Unlock()
+
+				r.mu.Lock()
+				r.connected = false
+				r.mu.Unlock()
+				c.sendRelaysUpdate()
 			}
 		}(r)
 	}
@@ -637,9 +655,15 @@ func (c *client) sendRelaysUpdate() {
 
 	statuses := make([]RelayInfo, 0, len(c.relays))
 	for _, mr := range c.relays {
+		mr.mu.Lock()
+		connected := mr.connected
+		latency := mr.latency
+		mr.mu.Unlock()
+
 		statuses = append(statuses, RelayInfo{
-			URL:     mr.url,
-			Latency: mr.latency,
+			URL:       mr.url,
+			Latency:   latency,
+			Connected: connected,
 		})
 	}
 
