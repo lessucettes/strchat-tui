@@ -1,4 +1,3 @@
-// tui/theme.go
 package tui
 
 import "github.com/gdamore/tcell/v2"

@@ -1,4 +1,3 @@
-// tui/draw.go
 package tui
 
 import (

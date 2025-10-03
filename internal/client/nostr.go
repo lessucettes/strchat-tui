@@ -1,4 +1,3 @@
-// client/nostr.go
 package client
 
 import (
@@ -74,13 +73,7 @@ func (c *client) updateAllSubscriptions() {
 			relayURLs = defaultNamedChatRelays
 		}
 		for _, url := range relayURLs {
-			found := false
-			for _, existingChat := range desiredRelayToChats[url] {
-				if existingChat == chat {
-					found = true
-					break
-				}
-			}
+			found := slices.Contains(desiredRelayToChats[url], chat)
 			if !found {
 				desiredRelayToChats[url] = append(desiredRelayToChats[url], chat)
 			}

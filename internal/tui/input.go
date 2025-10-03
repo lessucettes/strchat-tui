@@ -1,9 +1,9 @@
-// tui/input.go
 package tui
 
 import (
-	"strchat-tui/client"
 	"strings"
+
+	"github.com/lessucettes/strchat-tui/internal/client"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"

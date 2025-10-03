@@ -1,4 +1,3 @@
-// client/state.go
 package client
 
 import (

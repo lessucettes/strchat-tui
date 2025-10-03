@@ -1,4 +1,3 @@
-// tui/utils.go
 package tui
 
 import (

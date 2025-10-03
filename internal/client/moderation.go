@@ -1,4 +1,3 @@
-// client/moderation.go
 package client
 
 import (

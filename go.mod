@@ -1,4 +1,4 @@
-module strchat-tui
+module github.com/lessucettes/strchat-tui
 
 go 1.25.0
 

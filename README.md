@@ -1,7 +1,5 @@
 # strchat-tui
 
-[![My NIP-05](https://img.shields.io/badge/NIP--05-__@dukenukemmustdie.com-8E44AD?logo=nostr&logoColor=white)](https://dukenukemmustdie.com)
-
 A simple and stylish TUI client for various Nostr-based chats.
 
 ![strchat-tui in action](./assets/screenshot.png)
@@ -59,7 +57,7 @@ This client aims to support a wide range of Nostr chats.
     ```
 4.  Build the application:
     ```bash
-    go build .
+    go build ./cmd/strchat-tui
     ```
 5.  Run the client:
     ```bash

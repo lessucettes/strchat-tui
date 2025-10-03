@@ -1,4 +1,3 @@
-// client/types.go
 package client
 
 import (

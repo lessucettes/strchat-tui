@@ -1,4 +1,3 @@
-// main.go
 package main
 
 import (
@@ -6,8 +5,9 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"strchat-tui/client"
-	"strchat-tui/tui"
+
+	"github.com/lessucettes/strchat-tui/internal/client"
+	"github.com/lessucettes/strchat-tui/internal/tui"
 )
 
 var version = "dev"

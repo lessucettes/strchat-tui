@@ -1,4 +1,3 @@
-// georelay.go
 package client
 
 import (
