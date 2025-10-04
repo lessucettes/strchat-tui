@@ -442,6 +442,15 @@ func (c *client) flushOrdered(streamKey string) {
 	}
 }
 
+func (c *client) signEventForChat(ev *nostr.Event, chatName string) error {
+	if session, ok := c.chatKeys[chatName]; ok {
+		ev.PubKey = session.PubKey
+		return ev.Sign(session.PrivKey)
+	}
+	ev.PubKey = c.pk
+	return ev.Sign(c.sk)
+}
+
 func (c *client) publishMessage(message string) {
 	var targetChat string
 	var targetPubKey string
@@ -530,7 +539,7 @@ func (c *client) publishMessage(message string) {
 	if requiredPoW > 0 {
 		go c.minePoWAndPublish(ev, requiredPoW, targetChat, relaysForPublishing)
 	} else {
-		_ = ev.Sign(c.sk)
+		_ = c.signEventForChat(&ev, targetChat)
 		c.publish(ev, targetChat, relaysForPublishing)
 	}
 }
@@ -572,8 +581,7 @@ func (c *client) minePoWAndPublish(ev nostr.Event, difficulty int, targetChat st
 			}
 		}
 	}
-
-	_ = clone.Sign(c.sk)
+	_ = c.signEventForChat(&clone, targetChat)
 	c.publish(clone, targetChat, relays)
 }
 

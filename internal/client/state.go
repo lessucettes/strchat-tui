@@ -12,6 +12,7 @@ import (
 
 	"github.com/mmcloughlin/geohash"
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/nbd-wtf/go-nostr/nip19"
 )
 
 // --- State Management ---
@@ -112,33 +113,24 @@ outer:
 			name = normalizedName
 		}
 
-		isExisting := false
-		for _, view := range c.config.Views {
-			if !view.IsGroup && view.Name == name {
-				isExisting = true
-				break
+		for _, v := range c.config.Views {
+			if !v.IsGroup && v.Name == name {
+				existingChats = append(existingChats, name)
+				continue outer
 			}
-		}
-
-		if isExisting {
-			existingChats = append(existingChats, name)
-			continue outer
 		}
 
 		newView := View{Name: name, IsGroup: false}
 		c.config.Views = append(c.config.Views, newView)
-		if len(addedChats) == 0 {
-			c.config.ActiveViewName = name
-		}
 		addedChats = append(addedChats, name)
 	}
 
-	if len(addedChats) > 0 {
-		c.saveConfig()
-		c.sendStateUpdate()
+	switch {
+	case len(addedChats) > 0:
+		active := addedChats[0]
+		c.setActiveView(active)
 		c.updateAllSubscriptions()
-		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Joined %d new chat(s): %s. Active: %s", len(addedChats), strings.Join(addedChats, ", "), c.config.ActiveViewName)}
-	} else if len(existingChats) > 0 && len(chatNames) == len(existingChats) {
+	case len(existingChats) > 0:
 		var content string
 		if len(existingChats) == 1 {
 			content = fmt.Sprintf("You are already in the '%s' chat.", existingChats[0])
@@ -149,6 +141,84 @@ outer:
 	}
 }
 
+/*
+	func (c *client) joinChats(payload string) {
+		chatNames := strings.Fields(payload)
+		if len(chatNames) == 0 {
+			return
+		}
+
+		var addedChats []string
+		var existingChats []string
+
+outer:
+
+		for _, name := range chatNames {
+			if geohash.Validate(name) != nil {
+				normalizedName, err := normalizeAndValidateChatName(name)
+				if err != nil {
+					c.eventsChan <- DisplayEvent{Type: "ERROR", Content: err.Error()}
+					continue outer
+				}
+				if utf8.RuneCountInString(normalizedName) > maxChatNameLen {
+					c.eventsChan <- DisplayEvent{
+						Type:    "ERROR",
+						Content: fmt.Sprintf("Chat name '%s' is too long (max %d chars).", normalizedName, maxChatNameLen),
+					}
+					continue outer
+				}
+				if len(normalizedName) == 0 {
+					continue outer
+				}
+				name = normalizedName
+			}
+
+			isExisting := false
+			for _, view := range c.config.Views {
+				if !view.IsGroup && view.Name == name {
+					isExisting = true
+					break
+				}
+			}
+
+			if isExisting {
+				existingChats = append(existingChats, name)
+				continue outer
+			}
+
+			newView := View{Name: name, IsGroup: false}
+			c.config.Views = append(c.config.Views, newView)
+			if len(addedChats) == 0 {
+				c.config.ActiveViewName = name
+			}
+			addedChats = append(addedChats, name)
+
+			sk := nostr.GeneratePrivateKey()
+			pk, _ := nostr.GetPublicKey(sk)
+			nick := npubToTokiPona(pk)
+			c.chatKeys[name] = ChatSession{
+				PrivKey: sk,
+				PubKey:  pk,
+				Nick:    nick,
+			}
+		}
+
+		if len(addedChats) > 0 {
+			c.saveConfig()
+			c.sendStateUpdate()
+			c.updateAllSubscriptions()
+			c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Joined %d new chat(s): %s. Active: %s", len(addedChats), strings.Join(addedChats, ", "), c.config.ActiveViewName)}
+		} else if len(existingChats) > 0 && len(chatNames) == len(existingChats) {
+			var content string
+			if len(existingChats) == 1 {
+				content = fmt.Sprintf("You are already in the '%s' chat.", existingChats[0])
+			} else {
+				content = fmt.Sprintf("You are already in all specified chats: %s.", strings.Join(existingChats, ", "))
+			}
+			c.eventsChan <- DisplayEvent{Type: "STATUS", Content: content}
+		}
+	}
+*/
 func (c *client) leaveChat(chatName string) {
 	var newViews []View
 	for _, view := range c.config.Views {
@@ -186,6 +256,8 @@ func (c *client) leaveChat(chatName string) {
 	c.saveConfig()
 	c.sendStateUpdate()
 	c.updateAllSubscriptions()
+
+	delete(c.chatKeys, chatName)
 }
 
 func (c *client) deleteGroup(groupName string) {
@@ -270,16 +342,31 @@ func (c *client) setPoW(difficultyStr string) {
 		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("PoW disabled for %s.", activeView.Name)}
 	}
 }
-
 func (c *client) setNick(nick string) {
-	c.config.Nick = strings.TrimSpace(nick)
-	if c.config.Nick != "" {
-		c.n = c.config.Nick
-		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Nick set to: %s", c.n)}
+	nick = strings.TrimSpace(nick)
+	c.config.Nick = nick
+
+	if nick != "" {
+		c.n = nick
+		c.eventsChan <- DisplayEvent{
+			Type:    "STATUS",
+			Content: fmt.Sprintf("Nick set to: %s", c.n),
+		}
+		for name, session := range c.chatKeys {
+			session.Nick = c.n
+			session.CustomNick = true
+			c.chatKeys[name] = session
+		}
 	} else {
 		c.n = npubToTokiPona(c.pk)
+		for name, session := range c.chatKeys {
+			session.Nick = npubToTokiPona(session.PubKey)
+			session.CustomNick = false
+			c.chatKeys[name] = session
+		}
 		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Nick has been cleared."}
 	}
+
 	c.saveConfig()
 	c.sendStateUpdate()
 }
@@ -352,38 +439,53 @@ func (c *client) handleNickCompletion(prefix string) {
 
 func (c *client) setActiveView(name string) {
 	viewExists := false
-	for _, view := range c.config.Views {
-		if view.Name == name {
+	var view *View
+	for i := range c.config.Views {
+		if c.config.Views[i].Name == name {
 			viewExists = true
+			view = &c.config.Views[i]
 			break
 		}
 	}
 
 	if !viewExists {
-		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Chat or group '%s' not found.", name)}
+		c.eventsChan <- DisplayEvent{
+			Type:    "ERROR",
+			Content: fmt.Sprintf("Chat or group '%s' not found.", name),
+		}
 		return
 	}
 
-	newSk := nostr.GeneratePrivateKey()
-	newPk, err := nostr.GetPublicKey(newSk)
-	if err != nil {
-		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Failed to generate public key: %v", err)}
-		return
-	}
+	if !view.IsGroup {
+		sk := nostr.GeneratePrivateKey()
+		pk, _ := nostr.GetPublicKey(sk)
 
-	c.sk = newSk
-	c.pk = newPk
-	if c.config.Nick != "" {
-		c.n = c.config.Nick
-	} else {
-		c.n = npubToTokiPona(newPk)
+		nick := c.config.Nick
+		custom := false
+		if nick == "" {
+			nick = npubToTokiPona(pk)
+		} else {
+			custom = true
+		}
+
+		c.chatKeys[name] = ChatSession{
+			PrivKey:    sk,
+			PubKey:     pk,
+			Nick:       nick,
+			CustomNick: custom,
+		}
+
+		npub, _ := nip19.EncodePublicKey(pk)
+		c.eventsChan <- DisplayEvent{
+			Type: "STATUS",
+			Content: fmt.Sprintf("Generated ephemeral identity for chat '%s': %s (%s)",
+				view.Name, npub, nick),
+		}
 	}
 
 	c.config.ActiveViewName = name
 	c.saveConfig()
 	c.sendStateUpdate()
-
-	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Generated new ephemeral identity for this session: %s (%s...)", c.n, c.pk[:4])}
 }
 
 func (c *client) sendStateUpdate() {
@@ -404,9 +506,55 @@ func (c *client) sendStateUpdate() {
 		ActiveViewIndex: activeIdx,
 		Nick:            c.n,
 	}
+
+	if len(c.config.Views) == 0 || activeIdx == -1 {
+		c.eventsChan <- DisplayEvent{Type: "STATE_UPDATE", Payload: state}
+		return
+	}
+
+	if c.config.Nick != "" {
+		state.Nick = c.config.Nick
+	} else {
+		v := c.config.Views[activeIdx]
+		if v.IsGroup {
+			state.Nick = npubToTokiPona(c.pk)
+		} else if s, ok := c.chatKeys[v.Name]; ok && s.Nick != "" {
+			state.Nick = s.Nick
+		} else {
+			state.Nick = npubToTokiPona(c.pk)
+		}
+	}
+
 	c.eventsChan <- DisplayEvent{Type: "STATE_UPDATE", Payload: state}
 }
 
+/*
+	func (c *client) sendStateUpdate() {
+		activeIdx := -1
+		for i := range c.config.Views {
+			if c.config.Views[i].Name == c.config.ActiveViewName {
+				activeIdx = i
+				break
+			}
+		}
+		if activeIdx == -1 && len(c.config.Views) > 0 {
+			activeIdx = 0
+			c.config.ActiveViewName = c.config.Views[0].Name
+		}
+
+		state := StateUpdate{
+			Views:           c.config.Views,
+			ActiveViewIndex: activeIdx,
+			Nick:            c.n,
+		}
+
+		if session, ok := c.chatKeys[c.config.ActiveViewName]; ok && session.Nick != "" {
+			state.Nick = session.Nick
+		}
+
+		c.eventsChan <- DisplayEvent{Type: "STATE_UPDATE", Payload: state}
+	}
+*/
 func (c *client) saveConfig() {
 	if err := c.config.save(); err != nil {
 		log.Printf("Error saving config: %v", err)

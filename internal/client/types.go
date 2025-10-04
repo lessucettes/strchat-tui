@@ -71,6 +71,13 @@ type StateUpdate struct {
 	Nick            string
 }
 
+type ChatSession struct {
+	PrivKey    string
+	PubKey     string
+	Nick       string
+	CustomNick bool
+}
+
 // userContext holds cached information about a user in a specific chat.
 type userContext struct {
 	nick        string

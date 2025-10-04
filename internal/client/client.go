@@ -22,6 +22,7 @@ type client struct {
 	seenCache       *lru.Cache[string, bool]
 	seenCacheMu     sync.Mutex
 	userContext     *lru.Cache[string, userContext]
+	chatKeys        map[string]ChatSession
 	actionsChan     <-chan UserAction
 	eventsChan      chan<- DisplayEvent
 	filtersCompiled []compiledPattern
@@ -64,6 +65,7 @@ func New(actions <-chan UserAction, events chan<- DisplayEvent) (*client, error)
 		relays:      make(map[string]*managedRelay),
 		seenCache:   seenCache,
 		userContext: userContextCache,
+		chatKeys:    make(map[string]ChatSession),
 		orderBuf:    make(map[string][]orderItem),
 		orderTimers: make(map[string]*time.Timer),
 		ctx:         ctx,
