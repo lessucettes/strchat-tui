@@ -141,84 +141,6 @@ outer:
 	}
 }
 
-/*
-	func (c *client) joinChats(payload string) {
-		chatNames := strings.Fields(payload)
-		if len(chatNames) == 0 {
-			return
-		}
-
-		var addedChats []string
-		var existingChats []string
-
-outer:
-
-		for _, name := range chatNames {
-			if geohash.Validate(name) != nil {
-				normalizedName, err := normalizeAndValidateChatName(name)
-				if err != nil {
-					c.eventsChan <- DisplayEvent{Type: "ERROR", Content: err.Error()}
-					continue outer
-				}
-				if utf8.RuneCountInString(normalizedName) > maxChatNameLen {
-					c.eventsChan <- DisplayEvent{
-						Type:    "ERROR",
-						Content: fmt.Sprintf("Chat name '%s' is too long (max %d chars).", normalizedName, maxChatNameLen),
-					}
-					continue outer
-				}
-				if len(normalizedName) == 0 {
-					continue outer
-				}
-				name = normalizedName
-			}
-
-			isExisting := false
-			for _, view := range c.config.Views {
-				if !view.IsGroup && view.Name == name {
-					isExisting = true
-					break
-				}
-			}
-
-			if isExisting {
-				existingChats = append(existingChats, name)
-				continue outer
-			}
-
-			newView := View{Name: name, IsGroup: false}
-			c.config.Views = append(c.config.Views, newView)
-			if len(addedChats) == 0 {
-				c.config.ActiveViewName = name
-			}
-			addedChats = append(addedChats, name)
-
-			sk := nostr.GeneratePrivateKey()
-			pk, _ := nostr.GetPublicKey(sk)
-			nick := npubToTokiPona(pk)
-			c.chatKeys[name] = ChatSession{
-				PrivKey: sk,
-				PubKey:  pk,
-				Nick:    nick,
-			}
-		}
-
-		if len(addedChats) > 0 {
-			c.saveConfig()
-			c.sendStateUpdate()
-			c.updateAllSubscriptions()
-			c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Joined %d new chat(s): %s. Active: %s", len(addedChats), strings.Join(addedChats, ", "), c.config.ActiveViewName)}
-		} else if len(existingChats) > 0 && len(chatNames) == len(existingChats) {
-			var content string
-			if len(existingChats) == 1 {
-				content = fmt.Sprintf("You are already in the '%s' chat.", existingChats[0])
-			} else {
-				content = fmt.Sprintf("You are already in all specified chats: %s.", strings.Join(existingChats, ", "))
-			}
-			c.eventsChan <- DisplayEvent{Type: "STATUS", Content: content}
-		}
-	}
-*/
 func (c *client) leaveChat(chatName string) {
 	var newViews []View
 	for _, view := range c.config.Views {
@@ -528,33 +450,6 @@ func (c *client) sendStateUpdate() {
 	c.eventsChan <- DisplayEvent{Type: "STATE_UPDATE", Payload: state}
 }
 
-/*
-	func (c *client) sendStateUpdate() {
-		activeIdx := -1
-		for i := range c.config.Views {
-			if c.config.Views[i].Name == c.config.ActiveViewName {
-				activeIdx = i
-				break
-			}
-		}
-		if activeIdx == -1 && len(c.config.Views) > 0 {
-			activeIdx = 0
-			c.config.ActiveViewName = c.config.Views[0].Name
-		}
-
-		state := StateUpdate{
-			Views:           c.config.Views,
-			ActiveViewIndex: activeIdx,
-			Nick:            c.n,
-		}
-
-		if session, ok := c.chatKeys[c.config.ActiveViewName]; ok && session.Nick != "" {
-			state.Nick = session.Nick
-		}
-
-		c.eventsChan <- DisplayEvent{Type: "STATE_UPDATE", Payload: state}
-	}
-*/
 func (c *client) saveConfig() {
 	if err := c.config.save(); err != nil {
 		log.Printf("Error saving config: %v", err)
