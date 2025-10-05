@@ -7,7 +7,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -162,7 +161,7 @@ func (t *tui) initViews() {
 	t.input.SetBorder(true).SetTitle(titleInput).SetTitleAlign(tview.AlignLeft)
 	t.input.SetAutocompleteFunc(t.handleAutocomplete)
 	t.input.SetAcceptanceFunc(func(textToCheck string, lastChar rune) bool {
-		return utf8.RuneCountInString(textToCheck) <= client.MaxMsgLen
+		return graphemeLen(textToCheck) <= client.MaxMsgLen
 	})
 	t.input.SetChangedFunc(func(text string) {
 		nick, complete := extractNickPrefix(text)
@@ -344,7 +343,6 @@ func (t *tui) handleNewMessage(event client.DisplayEvent) {
 			showMessage = true
 		}
 	}
-
 	if showMessage {
 		nickColorTag := pubkeyToColor(event.FullPubKey, t.theme.nickPalette)
 

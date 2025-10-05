@@ -8,9 +8,9 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
-	"unicode/utf8"
 
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/rivo/uniseg"
 )
 
 // --- helpers ---
@@ -133,20 +133,19 @@ func mrCurrentChatsLocked(sub *nostr.Subscription) []string {
 	return out
 }
 
-func truncateString(s string, maxRunes int) string {
-	if utf8.RuneCountInString(s) <= maxRunes {
-		return s
-	}
-
-	runesCounted := 0
-	for i := range s {
-		runesCounted++
-		if runesCounted > maxRunes {
-			return s[:i] + "..."
+func truncateString(s string, maxClusters int) string {
+	g := uniseg.NewGraphemes(s)
+	var b strings.Builder
+	count := 0
+	for g.Next() {
+		if count >= maxClusters {
+			b.WriteString("...")
+			break
 		}
+		b.WriteString(g.Str())
+		count++
 	}
-
-	return s
+	return b.String()
 }
 
 func normalizeAndValidateChatName(name string) (string, error) {
@@ -173,33 +172,13 @@ func normalizeAndValidateChatName(name string) (string, error) {
 func sanitizeString(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
-	var prevWasRI bool
 	for _, r := range s {
-		if r < 32 || r == 127 {
+		if r < 32 && r != '\n' && r != '\t' {
 			continue
 		}
-		if r < 128 {
-			b.WriteRune(r)
-			prevWasRI = false
+		if r == 127 {
 			continue
 		}
-		if unicode.Is(unicode.M, r) {
-			b.WriteRune('?')
-			continue
-		}
-		if !unicode.IsPrint(r) {
-			continue
-		}
-		if r >= 0x1F1E6 && r <= 0x1F1FF {
-			if prevWasRI {
-				b.WriteRune('?')
-				prevWasRI = false
-				continue
-			}
-			prevWasRI = true
-			continue
-		}
-		prevWasRI = false
 		b.WriteRune(r)
 	}
 	return b.String()

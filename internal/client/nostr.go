@@ -387,7 +387,18 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 
 	timestamp := time.Unix(int64(ev.CreatedAt), 0).Format("15:04:05")
 
-	isOwn := ev.PubKey == c.pk
+	isOwn := false
+
+	if ev.PubKey == c.pk {
+		isOwn = true
+	} else {
+		for _, s := range c.chatKeys {
+			if ev.PubKey == s.PubKey {
+				isOwn = true
+				break
+			}
+		}
+	}
 
 	c.enqueueOrdered(streamKey, DisplayEvent{
 		Type:         "NEW_MESSAGE",
