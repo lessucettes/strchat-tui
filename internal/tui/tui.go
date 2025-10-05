@@ -443,9 +443,7 @@ func (t *tui) handleNickCompletion(event client.DisplayEvent) {
 	if !ok {
 		return
 	}
-	if len(entries) == 0 && len(t.completionEntries) > 0 {
-		return
-	}
+	//	if len(entries) == 0 && len(t.completionEntries) > 0 { return }
 	t.completionEntries = entries
 	t.input.Autocomplete()
 }

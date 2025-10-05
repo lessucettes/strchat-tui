@@ -74,6 +74,10 @@ func New(actions <-chan UserAction, events chan<- DisplayEvent) (*client, error)
 
 	client.rebuildRegexCaches()
 
+	if cfg.Nick != "" {
+		client.n = cfg.Nick
+	}
+
 	return client, nil
 }
 

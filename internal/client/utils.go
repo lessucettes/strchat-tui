@@ -90,6 +90,13 @@ func parsePowHint(s string) (int, bool) {
 	return n, true
 }
 
+func safeSuffix(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
+}
+
 func sameStringSet(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

@@ -349,7 +349,7 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 		if isRelevantToActiveView {
 			requiredPoW := activeView.PoW
 			if !isPoWValid(ev, requiredPoW) {
-				log.Printf("Dropped event %s from %s for failing PoW check (required: %d)", ev.ID[len(ev.ID)-4:], eventChat, requiredPoW)
+				log.Printf("Dropped event %s from %s for failing PoW check (required: %d)", safeSuffix(ev.ID, 4), eventChat, requiredPoW)
 				return
 			}
 		}
@@ -376,7 +376,7 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 		if s := sanitizeString(nickTag[1]); s != "" {
 			nick = s
 		}
-		spk = ev.PubKey[len(ev.PubKey)-4:]
+		spk = safeSuffix(ev.PubKey, 4)
 	}
 
 	c.userContext.Add(ev.PubKey, userContext{
@@ -408,7 +408,7 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 		ShortPubKey:  spk,
 		IsOwnMessage: isOwn,
 		Content:      content,
-		ID:           ev.ID[len(ev.ID)-4:],
+		ID:           safeSuffix(ev.ID, 4),
 		Chat:         eventChat,
 		RelayURL:     relayURL,
 	}, int64(ev.CreatedAt), ev.ID)
@@ -631,7 +631,7 @@ func (c *client) publish(ev nostr.Event, targetChat string, relaysForPublishing 
 	c.eventsChan <- DisplayEvent{
 		Type: "STATUS",
 		Content: fmt.Sprintf("Event %s sent to %d/%d relays for %s.",
-			ev.ID[len(ev.ID)-4:], successCount, len(relaysForPublishing), targetChat),
+			safeSuffix(ev.ID, 4), successCount, len(relaysForPublishing), targetChat),
 	}
 
 	for _, em := range errorMessages {
