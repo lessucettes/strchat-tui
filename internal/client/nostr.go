@@ -454,11 +454,27 @@ func (c *client) flushOrdered(streamKey string) {
 }
 
 func (c *client) signEventForChat(ev *nostr.Event, chatName string) error {
-	if session, ok := c.chatKeys[chatName]; ok {
-		ev.PubKey = session.PubKey
-		return ev.Sign(session.PrivKey)
+	view := c.getActiveView()
+	useMainKey := false
+
+	if view != nil && view.IsGroup {
+		useMainKey = true
 	}
+
+	if !useMainKey {
+		if session, ok := c.chatKeys[chatName]; ok && session.PrivKey != "" {
+			ev.PubKey = session.PubKey
+			ev.ID = ev.GetID()
+			return ev.Sign(session.PrivKey)
+		}
+	}
+
+	if c.sk == "" || c.pk == "" {
+		return fmt.Errorf("no valid signing key available")
+	}
+
 	ev.PubKey = c.pk
+	ev.ID = ev.GetID()
 	return ev.Sign(c.sk)
 }
 
@@ -550,7 +566,10 @@ func (c *client) publishMessage(message string) {
 	if requiredPoW > 0 {
 		go c.minePoWAndPublish(ev, requiredPoW, targetChat, relaysForPublishing)
 	} else {
-		_ = c.signEventForChat(&ev, targetChat)
+		if err := c.signEventForChat(&ev, targetChat); err != nil {
+			c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Failed to sign event: %v", err)}
+			return
+		}
 		c.publish(ev, targetChat, relaysForPublishing)
 	}
 }
@@ -592,7 +611,10 @@ func (c *client) minePoWAndPublish(ev nostr.Event, difficulty int, targetChat st
 			}
 		}
 	}
-	_ = c.signEventForChat(&clone, targetChat)
+	if err := c.signEventForChat(&clone, targetChat); err != nil {
+		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Failed to sign PoW event: %v", err)}
+		return
+	}
 	c.publish(clone, targetChat, relays)
 }
 
@@ -651,7 +673,19 @@ func (c *client) publish(ev nostr.Event, targetChat string, relaysForPublishing 
 func (c *client) createEvent(message string, kind int, tags nostr.Tags, difficulty int) nostr.Event {
 	baseTags := make(nostr.Tags, 0, len(tags)+2)
 	baseTags = append(baseTags, tags...)
-	baseTags = append(baseTags, nostr.Tag{"n", c.n})
+
+	active := c.getActiveView()
+	if active != nil && !active.IsGroup {
+		if session, ok := c.chatKeys[active.Name]; ok && session.Nick != "" {
+			baseTags = append(baseTags, nostr.Tag{"n", session.Nick})
+		}
+	} else if active != nil && active.IsGroup {
+		nick := c.config.Nick
+		if nick == "" {
+			nick = npubToTokiPona(c.pk)
+		}
+		baseTags = append(baseTags, nostr.Tag{"n", nick})
+	}
 
 	ev := nostr.Event{
 		CreatedAt: nostr.Now(),

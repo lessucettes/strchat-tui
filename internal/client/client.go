@@ -83,6 +83,19 @@ func New(actions <-chan UserAction, events chan<- DisplayEvent) (*client, error)
 
 // Run starts the client's main event loop.
 func (c *client) Run() {
+	// --- ensure main keypair is loaded ---
+	if c.sk == "" {
+		if c.config.PrivateKey != "" {
+			c.sk = c.config.PrivateKey
+			c.pk, _ = nostr.GetPublicKey(c.sk)
+		} else {
+			c.sk = nostr.GeneratePrivateKey()
+			c.pk, _ = nostr.GetPublicKey(c.sk)
+			c.config.PrivateKey = c.sk
+			c.saveConfig()
+		}
+	}
+
 	identitySet := false
 	if c.config.ActiveViewName != "" {
 		c.setActiveView(c.config.ActiveViewName)
@@ -101,7 +114,10 @@ func (c *client) Run() {
 		} else {
 			c.n = npubToTokiPona(c.pk)
 		}
-		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("No chats joined. Initial identity: %s (%s...)", c.n, c.pk[:4])}
+		c.eventsChan <- DisplayEvent{
+			Type:    "STATUS",
+			Content: fmt.Sprintf("No chats joined. Initial identity: %s (%s...)", c.n, c.pk[:4]),
+		}
 	}
 
 	c.sendStateUpdate()
