@@ -1,7 +1,6 @@
 package client
 
 import (
-	"crypto/sha256"
 	"fmt"
 	"math/bits"
 	"regexp"
@@ -191,12 +190,25 @@ func sanitizeString(s string) string {
 	return b.String()
 }
 
-func npubToTokiPona(npub string) string {
-	hash := sha256.Sum256([]byte(npub))
+func groupName(validMembers []string) string {
+	var sum uint32
+	for _, m := range validMembers {
+		for i := 0; i < len(m); i++ {
+			sum = (sum*33 + uint32(m[i])) ^ uint32(i)
+		}
+	}
+	return fmt.Sprintf("Group-%06x", sum&0xFFFFFF)
+}
+
+func npubToTokiPona(pubkey string) string {
+	var sum [3]byte
+	for i := 0; i < len(pubkey); i++ {
+		sum[i%3] ^= pubkey[i]
+	}
 	return fmt.Sprintf("%s-%s-%s",
-		tokiPonaNouns[int(hash[0])%len(tokiPonaNouns)],
-		tokiPonaNouns[int(hash[1])%len(tokiPonaNouns)],
-		tokiPonaNouns[int(hash[2])%len(tokiPonaNouns)],
+		tokiPonaNouns[int(sum[0])%len(tokiPonaNouns)],
+		tokiPonaNouns[int(sum[1])%len(tokiPonaNouns)],
+		tokiPonaNouns[int(sum[2])%len(tokiPonaNouns)],
 	)
 }
 

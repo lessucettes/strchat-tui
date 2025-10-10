@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"crypto/sha256"
 	"strings"
 
 	"github.com/rivo/uniseg"
@@ -47,11 +46,11 @@ func extractNickPrefix(s string) (nick string, complete bool) {
 
 // pubkeyToColor selects a color for a pubkey from a given palette.
 func pubkeyToColor(pubkey string, palette []string) string {
-	if len(palette) == 0 {
-		return "[white]" // Fallback
+	var sum byte
+	for i := 0; i < len(pubkey); i += 2 {
+		sum ^= pubkey[i]
 	}
-	hash := sha256.Sum256([]byte(pubkey))
-	return palette[int(hash[0])%len(palette)]
+	return palette[int(sum)%len(palette)]
 }
 
 // graphemeLen counts user-perceived characters (grapheme clusters)

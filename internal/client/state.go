@@ -1,8 +1,6 @@
 package client
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"log"
 	"sort"
@@ -63,9 +61,7 @@ func (c *client) createGroup(payload string) {
 
 	sort.Strings(validMembers)
 
-	hash := sha256.Sum256([]byte(strings.Join(validMembers, "")))
-	id := hex.EncodeToString(hash[:])[:6]
-	name := fmt.Sprintf("Group-%s", id)
+	name := groupName(validMembers)
 
 	for _, view := range c.config.Views {
 		if view.Name == name {
