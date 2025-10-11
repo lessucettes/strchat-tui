@@ -77,12 +77,12 @@ func MacARM() error {
 
 // Build for macOS
 func MacOS() {
-	mg.SerialDeps(
-		func() error {
-			return build("darwin", "amd64", false, binBase+"-macos-intel")
-		},
+	mg.Deps(
 		func() error {
 			return build("darwin", "arm64", false, binBase+"-macos-arm")
+		},
+		func() error {
+			return build("darwin", "amd64", false, binBase+"-macos-intel")
 		},
 	)
 }
