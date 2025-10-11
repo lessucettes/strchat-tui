@@ -46,7 +46,7 @@ This client aims to support a wide range of Nostr chats.
 
 ## How to Build from Source
 
-1. Ensure you have [Go](https://golang.org/) (version 1.25 or newer) installed.
+1. Ensure you have [Go](https://go.dev/) (version 1.25 or newer) installed.
 2. Clone the repository:
    ```bash
    git clone https://github.com/lessucettes/strchat-tui.git
@@ -63,21 +63,20 @@ go build ./cmd/strchat-tui
 ### Option 2 — Cross-Platform Build with Mage
 
 This project includes a [Mage](https://magefile.org) build system for reproducible cross-platform builds.
-All binaries are built **statically** with `CGO_ENABLED=0`.
 
 To install Mage:
 ```bash
 go install github.com/magefile/mage@latest
 ```
 
-| Command              | Description                                                 |
-|----------------------|-------------------------------------------------------------|
-| `mage` or `mage all` | Build all supported platforms (Linux, macOS, Windows)       |
-| `mage linux`         | Build for Linux/amd64                                       |
-| `mage macintel`      | Build for macOS/amd64                                       |
-| `mage macarm`        | Build for macOS/arm64                                       |
-| `mage macos`         | Build for macOS (amd64/arm64)                               |
-| `mage windows`       | Build for Windows/amd64                                     |
+| Command              | Description                                           |
+|----------------------|-------------------------------------------------------|
+| `mage` or `mage all` | Build all supported platforms (Linux, macOS, Windows) |
+| `mage linux`         | Build for Linux/amd64                                 |
+| `mage macintel`      | Build for macOS/amd64                                 |
+| `mage macarm`        | Build for macOS/arm64                                 |
+| `mage macos`         | Build for macOS (amd64/arm64)                         |
+| `mage windows`       | Build for Windows/amd64                               |
 
 After the build completes, run:
 ```bash
