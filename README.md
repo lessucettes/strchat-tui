@@ -60,8 +60,6 @@ If you just want to build a local binary for your platform:
 go build ./cmd/strchat-tui
 ```
 
----
-
 ### Option 2 — Cross-Platform Build with Mage
 
 This project includes a [Mage](https://magefile.org) build system for reproducible cross-platform builds.
@@ -80,8 +78,6 @@ go install github.com/magefile/mage@latest
 | `mage macarm`        | Build for macOS/arm64                                       |
 | `mage macos`         | Build for macOS (amd64/arm64)                               |
 | `mage windows`       | Build for Windows/amd64                                     |
-
----
 
 After the build completes, run:
 ```bash
