@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/gdamore/tcell/v2 v2.9.0
+	github.com/magefile/mage v1.15.0
 	github.com/mmcloughlin/geohash v0.10.0
 	github.com/nbd-wtf/go-nostr v0.52.0
 	github.com/rivo/tview v0.0.0-20250827170525-39dce1f64fd6
