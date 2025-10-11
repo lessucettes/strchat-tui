@@ -48,51 +48,51 @@ var Default = All
 // Build binaries for supported platforms
 func All() {
 	mg.Deps(
-		func() error { return build("linux", "amd64", false, binBase+"-linux") },
-		func() error { return build("windows", "amd64", false, binBase+".exe") },
-		func() error { return build("darwin", "amd64", false, binBase+"-macos-intel") },
-		func() error { return build("darwin", "arm64", false, binBase+"-macos-arm") },
+		func() error { return build("linux", "amd64", binBase+"-linux") },
+		func() error { return build("windows", "amd64", binBase+".exe") },
+		func() error { return build("darwin", "amd64", binBase+"-macos-intel") },
+		func() error { return build("darwin", "arm64", binBase+"-macos-arm") },
 	)
 }
 
 // Build for Linux/amd64
 func Linux() error {
-	return build("linux", "amd64", false, binBase)
+	return build("linux", "amd64", binBase)
 }
 
 // Build for Windows/amd64
 func Windows() error {
-	return build("windows", "amd64", false, binBase+".exe")
+	return build("windows", "amd64", binBase+".exe")
 }
 
 // Build for macOS/amd64
 func MacIntel() error {
-	return build("darwin", "amd64", false, binBase)
+	return build("darwin", "amd64", binBase)
 }
 
 // Build for macOS/arm64
 func MacARM() error {
-	return build("darwin", "arm64", false, binBase)
+	return build("darwin", "arm64", binBase)
 }
 
 // Build for macOS
 func MacOS() {
 	mg.Deps(
 		func() error {
-			return build("darwin", "arm64", false, binBase+"-macos-arm")
+			return build("darwin", "arm64", binBase+"-macos-arm")
 		},
 		func() error {
-			return build("darwin", "amd64", false, binBase+"-macos-intel")
+			return build("darwin", "amd64", binBase+"-macos-intel")
 		},
 	)
 }
 
-func build(goos, goarch string, cgo bool, out string) error {
+func build(goos, goarch string, out string) error {
 	env := map[string]string{
 		"GOOS":        goos,
 		"GOARCH":      goarch,
 		"CGO_ENABLED": "0",
 	}
 	fmt.Printf("Building %s/%s → %s\n", goos, goarch, out)
-	return sh.RunWith(env, goexe, "build", "-ldflags", ldFlags, "-o", out, pkgPath)
+	return sh.RunWithV(env, goexe, "build", "-ldflags", ldFlags, "-o", out, pkgPath)
 }
