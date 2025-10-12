@@ -16,26 +16,6 @@ import (
 	"github.com/nbd-wtf/go-nostr"
 )
 
-// --- Retry helper ---
-
-func retryWithBackoff(ctx context.Context, fn func() error) error {
-	delay := 500 * time.Millisecond
-	for {
-		if err := fn(); err == nil {
-			return nil
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(delay):
-			if delay < 30*time.Second {
-				delay *= 2
-			}
-		}
-	}
-}
-
 // --- Nostr Logic ---
 
 func (c *client) updateAllSubscriptions() {
@@ -347,7 +327,7 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 		}
 
 		if isRelevantToActiveView {
-			requiredPoW := activeView.PoW
+			requiredPoW := c.effectivePoWForChat(eventChat)
 			if !isPoWValid(ev, requiredPoW) {
 				log.Printf("Dropped event %s from %s for failing PoW check (required: %d)", safeSuffix(ev.ID, 4), eventChat, requiredPoW)
 				return
@@ -545,7 +525,7 @@ func (c *client) publishMessage(message string) {
 		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "Cannot determine PoW: No active chat/group."}
 		return
 	}
-	requiredPoW := activeView.PoW
+	requiredPoW := c.effectivePoWForChat(targetChat)
 
 	c.relaysMu.Lock()
 	var relaysForPublishing []*managedRelay
@@ -575,33 +555,36 @@ func (c *client) publishMessage(message string) {
 }
 
 func (c *client) minePoWAndPublish(ev nostr.Event, difficulty int, targetChat string, relays []*managedRelay) {
-	clone := ev
+	if session, ok := c.chatKeys[targetChat]; ok && session.PrivKey != "" {
+		ev.PubKey = session.PubKey
+	} else {
+		ev.PubKey = c.pk
+	}
 
-	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Calculating Proof-of-Work (difficulty %d)...", difficulty)}
+	c.eventsChan <- DisplayEvent{Type: "STATUS",
+		Content: fmt.Sprintf("Calculating Proof-of-Work (difficulty %d)...", difficulty),
+	}
 
 	nonceTagIndex := -1
-	for i, tag := range clone.Tags {
+	for i, tag := range ev.Tags {
 		if len(tag) > 1 && tag[0] == "nonce" {
 			nonceTagIndex = i
 			break
 		}
 	}
-
 	if nonceTagIndex == -1 {
 		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "PoW mining failed: nonce tag not found."}
 		return
 	}
 
-	var nonceCounter uint64 = 0
+	var nonceCounter uint64
 	for {
-		clone.Tags[nonceTagIndex][1] = strconv.FormatUint(nonceCounter, 10)
-		clone.ID = clone.GetID()
-
-		if countLeadingZeroBits(clone.ID) >= difficulty {
+		ev.Tags[nonceTagIndex][1] = strconv.FormatUint(nonceCounter, 10)
+		ev.ID = ev.GetID()
+		if countLeadingZeroBits(ev.ID) >= difficulty {
 			break
 		}
 		nonceCounter++
-
 		if nonceCounter&0x3FF == 0 {
 			select {
 			case <-c.ctx.Done():
@@ -611,11 +594,14 @@ func (c *client) minePoWAndPublish(ev nostr.Event, difficulty int, targetChat st
 			}
 		}
 	}
-	if err := c.signEventForChat(&clone, targetChat); err != nil {
-		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Failed to sign PoW event: %v", err)}
-		return
+
+	if session, ok := c.chatKeys[targetChat]; ok && session.PrivKey != "" {
+		_ = ev.Sign(session.PrivKey)
+	} else {
+		_ = ev.Sign(c.sk)
 	}
-	c.publish(clone, targetChat, relays)
+
+	c.publish(ev, targetChat, relays)
 }
 
 func (c *client) publish(ev nostr.Event, targetChat string, relaysForPublishing []*managedRelay) {
@@ -721,4 +707,40 @@ func (c *client) sendRelaysUpdate() {
 	}
 
 	c.eventsChan <- DisplayEvent{Type: "RELAYS_UPDATE", Payload: statuses}
+}
+
+// --- Helpers ---
+
+func retryWithBackoff(ctx context.Context, fn func() error) error {
+	delay := 500 * time.Millisecond
+	for {
+		if err := fn(); err == nil {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+			if delay < 30*time.Second {
+				delay *= 2
+			}
+		}
+	}
+}
+
+func (c *client) effectivePoWForChat(chat string) int {
+	for _, v := range c.config.Views {
+		if !v.IsGroup && v.Name == chat && v.PoW > 0 {
+			return v.PoW
+		}
+	}
+	if av := c.getActiveView(); av != nil && av.IsGroup && av.PoW > 0 {
+		for _, child := range av.Children {
+			if child == chat {
+				return av.PoW
+			}
+		}
+	}
+	return 0
 }

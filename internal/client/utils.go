@@ -12,8 +12,6 @@ import (
 	"github.com/rivo/uniseg"
 )
 
-// --- helpers ---
-
 var hexToLeadingZeros [256]int
 
 func init() {

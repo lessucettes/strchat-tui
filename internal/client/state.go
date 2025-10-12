@@ -260,6 +260,7 @@ func (c *client) setPoW(difficultyStr string) {
 		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("PoW disabled for %s.", activeView.Name)}
 	}
 }
+
 func (c *client) setNick(nick string) {
 	nick = strings.TrimSpace(nick)
 	c.config.Nick = nick
