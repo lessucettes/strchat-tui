@@ -31,13 +31,15 @@ const (
 
 // haversine calculates the great-circle distance in kilometers between two points on the Earth.
 func haversine(lat1, lon1, lat2, lon2 float64) float64 {
-	const R = 6371.0 // Earth radius in kilometers
-	dLat := (lat2 - lat1) * math.Pi / 180
-	dLon := (lon2 - lon1) * math.Pi / 180
+	const (
+		radius = 6371.0 // Earth radius in kilometers
+		deg    = math.Pi / 180
+	)
+	dLat := (lat2 - lat1) * deg
+	dLon := (lon2 - lon1) * deg
 	a := math.Sin(dLat/2)*math.Sin(dLat/2) +
-		math.Cos(lat1*math.Pi/180)*math.Cos(lat2*math.Pi/180)*
-			math.Sin(dLon/2)*math.Sin(dLon/2)
-	return 2 * R * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+		math.Cos(lat1*deg)*math.Cos(lat2*deg)*math.Sin(dLon/2)*math.Sin(dLon/2)
+	return 2 * radius * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
 }
 
 // loadRelays loads relay entries from the remote CSV, using a local cache if it's recent enough.
@@ -46,16 +48,17 @@ func loadRelays() ([]relayEntry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot determine app config dir: %w", err)
 	}
-
 	cachePath := filepath.Join(appDir, cacheFileName)
 
-	info, err := os.Stat(cachePath)
-	if err == nil && time.Since(info.ModTime()) < cacheTTL {
+	if info, err := os.Stat(cachePath); err == nil && time.Since(info.ModTime()) < cacheTTL {
 		return parseCSV(cachePath)
 	}
 
 	resp, err := http.Get(remoteURL)
 	if err != nil {
+		if relays, err2 := parseCSV(cachePath); err2 == nil {
+			return relays, nil
+		}
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -64,12 +67,11 @@ func loadRelays() ([]relayEntry, error) {
 		return nil, fmt.Errorf("failed to fetch relays: %s", resp.Status)
 	}
 
-	out, err := os.OpenFile(cachePath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
+	out, err := os.Create(cachePath)
 	if err != nil {
 		return nil, err
 	}
 	defer out.Close()
-
 	if _, err = io.Copy(out, resp.Body); err != nil {
 		return nil, err
 	}
@@ -93,25 +95,20 @@ func parseCSV(path string) ([]relayEntry, error) {
 
 	var relays []relayEntry
 	for i, line := range lines {
-		// Skip header line.
-		if i == 0 && strings.Contains(strings.ToLower(line[0]), "relay") {
-			continue
-		}
 		if len(line) < 3 {
 			continue
 		}
-
-		// Use strconv.ParseFloat for more robust parsing than Sscanf.
-		lat, err := strconv.ParseFloat(strings.TrimSpace(line[1]), 64)
-		if err != nil {
-			continue // Skip lines with invalid latitude.
+		if i == 0 && strings.Contains(strings.ToLower(line[0]), "relay") {
+			continue
 		}
-		lon, err := strconv.ParseFloat(strings.TrimSpace(line[2]), 64)
-		if err != nil {
-			continue // Skip lines with invalid longitude.
+		lat, err1 := strconv.ParseFloat(strings.TrimSpace(line[1]), 64)
+		lon, err2 := strconv.ParseFloat(strings.TrimSpace(line[2]), 64)
+		if err1 != nil || err2 != nil {
+			continue
 		}
-
-		host := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(line[0]), "wss://"), "ws://")
+		host := strings.TrimSpace(line[0])
+		host = strings.TrimPrefix(host, "wss://")
+		host = strings.TrimPrefix(host, "ws://")
 		relays = append(relays, relayEntry{Host: host, Lat: lat, Lon: lon})
 	}
 	return relays, nil

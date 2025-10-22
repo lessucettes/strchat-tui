@@ -34,6 +34,7 @@ type config struct {
 	Nick           string        `json:"nick,omitempty"`
 	Views          []View        `json:"views"`
 	ActiveViewName string        `json:"active_view_name"`
+	AnchorRelays   []string      `json:"anchor_relays,omitempty"`
 	BlockedUsers   []blockedUser `json:"blocked_users,omitempty"`
 	Filters        []filter      `json:"filters,omitempty"`
 	Mutes          []filter      `json:"mutes,omitempty"`
@@ -101,6 +102,7 @@ func createDefaultConfig(path string) (*config, error) {
 		PrivateKey:     sk,
 		Views:          []View{},
 		ActiveViewName: "",
+		AnchorRelays:   []string{},
 		BlockedUsers:   []blockedUser{},
 
 		Filters: []filter{},

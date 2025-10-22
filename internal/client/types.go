@@ -21,11 +21,20 @@ const (
 	perStreamBufferMax   = 256
 )
 
+const (
+	maxDiscoveryDepth    = 2
+	maxActiveDiscoveries = 30
+	discoveryKind        = 10002
+	connectTimeout       = 10 * time.Second
+	verifyTimeout        = 5 * time.Second
+	relayAddRateLimit    = 1000 * time.Millisecond
+	debounceDelay        = 60 * time.Second
+)
+
 // defaultNamedChatRelays provides a fallback list of relays for named chats.
 var defaultNamedChatRelays = []string{
 	"wss://relay.damus.io",
 	"wss://relay.primal.net",
-	"wss://nos.lol",
 	"wss://offchain.pub",
 	"wss://adre.su",
 }
@@ -87,12 +96,13 @@ type userContext struct {
 
 // managedRelay wraps a nostr.Relay with additional state for management.
 type managedRelay struct {
-	url          string
-	relay        *nostr.Relay
-	latency      time.Duration
-	subscription *nostr.Subscription
-	connected    bool
-	mu           sync.Mutex
+	url               string
+	relay             *nostr.Relay
+	latency           time.Duration
+	subscription      *nostr.Subscription
+	connected         bool
+	reconnectAttempts int
+	mu                sync.Mutex
 }
 
 // compiledPattern holds a pre-compiled regex or a literal string for matching.

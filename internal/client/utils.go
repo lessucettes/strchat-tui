@@ -3,6 +3,7 @@ package client
 import (
 	"fmt"
 	"math/bits"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -188,6 +189,38 @@ func sanitizeString(s string) string {
 	return b.String()
 }
 
+func normalizeRelayURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	raw = strings.TrimRight(raw, "/,.;")
+
+	if !strings.Contains(raw, "://") {
+		raw = "wss://" + raw
+	}
+
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid URL: %w", err)
+	}
+
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "wss" {
+		return "", fmt.Errorf("only wss:// relays are allowed (got %s)", scheme)
+	}
+
+	host := strings.ToLower(strings.Trim(u.Host, "/."))
+
+	if host == "" {
+		if u.Path != "" && !strings.Contains(u.Path, "/") {
+			host = strings.ToLower(strings.Trim(u.Path, "/."))
+		}
+		if host == "" {
+			return "", fmt.Errorf("missing host in URL: %q", raw)
+		}
+	}
+
+	return fmt.Sprintf("wss://%s", host), nil
+}
+
 func groupName(validMembers []string) string {
 	var sum uint32
 	for _, m := range validMembers {
@@ -229,6 +262,7 @@ func (c *client) getHelp() {
 		"* /del [name] - Deletes a chat/group. If no name, deletes the active chat/group. (Alias: /d)\n" +
 		"* /nick [new_nick] - Sets or clears your nickname. (Alias: /n)\n" +
 		"* /pow [number] - Sets Proof-of-Work difficulty for the active chat/group. 0 to disable. (Alias: /p)\n" +
+		"* /relay [<num>|url1...] - List, remove (#), or add anchor relays. (Alias: /r)\n" +
 		"* /block [@nick] - Blocks a user. Without nick, lists blocked users. (Alias: /b)\n" +
 		"* /unblock [<num>|@nick|pubkey] - Unblocks a user. Without args, lists blocked users. (Alias: /ub)\n" +
 		"* /filter [word|regex|<num>] - Adds a filter. Without args, lists filters. With number, toggles off/on. (Alias: /f)\n" +

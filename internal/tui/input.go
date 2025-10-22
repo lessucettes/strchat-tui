@@ -205,6 +205,8 @@ func (t *tui) handleCommand(text string) {
 		} else {
 			t.actionsChan <- client.UserAction{Type: "REMOVE_MUTE", Payload: payload}
 		}
+	case "/relay", "/r":
+		t.actionsChan <- client.UserAction{Type: "MANAGE_ANCHORS", Payload: payload}
 	case "/help", "/h":
 		t.actionsChan <- client.UserAction{Type: "GET_HELP"}
 	}

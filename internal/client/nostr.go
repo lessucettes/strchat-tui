@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"maps"
+	"math"
 	"slices"
 	"sort"
 	"strconv"
@@ -17,6 +18,40 @@ import (
 )
 
 // --- Nostr Logic ---
+
+func (c *client) getRelayPoolForChat(chat string) []string {
+	relaySet := make(map[string]struct{})
+
+	for _, url := range c.config.AnchorRelays {
+		relaySet[url] = struct{}{}
+	}
+
+	if c.discoveredStore != nil {
+		for _, url := range c.getDiscoveredRelayURLs() {
+			relaySet[url] = struct{}{}
+		}
+	}
+
+	if geohash.Validate(chat) == nil {
+		closest, err := closestRelays(chat, defaultRelayCount)
+		if err == nil {
+			for _, url := range closest {
+				relaySet[url] = struct{}{}
+			}
+		}
+	}
+
+	relayURLs := make([]string, 0, len(relaySet))
+	for url := range relaySet {
+		relayURLs = append(relayURLs, url)
+	}
+
+	if len(relayURLs) == 0 {
+		relayURLs = defaultNamedChatRelays
+	}
+
+	return relayURLs
+}
 
 func (c *client) updateAllSubscriptions() {
 	activeView := c.getActiveView()
@@ -42,16 +77,7 @@ func (c *client) updateAllSubscriptions() {
 
 	desiredRelayToChats := make(map[string][]string)
 	for chat := range activeChats {
-		var relayURLs []string
-		if geohash.Validate(chat) == nil {
-			var err error
-			relayURLs, err = closestRelays(chat, defaultRelayCount)
-			if err != nil || len(relayURLs) == 0 {
-				relayURLs = defaultNamedChatRelays
-			}
-		} else {
-			relayURLs = defaultNamedChatRelays
-		}
+		relayURLs := c.getRelayPoolForChat(chat)
 		for _, url := range relayURLs {
 			found := slices.Contains(desiredRelayToChats[url], chat)
 			if !found {
@@ -71,6 +97,11 @@ func (c *client) updateRelaySubscriptions(desiredRelays map[string][]string) {
 
 	var wg sync.WaitGroup
 	for url, chats := range desiredRelays {
+
+		if c.relayFailed(url) {
+			continue
+		}
+
 		if mr, exists := currentRelays[url]; exists {
 			wg.Add(1)
 			go func(mr *managedRelay, chats []string) {
@@ -80,6 +111,8 @@ func (c *client) updateRelaySubscriptions(desiredRelays map[string][]string) {
 						Type:    "ERROR",
 						Content: fmt.Sprintf("Resubscribe failed on %s: %v", mr.url, err),
 					}
+
+					c.markRelayFailed(url)
 				}
 			}(mr, chats)
 		} else {
@@ -113,27 +146,35 @@ func (c *client) manageRelayConnection(url string, chats []string) {
 	ctx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
 	defer cancel()
 
+	if c.relayFailed(url) {
+		c.eventsChan <- DisplayEvent{
+			Type:    "STATUS",
+			Content: fmt.Sprintf("Skipping connect to discovered relay %s (in fail cache)", url),
+		}
+		return
+	}
+
 	start := time.Now()
 	relay, err := nostr.RelayConnect(ctx, url)
 	if err != nil {
-		c.eventsChan <- DisplayEvent{
-			Type:    "STATUS",
-			Content: fmt.Sprintf("Failed to connect to %s: %v", url, err),
+		if !c.isDiscoveredRelay(url) {
+			c.eventsChan <- DisplayEvent{
+				Type:    "ERROR",
+				Content: fmt.Sprintf("Failed to connect to %s: %v", url, err),
+			}
 		}
+
+		c.markRelayFailed(url)
 		return
 	}
 	latency := time.Since(start)
 
-	c.eventsChan <- DisplayEvent{
-		Type:    "STATUS",
-		Content: fmt.Sprintf("Connected to %s (%dms)", url, latency.Milliseconds()),
-	}
-
 	mr := &managedRelay{
-		url:       url,
-		relay:     relay,
-		latency:   latency,
-		connected: true,
+		url:               url,
+		relay:             relay,
+		latency:           latency,
+		connected:         true,
+		reconnectAttempts: 0,
 	}
 
 	c.relaysMu.Lock()
@@ -147,13 +188,13 @@ func (c *client) manageRelayConnection(url string, chats []string) {
 	c.sendRelaysUpdate()
 
 	if _, err := c.replaceSubscription(mr, chats); err != nil {
-		c.eventsChan <- DisplayEvent{
-			Type:    "STATUS",
-			Content: fmt.Sprintf("Initial subscription to %s failed.", url),
+		if c.isDiscoveredRelay(mr.url) && c.verifyFailCache != nil {
+			c.markRelayFailed(mr.url)
 		}
+
 		relay.Close()
 		c.relaysMu.Lock()
-		delete(c.relays, url)
+		delete(c.relays, mr.url)
 		c.relaysMu.Unlock()
 		c.sendRelaysUpdate()
 		return
@@ -218,6 +259,8 @@ func (c *client) listenForEvents(mr *managedRelay) {
 	log.Printf("Listener started for relay: %s", mr.url)
 	defer log.Printf("Listener stopped for relay: %s", mr.url)
 
+	const maxReconnectAttempts = 3
+
 	for {
 		if c.ctx.Err() != nil {
 			return
@@ -251,31 +294,70 @@ func (c *client) listenForEvents(mr *managedRelay) {
 
 				c.sendRelaysUpdate()
 
+				c.discoveredStore.mu.RLock()
+				_, isDiscovered := c.discoveredStore.Relays[mr.url]
+				c.discoveredStore.mu.RUnlock()
+
+				if isDiscovered {
+					c.relaysMu.Lock()
+					delete(c.relays, mr.url)
+					c.relaysMu.Unlock()
+
+					if c.verifyFailCache != nil {
+						c.markRelayFailed(mr.url)
+					}
+					c.sendRelaysUpdate()
+					return
+				}
+
 				if len(oldChats) == 0 {
-					continue
+					c.relaysMu.Lock()
+					delete(c.relays, mr.url)
+					c.relaysMu.Unlock()
+					c.sendRelaysUpdate()
+					return
+				}
+
+				mr.mu.Lock()
+				mr.reconnectAttempts++
+				attempts := mr.reconnectAttempts
+				mr.mu.Unlock()
+
+				if attempts > maxReconnectAttempts {
+					c.eventsChan <- DisplayEvent{
+						Type:    "ERROR",
+						Content: fmt.Sprintf("Anchor/Geo relay %s failed to reconnect after %d attempts. Giving up.", mr.url, maxReconnectAttempts),
+					}
+
+					c.relaysMu.Lock()
+					delete(c.relays, mr.url)
+					c.relaysMu.Unlock()
+					c.sendRelaysUpdate()
+					return
 				}
 
 				err := retryWithBackoff(c.ctx, func() error {
 					_, err := c.replaceSubscription(mr, oldChats)
 					return err
-				})
+				}, attempts)
 
 				if err != nil {
 					c.eventsChan <- DisplayEvent{
 						Type:    "ERROR",
-						Content: fmt.Sprintf("Could not re-establish subscription on %s. Listener stopped.", mr.url),
+						Content: fmt.Sprintf("Could not re-establish subscription on %s (attempt %d). Error: %v. Listener stopped.", mr.url, attempts, err),
 					}
+					c.relaysMu.Lock()
+					delete(c.relays, mr.url)
+					c.relaysMu.Unlock()
+					c.sendRelaysUpdate()
 					return
 				}
 
 				mr.mu.Lock()
 				mr.connected = true
+				mr.reconnectAttempts = 0
 				mr.mu.Unlock()
 				c.sendRelaysUpdate()
-				c.eventsChan <- DisplayEvent{
-					Type:    "STATUS",
-					Content: fmt.Sprintf("Successfully reconnected to %s!", mr.url),
-				}
 				continue
 			}
 
@@ -499,20 +581,19 @@ func (c *client) publishMessage(message string) {
 
 	var kind int
 	var tagKey string
-	var relayURLs []string
+
 	if geohash.Validate(targetChat) == nil {
 		kind = geochatKind
 		tagKey = "g"
-		var err error
-		relayURLs, err = closestRelays(targetChat, defaultRelayCount)
-		if err != nil || len(relayURLs) == 0 {
-			c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("No relays found for chat %s", targetChat)}
-			return
-		}
 	} else {
 		kind = namedChatKind
 		tagKey = "d"
-		relayURLs = defaultNamedChatRelays
+	}
+
+	relayPool := c.getRelayPoolForChat(targetChat)
+	relayPoolSet := make(map[string]struct{}, len(relayPool))
+	for _, url := range relayPool {
+		relayPoolSet[url] = struct{}{}
 	}
 
 	tags := nostr.Tags{{tagKey, targetChat}}
@@ -529,10 +610,14 @@ func (c *client) publishMessage(message string) {
 
 	c.relaysMu.Lock()
 	var relaysForPublishing []*managedRelay
-	for _, url := range relayURLs {
-		if r, ok := c.relays[url]; ok {
-			relaysForPublishing = append(relaysForPublishing, r)
+	for url, r := range c.relays {
+		if _, ok := relayPoolSet[url]; !ok {
+			continue
 		}
+		if c.relayFailed(url) {
+			continue
+		}
+		relaysForPublishing = append(relaysForPublishing, r)
 	}
 	c.relaysMu.Unlock()
 
@@ -630,6 +715,9 @@ func (c *client) publish(ev nostr.Event, targetChat string, relaysForPublishing 
 				r.mu.Lock()
 				r.connected = false
 				r.mu.Unlock()
+
+				c.markRelayFailed(r.url)
+
 				c.sendRelaysUpdate()
 			}
 		}(r)
@@ -711,21 +799,17 @@ func (c *client) sendRelaysUpdate() {
 
 // --- Helpers ---
 
-func retryWithBackoff(ctx context.Context, fn func() error) error {
-	delay := 500 * time.Millisecond
-	for {
-		if err := fn(); err == nil {
-			return nil
-		}
+func retryWithBackoff(ctx context.Context, fn func() error, attempt int) error {
+	delay := min(time.Duration(math.Pow(2, float64(attempt-1)))*500*time.Millisecond, 30*time.Second)
 
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(delay):
-			if delay < 30*time.Second {
-				delay *= 2
-			}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(delay):
+		if err := fn(); err != nil {
+			return err
 		}
+		return nil
 	}
 }
 
