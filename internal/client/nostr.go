@@ -732,8 +732,7 @@ func (c *client) publish(ev nostr.Event, targetChat string, relaysForPublishing 
 
 	for _, em := range errorMessages {
 		c.eventsChan <- DisplayEvent{
-			Type:    "ERROR",
-			Content: "Publish failed on " + em,
+			Type: "ERROR", Content: "Publish failed on " + em,
 		}
 		if pow, ok := parsePowHint(em); ok && pow > 0 {
 			c.eventsChan <- DisplayEvent{

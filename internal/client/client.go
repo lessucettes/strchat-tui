@@ -308,7 +308,6 @@ func (c *client) triggerSubUpdate() {
 	}
 
 	c.updateSubTimer = time.AfterFunc(debounceDelay, func() {
-		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "New relays found, updating subscriptions..."}
 		c.updateAllSubscriptions()
 		_ = c.saveDiscoveredRelayStore()
 

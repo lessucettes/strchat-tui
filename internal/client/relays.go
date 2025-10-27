@@ -87,14 +87,14 @@ func (c *client) discoverRelays(anchors []string, depth int) {
 		if err != nil {
 			continue
 		}
-		if c.verifyFailCache != nil && c.verifyFailCache.Contains(norm) {
-			continue
-		}
 		c.wg.Add(1)
 		go c.discoverOnAnchor(norm, depth)
 	}
 }
 
+// discoverOnAnchor connects to an anchor relay and listens for kind=10002,
+// automatically reconnecting on failure. Event processing is asynchronous
+// to avoid blocking the subscription feed.
 func (c *client) discoverOnAnchor(anchorURL string, depth int) {
 	defer c.wg.Done()
 
@@ -108,54 +108,83 @@ func (c *client) discoverOnAnchor(anchorURL string, depth int) {
 	atomic.AddInt32(&c.activeDiscoveries, 1)
 	defer atomic.AddInt32(&c.activeDiscoveries, -1)
 
-	ctx, cancel := context.WithTimeout(c.ctx, connectTimeout)
-	defer cancel()
-
-	relay, err := nostr.RelayConnect(ctx, anchorURL)
-	if err != nil {
-		return
-	}
-	defer relay.Close()
-
-	f := nostr.Filter{Kinds: []int{discoveryKind}}
-	subCtx := c.ctx
-	sub, err := relay.Subscribe(subCtx, nostr.Filters{f})
-	if err != nil {
-		return
-	}
-	defer sub.Unsub()
-
 	for {
+		// If client is shutting down, exit
 		select {
-		case <-subCtx.Done():
+		case <-c.ctx.Done():
 			return
-		case ev, ok := <-sub.Events:
-			if !ok {
-				return
-			}
-			c.parseRelayEvent(ev, verifyTimeout, depth)
+		default:
 		}
+
+		// --- connection with a short timeout ---
+		connectCtx, cancelConnect := context.WithTimeout(c.ctx, connectTimeout)
+		relay, err := nostr.RelayConnect(connectCtx, anchorURL)
+		cancelConnect()
+		if err != nil {
+			time.Sleep(15 * time.Second) // wait before reconnecting
+			continue
+		}
+
+		// --- subscription to discoveryKind ---
+		f := nostr.Filter{Kinds: []int{discoveryKind}}
+		sub, err := relay.Subscribe(c.ctx, nostr.Filters{f})
+		if err != nil {
+			relay.Close()
+			time.Sleep(15 * time.Second) // wait before reconnecting
+			continue
+		}
+
+		// --- event reading loop ---
+		for {
+			select {
+			case <-c.ctx.Done():
+				sub.Unsub()
+				relay.Close()
+				return
+
+			case ev, ok := <-sub.Events:
+				if !ok {
+					// connection lost - trigger reconnect
+					sub.Unsub()
+					relay.Close()
+					time.Sleep(5 * time.Second)
+					goto retry // break inner loop, continue outer
+				}
+
+				// Process async to avoid blocking the event feed
+				c.wg.Add(1)
+				go func(e *nostr.Event) {
+					defer c.wg.Done()
+					c.parseRelayEvent(e, verifyTimeout, depth)
+				}(ev)
+			}
+		}
+
+	retry:
+		continue
 	}
 }
 
+// parseRelayEvent processes a kind=10002 event and asynchronously verifies
+// new relays. Verification is done in separate goroutines.
 func (c *client) parseRelayEvent(ev *nostr.Event, verifyTimeout time.Duration, depth int) {
 	if ev.Kind != discoveryKind {
 		return
 	}
 
 	store := c.discoveredStore
-	foundNewRelay := false
 
 	for _, tag := range ev.Tags {
 		if len(tag) < 2 || tag[0] != "r" {
 			continue
 		}
 
-		norm, err := normalizeRelayURL(tag[1])
+		url, err := normalizeRelayURL(tag[1])
 		if err != nil {
 			continue
 		}
 
+		// skip read/write specific
 		if len(tag) >= 3 {
 			mode := strings.ToLower(strings.TrimSpace(tag[2]))
 			if mode == "read" || mode == "write" {
@@ -163,75 +192,92 @@ func (c *client) parseRelayEvent(ev *nostr.Event, verifyTimeout time.Duration, d
 			}
 		}
 
-		if c.verifyFailCache != nil && c.verifyFailCache.Contains(norm) {
-			continue
-		}
-
-		c.verifyingMu.Lock()
-
+		// skip if it's one of our own anchor relays
 		isAnchor := false
 		for _, a := range c.config.AnchorRelays {
 			na, err := normalizeRelayURL(a)
-			if err == nil && na == norm {
+			if err == nil && na == url {
 				isAnchor = true
 				break
 			}
 		}
 		if isAnchor {
+			continue
+		}
+
+		// if in fail-cache, skip
+		if c.verifyFailCache != nil && c.verifyFailCache.Contains(url) {
+			continue
+		}
+
+		// --- uniqueness check block ---
+		c.verifyingMu.Lock()
+
+		// already being verified
+		if _, ok := c.verifying[url]; ok {
 			c.verifyingMu.Unlock()
 			continue
 		}
 
-		if _, ok := c.relays[norm]; ok {
+		// already active
+		if _, ok := c.relays[url]; ok {
 			c.verifyingMu.Unlock()
 			continue
 		}
 
-		if _, ok := store.Relays[norm]; ok {
-			c.verifyingMu.Unlock()
-			continue
-		}
-		if _, ok := c.verifying[norm]; ok {
+		// already in discovered db
+		if _, ok := store.Relays[url]; ok {
 			c.verifyingMu.Unlock()
 			continue
 		}
 
-		c.verifying[norm] = struct{}{}
+		// mark as "being verified"
+		c.verifying[url] = struct{}{}
 		c.verifyingMu.Unlock()
+		// --- end of check block ---
 
-		ok := c.verifyRelay(norm, verifyTimeout)
+		// async verification
+		c.wg.Add(1)
+		go func(url string) {
+			defer c.wg.Done()
 
-		if ok {
+			// remove from "verifying" map when done
+			defer func() {
+				c.verifyingMu.Lock()
+				delete(c.verifying, url)
+				c.verifyingMu.Unlock()
+			}()
+
+			ok := c.verifyRelay(url, verifyTimeout)
+			if !ok {
+				// add to fail-cache
+				if c.verifyFailCache != nil {
+					c.verifyFailCache.Add(url, true)
+				}
+				return
+			}
+
+			// save to discoveredStore
 			store.mu.Lock()
-			store.Relays[norm] = DiscoveredRelay{
-				URL:      norm,
+			store.Relays[url] = DiscoveredRelay{
+				URL:      url,
 				LastSeen: time.Now().Unix(),
 			}
 			store.mu.Unlock()
 
-			go c.manageRelayConnection(norm, nil)
+			// connect immediately
+			go c.manageRelayConnection(url, nil)
 
-			time.Sleep(relayAddRateLimit)
-			foundNewRelay = true
+			// update subscriptions (debounced)
+			c.triggerSubUpdate()
 
+			// recursive discovery (if depth allows)
 			if depth < maxDiscoveryDepth {
 				c.wg.Add(1)
-				go c.discoverOnAnchor(norm, depth+1)
+				go c.discoverOnAnchor(url, depth+1)
 			}
 
-		} else {
-			if c.verifyFailCache != nil {
-				c.verifyFailCache.Add(norm, true)
-			}
-		}
-
-		c.verifyingMu.Lock()
-		delete(c.verifying, norm)
-		c.verifyingMu.Unlock()
-	}
-
-	if foundNewRelay {
-		c.triggerSubUpdate()
+		}(url)
 	}
 }
 
@@ -247,9 +293,10 @@ func (c *client) verifyRelay(url string, timeout time.Duration) bool {
 	}
 	defer relay.Close()
 
-	dummyEvent := nostr.Event{
+	// create test event kind=20000
+	dummy := nostr.Event{
 		CreatedAt: nostr.Now(),
-		Kind:      geochatKind,
+		Kind:      geochatKind, // =20000
 		Tags:      nostr.Tags{{"client", "strchat-tui"}},
 		Content:   "",
 		PubKey:    c.pk,
@@ -257,16 +304,26 @@ func (c *client) verifyRelay(url string, timeout time.Duration) bool {
 	if c.sk == "" {
 		return false
 	}
-	_ = dummyEvent.Sign(c.sk)
-
-	if err := relay.Publish(rctx, dummyEvent); err != nil {
+	if err := dummy.Sign(c.sk); err != nil {
 		return false
 	}
 
+	// try to publish
+	if err := relay.Publish(rctx, dummy); err != nil {
+		return false // publish failed
+	}
+
+	// now read this event back by its ID
 	readCtx, cancelRead := context.WithTimeout(rctx, timeout/2)
 	defer cancelRead()
 
-	sub, err := relay.Subscribe(readCtx, nostr.Filters{{Kinds: []int{0}, Limit: 1}})
+	f := nostr.Filter{
+		Kinds: []int{geochatKind},
+		IDs:   []string{dummy.ID},
+		Limit: 1,
+	}
+
+	sub, err := relay.Subscribe(readCtx, nostr.Filters{f})
 	if err != nil {
 		return false
 	}
@@ -276,10 +333,7 @@ func (c *client) verifyRelay(url string, timeout time.Duration) bool {
 	for {
 		select {
 		case <-readCtx.Done():
-			if !gotResponse {
-				return false
-			}
-			return true
+			return gotResponse
 
 		case ev, ok := <-sub.Events:
 			if !ok {

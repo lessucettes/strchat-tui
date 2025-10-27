@@ -23,7 +23,7 @@ const (
 
 const (
 	maxDiscoveryDepth    = 2
-	maxActiveDiscoveries = 30
+	maxActiveDiscoveries = 10
 	discoveryKind        = 10002
 	connectTimeout       = 10 * time.Second
 	verifyTimeout        = 5 * time.Second
