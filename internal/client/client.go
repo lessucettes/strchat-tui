@@ -103,7 +103,7 @@ func New(actions <-chan UserAction, events chan<- DisplayEvent) (*client, error)
 
 // Run starts the client's main event loop.
 func (c *client) Run() {
-	// --- ensure main keypair is loaded ---
+	// ensure main keypair is loaded
 	if c.sk == "" {
 		if c.config.PrivateKey != "" {
 			c.sk = c.config.PrivateKey
@@ -141,9 +141,13 @@ func (c *client) Run() {
 	}
 
 	c.sendStateUpdate()
-	c.updateAllSubscriptions()
 
-	go c.discoverRelays(c.config.AnchorRelays, 1)
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		c.updateAllSubscriptions()
+		c.discoverRelays(c.config.AnchorRelays, 1)
+	}()
 
 	for {
 		select {
@@ -256,7 +260,7 @@ func (c *client) manageAnchors(payload string) {
 			c.config.AnchorRelays = append(c.config.AnchorRelays[:idx-1], c.config.AnchorRelays[idx:]...)
 			c.saveConfig()
 			c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Removed anchor relay: %s", removedURL)}
-			c.updateAllSubscriptions()
+			go c.updateAllSubscriptions()
 			return
 		}
 	}
@@ -290,8 +294,10 @@ func (c *client) manageAnchors(payload string) {
 	if len(added) > 0 {
 		c.saveConfig()
 		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Added anchor relay(s): %s", strings.Join(added, ", "))}
-		c.updateAllSubscriptions()
-		go c.discoverRelays(added, 1)
+		go func() {
+			c.updateAllSubscriptions()
+			c.discoverRelays(added, 1)
+		}()
 	} else if len(invalid) == 0 {
 		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Specified relay(s) are already in the anchor list."}
 	}

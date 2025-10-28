@@ -25,7 +25,7 @@ type discoveredRelayStore struct {
 	Relays map[string]DiscoveredRelay
 }
 
-// --- Persistent store management ---
+// Persistent store management
 
 func (c *client) loadDiscoveredRelayStore() error {
 	appConfigDir, err := getAppConfigDir()
@@ -79,7 +79,7 @@ func (c *client) getDiscoveredRelayURLs() []string {
 	return urls
 }
 
-// --- Discovery logic ---
+// Discovery logic
 
 func (c *client) discoverRelays(anchors []string, depth int) {
 	for _, anchor := range anchors {
@@ -116,7 +116,7 @@ func (c *client) discoverOnAnchor(anchorURL string, depth int) {
 		default:
 		}
 
-		// --- connection with a short timeout ---
+		// connection with a short timeout
 		connectCtx, cancelConnect := context.WithTimeout(c.ctx, connectTimeout)
 		relay, err := nostr.RelayConnect(connectCtx, anchorURL)
 		cancelConnect()
@@ -125,7 +125,7 @@ func (c *client) discoverOnAnchor(anchorURL string, depth int) {
 			continue
 		}
 
-		// --- subscription to discoveryKind ---
+		// subscription to 10002
 		f := nostr.Filter{Kinds: []int{discoveryKind}}
 		sub, err := relay.Subscribe(c.ctx, nostr.Filters{f})
 		if err != nil {
@@ -134,7 +134,7 @@ func (c *client) discoverOnAnchor(anchorURL string, depth int) {
 			continue
 		}
 
-		// --- event reading loop ---
+		// event reading loop
 		for {
 			select {
 			case <-c.ctx.Done():
@@ -210,7 +210,7 @@ func (c *client) parseRelayEvent(ev *nostr.Event, verifyTimeout time.Duration, d
 			continue
 		}
 
-		// --- uniqueness check block ---
+		// uniqueness check block
 		c.verifyingMu.Lock()
 
 		// already being verified
@@ -225,7 +225,7 @@ func (c *client) parseRelayEvent(ev *nostr.Event, verifyTimeout time.Duration, d
 			continue
 		}
 
-		// already in discovered db
+		// already in discovered
 		if _, ok := store.Relays[url]; ok {
 			c.verifyingMu.Unlock()
 			continue
@@ -234,7 +234,6 @@ func (c *client) parseRelayEvent(ev *nostr.Event, verifyTimeout time.Duration, d
 		// mark as "being verified"
 		c.verifying[url] = struct{}{}
 		c.verifyingMu.Unlock()
-		// --- end of check block ---
 
 		// async verification
 		c.wg.Add(1)
@@ -281,7 +280,7 @@ func (c *client) parseRelayEvent(ev *nostr.Event, verifyTimeout time.Duration, d
 	}
 }
 
-// --- Verification logic ---
+// Verification logic
 
 func (c *client) verifyRelay(url string, timeout time.Duration) bool {
 	rctx, cancel := context.WithTimeout(c.ctx, timeout)
@@ -293,10 +292,10 @@ func (c *client) verifyRelay(url string, timeout time.Duration) bool {
 	}
 	defer relay.Close()
 
-	// create test event kind=20000
+	// create test event
 	dummy := nostr.Event{
 		CreatedAt: nostr.Now(),
-		Kind:      geochatKind, // =20000
+		Kind:      geochatKind, // Kind=20000
 		Tags:      nostr.Tags{{"client", "strchat-tui"}},
 		Content:   "",
 		PubKey:    c.pk,
