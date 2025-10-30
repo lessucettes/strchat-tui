@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// --- Moderation Logic ---
+// User Blocking
 
 func (c *client) blockUser(payload string) {
 	var pkToBlock, nickToBlock string
@@ -93,34 +93,7 @@ func (c *client) listBlockedUsers() {
 	c.eventsChan <- DisplayEvent{Type: "INFO", Content: builder.String()}
 }
 
-func compilePattern(p string) compiledPattern {
-	p = strings.TrimSpace(p)
-	if len(p) > 1 && strings.HasPrefix(p, "/") && strings.HasSuffix(p, "/") {
-		body := p[1 : len(p)-1]
-		if re, err := regexp.Compile(body); err == nil {
-			return compiledPattern{raw: p, regex: re}
-		}
-		return compiledPattern{raw: p, literal: body}
-	}
-	return compiledPattern{raw: p, literal: p}
-}
-
-func (c *client) matchesAny(content string, patterns []compiledPattern) bool {
-	for _, pat := range patterns {
-		if pat.regex != nil {
-			if pat.regex.MatchString(content) {
-				return true
-			}
-		} else if pat.literal != "" {
-			if strings.Contains(content, pat.literal) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// --- Filter Management ---
+// Filter Management
 
 func (c *client) handleFilter(payload string) {
 	if payload == "" {
@@ -206,7 +179,7 @@ func (c *client) clearFilters() {
 	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Cleared all filters."}
 }
 
-// --- Mute Management ---
+// Mute Management
 
 func (c *client) handleMute(payload string) {
 	if payload == "" {
@@ -289,6 +262,8 @@ func (c *client) clearMutes() {
 	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Cleared all mutes."}
 }
 
+// Helpers
+
 func (c *client) rebuildRegexCaches() {
 	compileAll := func(src []filter) []compiledPattern {
 		out := make([]compiledPattern, 0, len(src))
@@ -301,4 +276,31 @@ func (c *client) rebuildRegexCaches() {
 	}
 	c.filtersCompiled = compileAll(c.config.Filters)
 	c.mutesCompiled = compileAll(c.config.Mutes)
+}
+
+func compilePattern(p string) compiledPattern {
+	p = strings.TrimSpace(p)
+	if len(p) > 1 && strings.HasPrefix(p, "/") && strings.HasSuffix(p, "/") {
+		body := p[1 : len(p)-1]
+		if re, err := regexp.Compile(body); err == nil {
+			return compiledPattern{raw: p, regex: re}
+		}
+		return compiledPattern{raw: p, literal: body}
+	}
+	return compiledPattern{raw: p, literal: p}
+}
+
+func (c *client) matchesAny(content string, patterns []compiledPattern) bool {
+	for _, pat := range patterns {
+		if pat.regex != nil {
+			if pat.regex.MatchString(content) {
+				return true
+			}
+		} else if pat.literal != "" {
+			if strings.Contains(content, pat.literal) {
+				return true
+			}
+		}
+	}
+	return false
 }

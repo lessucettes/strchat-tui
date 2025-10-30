@@ -111,33 +111,6 @@ func sameStringSet(a, b []string) bool {
 	return true
 }
 
-func mrCurrentChatsLocked(sub *nostr.Subscription) []string {
-	if sub == nil {
-		return nil
-	}
-	seen := make(map[string]struct{})
-	var out []string
-	for _, f := range sub.Filters {
-		tagsToCheck := [][]string{}
-		if gTags, ok := f.Tags["g"]; ok {
-			tagsToCheck = append(tagsToCheck, gTags)
-		}
-		if dTags, ok := f.Tags["d"]; ok {
-			tagsToCheck = append(tagsToCheck, dTags)
-		}
-
-		for _, tagSet := range tagsToCheck {
-			for _, ch := range tagSet {
-				if _, exists := seen[ch]; !exists {
-					seen[ch] = struct{}{}
-					out = append(out, ch)
-				}
-			}
-		}
-	}
-	return out
-}
-
 func truncateString(s string, maxClusters int) string {
 	g := uniseg.NewGraphemes(s)
 	var b strings.Builder
@@ -252,24 +225,4 @@ var tokiPonaNouns = []string{
 	"pipi", "poki", "pona", "selo", "sewi", "sijelo", "sike", "sitelen", "sona", "soweli",
 	"suli", "suno", "supa", "suwi", "telo", "tenpo", "toki", "tomo", "unpa", "uta",
 	"utala", "waso", "wawa", "weka", "wile",
-}
-
-func (c *client) getHelp() {
-	helpText := "COMMANDS:\n" +
-		"* /join <chat1> [chat2]... - Joins one or more chats. (Alias: /j)\n" +
-		"* /set [name|names...] - Without args: shows active chat. With one name: activates a chat/group. With multiple names: creates a group. (Alias: /s)\n" +
-		"* /list - Lists all your chats and groups. (Alias: /l)\n" +
-		"* /del [name] - Deletes a chat/group. If no name, deletes the active chat/group. (Alias: /d)\n" +
-		"* /nick [new_nick] - Sets or clears your nickname. (Alias: /n)\n" +
-		"* /pow [number] - Sets Proof-of-Work difficulty for the active chat/group. 0 to disable. (Alias: /p)\n" +
-		"* /relay [<num>|url1...] - List, remove (#), or add anchor relays. (Alias: /r)\n" +
-		"* /block [@nick] - Blocks a user. Without nick, lists blocked users. (Alias: /b)\n" +
-		"* /unblock [<num>|@nick|pubkey] - Unblocks a user. Without args, lists blocked users. (Alias: /ub)\n" +
-		"* /filter [word|regex|<num>] - Adds a filter. Without args, lists filters. With number, toggles off/on. (Alias: /f)\n" +
-		"* /unfilter [<num>] - Removes a filter by number. Without args, clears all. (Alias: /uf)\n" +
-		"* /mute [word|regex|<num>] - Adds a mute. Without args, lists mutes. With number, toggles off/on. (Alias: /m)\n" +
-		"* /unmute [<num>] - Removes a mute by number. Without args, clears all. (Alias: /um)\n" +
-		"* /quit - Exits the application. (Alias: /q)"
-
-	c.eventsChan <- DisplayEvent{Type: "INFO", Content: helpText}
 }

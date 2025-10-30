@@ -11,8 +11,8 @@ import (
 // Constants for the client's operation.
 const (
 	defaultRelayCount    = 5
-	geochatKind          = 20000
-	namedChatKind        = 23333
+	geoChatKind          = 20000
+	ephChatKind          = 23333
 	seenCacheSize        = 8192
 	userContextCacheSize = 4096
 	MaxMsgLen            = 2000
@@ -21,18 +21,8 @@ const (
 	perStreamBufferMax   = 256
 )
 
-const (
-	maxDiscoveryDepth    = 2
-	maxActiveDiscoveries = 10
-	discoveryKind        = 10002
-	connectTimeout       = 10 * time.Second
-	verifyTimeout        = 5 * time.Second
-	relayAddRateLimit    = 1000 * time.Millisecond
-	debounceDelay        = 60 * time.Second
-)
-
-// defaultNamedChatRelays provides a fallback list of relays for named chats.
-var defaultNamedChatRelays = []string{
+// defaultEphChatRelays provides a fallback list of relays for named chats.
+var defaultEphChatRelays = []string{
 	"wss://relay.damus.io",
 	"wss://relay.primal.net",
 	"wss://offchain.pub",
@@ -80,11 +70,11 @@ type StateUpdate struct {
 	Nick            string
 }
 
-type ChatSession struct {
-	PrivKey    string
-	PubKey     string
-	Nick       string
-	CustomNick bool
+type chatSession struct {
+	privKey    string
+	pubKey     string
+	nick       string
+	customNick bool
 }
 
 // userContext holds cached information about a user in a specific chat.

@@ -17,7 +17,7 @@ import (
 	"github.com/nbd-wtf/go-nostr"
 )
 
-// --- Nostr Logic ---
+// Subscription & Relay Lifecycle
 
 func (c *client) getRelayPoolForChat(chat string) []string {
 	relaySet := make(map[string]struct{})
@@ -47,7 +47,7 @@ func (c *client) getRelayPoolForChat(chat string) []string {
 	}
 
 	if len(relayURLs) == 0 {
-		relayURLs = defaultNamedChatRelays
+		relayURLs = defaultEphChatRelays
 	}
 
 	return relayURLs
@@ -200,11 +200,9 @@ func (c *client) manageRelayConnection(url string, chats []string) {
 		return
 	}
 
-	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
+	c.wg.Go(func() {
 		c.listenForEvents(mr)
-	}()
+	})
 }
 
 func (c *client) replaceSubscription(mr *managedRelay, chats []string) (bool, error) {
@@ -222,13 +220,13 @@ func (c *client) replaceSubscription(mr *managedRelay, chats []string) (bool, er
 		since := now
 		if geohash.Validate(ch) == nil {
 			filters = append(filters, nostr.Filter{
-				Kinds: []int{geochatKind},
+				Kinds: []int{geoChatKind},
 				Tags:  nostr.TagMap{"g": []string{ch}},
 				Since: &since,
 			})
 		} else {
 			filters = append(filters, nostr.Filter{
-				Kinds: []int{namedChatKind},
+				Kinds: []int{ephChatKind},
 				Tags:  nostr.TagMap{"d": []string{ch}},
 				Since: &since,
 			})
@@ -254,6 +252,29 @@ func (c *client) replaceSubscription(mr *managedRelay, chats []string) (bool, er
 
 	return true, nil
 }
+
+func (c *client) sendRelaysUpdate() {
+	c.relaysMu.Lock()
+	defer c.relaysMu.Unlock()
+
+	statuses := make([]RelayInfo, 0, len(c.relays))
+	for _, mr := range c.relays {
+		mr.mu.Lock()
+		connected := mr.connected
+		latency := mr.latency
+		mr.mu.Unlock()
+
+		statuses = append(statuses, RelayInfo{
+			URL:       mr.url,
+			Latency:   latency,
+			Connected: connected,
+		})
+	}
+
+	c.eventsChan <- DisplayEvent{Type: "RELAYS_UPDATE", Payload: statuses}
+}
+
+// Event Ingestion & Processing
 
 func (c *client) listenForEvents(mr *managedRelay) {
 	log.Printf("Listener started for relay: %s", mr.url)
@@ -294,18 +315,13 @@ func (c *client) listenForEvents(mr *managedRelay) {
 
 				c.sendRelaysUpdate()
 
-				c.discoveredStore.mu.RLock()
-				_, isDiscovered := c.discoveredStore.Relays[mr.url]
-				c.discoveredStore.mu.RUnlock()
-
-				if isDiscovered {
+				if c.isDiscoveredRelay(mr.url) {
 					c.relaysMu.Lock()
 					delete(c.relays, mr.url)
 					c.relaysMu.Unlock()
 
-					if c.verifyFailCache != nil {
-						c.markRelayFailed(mr.url)
-					}
+					c.markRelayFailed(mr.url)
+
 					c.sendRelaysUpdate()
 					return
 				}
@@ -455,7 +471,7 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 		isOwn = true
 	} else {
 		for _, s := range c.chatKeys {
-			if ev.PubKey == s.PubKey {
+			if ev.PubKey == s.pubKey {
 				isOwn = true
 				break
 			}
@@ -515,30 +531,7 @@ func (c *client) flushOrdered(streamKey string) {
 	}
 }
 
-func (c *client) signEventForChat(ev *nostr.Event, chatName string) error {
-	view := c.getActiveView()
-	useMainKey := false
-
-	if view != nil && view.IsGroup {
-		useMainKey = true
-	}
-
-	if !useMainKey {
-		if session, ok := c.chatKeys[chatName]; ok && session.PrivKey != "" {
-			ev.PubKey = session.PubKey
-			ev.ID = ev.GetID()
-			return ev.Sign(session.PrivKey)
-		}
-	}
-
-	if c.sk == "" || c.pk == "" {
-		return fmt.Errorf("no valid signing key available")
-	}
-
-	ev.PubKey = c.pk
-	ev.ID = ev.GetID()
-	return ev.Sign(c.sk)
-}
+// Message Publishing Lifecycle
 
 func (c *client) publishMessage(message string) {
 	var targetChat string
@@ -583,10 +576,10 @@ func (c *client) publishMessage(message string) {
 	var tagKey string
 
 	if geohash.Validate(targetChat) == nil {
-		kind = geochatKind
+		kind = geoChatKind
 		tagKey = "g"
 	} else {
-		kind = namedChatKind
+		kind = ephChatKind
 		tagKey = "d"
 	}
 
@@ -639,9 +632,66 @@ func (c *client) publishMessage(message string) {
 	}
 }
 
+func (c *client) createEvent(message string, kind int, tags nostr.Tags, difficulty int) nostr.Event {
+	baseTags := make(nostr.Tags, 0, len(tags)+2)
+	baseTags = append(baseTags, tags...)
+
+	active := c.getActiveView()
+	if active != nil && !active.IsGroup {
+		if session, ok := c.chatKeys[active.Name]; ok && session.nick != "" {
+			baseTags = append(baseTags, nostr.Tag{"n", session.nick})
+		}
+	} else if active != nil && active.IsGroup {
+		nick := c.config.Nick
+		if nick == "" {
+			nick = npubToTokiPona(c.pk)
+		}
+		baseTags = append(baseTags, nostr.Tag{"n", nick})
+	}
+
+	ev := nostr.Event{
+		CreatedAt: nostr.Now(),
+		PubKey:    c.pk,
+		Content:   message,
+		Kind:      kind,
+		Tags:      baseTags,
+	}
+
+	if difficulty > 0 {
+		ev.Tags = append(ev.Tags, nostr.Tag{"nonce", "0", strconv.Itoa(difficulty)})
+	}
+
+	return ev
+}
+
+func (c *client) signEventForChat(ev *nostr.Event, chatName string) error {
+	view := c.getActiveView()
+	useMainKey := false
+
+	if view != nil && view.IsGroup {
+		useMainKey = true
+	}
+
+	if !useMainKey {
+		if session, ok := c.chatKeys[chatName]; ok && session.privKey != "" {
+			ev.PubKey = session.pubKey
+			ev.ID = ev.GetID()
+			return ev.Sign(session.privKey)
+		}
+	}
+
+	if c.sk == "" || c.pk == "" {
+		return fmt.Errorf("no valid signing key available")
+	}
+
+	ev.PubKey = c.pk
+	ev.ID = ev.GetID()
+	return ev.Sign(c.sk)
+}
+
 func (c *client) minePoWAndPublish(ev nostr.Event, difficulty int, targetChat string, relays []*managedRelay) {
-	if session, ok := c.chatKeys[targetChat]; ok && session.PrivKey != "" {
-		ev.PubKey = session.PubKey
+	if session, ok := c.chatKeys[targetChat]; ok && session.privKey != "" {
+		ev.PubKey = session.pubKey
 	} else {
 		ev.PubKey = c.pk
 	}
@@ -680,8 +730,8 @@ func (c *client) minePoWAndPublish(ev nostr.Event, difficulty int, targetChat st
 		}
 	}
 
-	if session, ok := c.chatKeys[targetChat]; ok && session.PrivKey != "" {
-		_ = ev.Sign(session.PrivKey)
+	if session, ok := c.chatKeys[targetChat]; ok && session.privKey != "" {
+		_ = ev.Sign(session.privKey)
 	} else {
 		_ = ev.Sign(c.sk)
 	}
@@ -743,60 +793,21 @@ func (c *client) publish(ev nostr.Event, targetChat string, relaysForPublishing 
 	}
 }
 
-func (c *client) createEvent(message string, kind int, tags nostr.Tags, difficulty int) nostr.Event {
-	baseTags := make(nostr.Tags, 0, len(tags)+2)
-	baseTags = append(baseTags, tags...)
+// Helpers
 
-	active := c.getActiveView()
-	if active != nil && !active.IsGroup {
-		if session, ok := c.chatKeys[active.Name]; ok && session.Nick != "" {
-			baseTags = append(baseTags, nostr.Tag{"n", session.Nick})
+func (c *client) effectivePoWForChat(chat string) int {
+	for _, v := range c.config.Views {
+		if !v.IsGroup && v.Name == chat && v.PoW > 0 {
+			return v.PoW
 		}
-	} else if active != nil && active.IsGroup {
-		nick := c.config.Nick
-		if nick == "" {
-			nick = npubToTokiPona(c.pk)
+	}
+	if av := c.getActiveView(); av != nil && av.IsGroup && av.PoW > 0 {
+		if slices.Contains(av.Children, chat) {
+			return av.PoW
 		}
-		baseTags = append(baseTags, nostr.Tag{"n", nick})
 	}
-
-	ev := nostr.Event{
-		CreatedAt: nostr.Now(),
-		PubKey:    c.pk,
-		Content:   message,
-		Kind:      kind,
-		Tags:      baseTags,
-	}
-
-	if difficulty > 0 {
-		ev.Tags = append(ev.Tags, nostr.Tag{"nonce", "0", strconv.Itoa(difficulty)})
-	}
-
-	return ev
+	return 0
 }
-
-func (c *client) sendRelaysUpdate() {
-	c.relaysMu.Lock()
-	defer c.relaysMu.Unlock()
-
-	statuses := make([]RelayInfo, 0, len(c.relays))
-	for _, mr := range c.relays {
-		mr.mu.Lock()
-		connected := mr.connected
-		latency := mr.latency
-		mr.mu.Unlock()
-
-		statuses = append(statuses, RelayInfo{
-			URL:       mr.url,
-			Latency:   latency,
-			Connected: connected,
-		})
-	}
-
-	c.eventsChan <- DisplayEvent{Type: "RELAYS_UPDATE", Payload: statuses}
-}
-
-// --- Helpers ---
 
 func retryWithBackoff(ctx context.Context, fn func() error, attempt int) error {
 	delay := min(time.Duration(math.Pow(2, float64(attempt-1)))*500*time.Millisecond, 30*time.Second)
@@ -812,18 +823,29 @@ func retryWithBackoff(ctx context.Context, fn func() error, attempt int) error {
 	}
 }
 
-func (c *client) effectivePoWForChat(chat string) int {
-	for _, v := range c.config.Views {
-		if !v.IsGroup && v.Name == chat && v.PoW > 0 {
-			return v.PoW
-		}
+func mrCurrentChatsLocked(sub *nostr.Subscription) []string {
+	if sub == nil {
+		return nil
 	}
-	if av := c.getActiveView(); av != nil && av.IsGroup && av.PoW > 0 {
-		for _, child := range av.Children {
-			if child == chat {
-				return av.PoW
+	seen := make(map[string]struct{})
+	var out []string
+	for _, f := range sub.Filters {
+		tagsToCheck := [][]string{}
+		if gTags, ok := f.Tags["g"]; ok {
+			tagsToCheck = append(tagsToCheck, gTags)
+		}
+		if dTags, ok := f.Tags["d"]; ok {
+			tagsToCheck = append(tagsToCheck, dTags)
+		}
+
+		for _, tagSet := range tagsToCheck {
+			for _, ch := range tagSet {
+				if _, exists := seen[ch]; !exists {
+					seen[ch] = struct{}{}
+					out = append(out, ch)
+				}
 			}
 		}
 	}
-	return 0
+	return out
 }

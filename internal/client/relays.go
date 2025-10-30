@@ -13,6 +13,15 @@ import (
 	"github.com/nbd-wtf/go-nostr"
 )
 
+const (
+	maxDiscoveryDepth    = 2
+	maxActiveDiscoveries = 10
+	discoveryKind        = 10002
+	connectTimeout       = 10 * time.Second
+	verifyTimeout        = 5 * time.Second
+	debounceDelay        = 60 * time.Second
+)
+
 // DiscoveredRelay describes a relay entry in relays.json.
 type DiscoveredRelay struct {
 	URL      string `json:"url"`
@@ -295,7 +304,7 @@ func (c *client) verifyRelay(url string, timeout time.Duration) bool {
 	// create test event
 	dummy := nostr.Event{
 		CreatedAt: nostr.Now(),
-		Kind:      geochatKind, // Kind=20000
+		Kind:      geoChatKind, // Kind=20000
 		Tags:      nostr.Tags{{"client", "strchat-tui"}},
 		Content:   "",
 		PubKey:    c.pk,
@@ -317,7 +326,7 @@ func (c *client) verifyRelay(url string, timeout time.Duration) bool {
 	defer cancelRead()
 
 	f := nostr.Filter{
-		Kinds: []int{geochatKind},
+		Kinds: []int{geoChatKind},
 		IDs:   []string{dummy.ID},
 		Limit: 1,
 	}
@@ -346,4 +355,40 @@ func (c *client) verifyRelay(url string, timeout time.Duration) bool {
 			return true
 		}
 	}
+}
+
+// Helpers
+
+func (c *client) isDiscoveredRelay(url string) bool {
+	if c.discoveredStore == nil {
+		return false
+	}
+	c.discoveredStore.mu.RLock()
+	_, ok := c.discoveredStore.Relays[url]
+	c.discoveredStore.mu.RUnlock()
+	return ok
+}
+
+// relayFailed checks if a discovered relay is in the fail cache.
+func (c *client) relayFailed(url string) bool {
+	if c.verifyFailCache == nil || !c.isDiscoveredRelay(url) {
+		return false
+	}
+	norm, err := normalizeRelayURL(url)
+	if err != nil {
+		return false
+	}
+	return c.verifyFailCache.Contains(norm)
+}
+
+// markRelayFailed adds a discovered relay to the fail cache.
+func (c *client) markRelayFailed(url string) {
+	if c.verifyFailCache == nil || !c.isDiscoveredRelay(url) {
+		return
+	}
+	norm, err := normalizeRelayURL(url)
+	if err != nil {
+		return
+	}
+	c.verifyFailCache.Add(norm, true)
 }

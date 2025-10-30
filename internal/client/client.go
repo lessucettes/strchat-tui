@@ -13,7 +13,6 @@ import (
 	"github.com/nbd-wtf/go-nostr"
 )
 
-// client is the main struct for the strchat client.
 type client struct {
 	sk                string
 	pk                string
@@ -24,7 +23,7 @@ type client struct {
 	seenCache         *lru.Cache[string, bool]
 	seenCacheMu       sync.Mutex
 	userContext       *lru.Cache[string, userContext]
-	chatKeys          map[string]ChatSession
+	chatKeys          map[string]chatSession
 	actionsChan       <-chan UserAction
 	eventsChan        chan<- DisplayEvent
 	filtersCompiled   []compiledPattern
@@ -44,7 +43,6 @@ type client struct {
 	wg                sync.WaitGroup
 }
 
-// New creates a new instance of the client.
 func New(actions <-chan UserAction, events chan<- DisplayEvent) (*client, error) {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -79,7 +77,7 @@ func New(actions <-chan UserAction, events chan<- DisplayEvent) (*client, error)
 		relays:          make(map[string]*managedRelay),
 		seenCache:       seenCache,
 		userContext:     userContextCache,
-		chatKeys:        make(map[string]ChatSession),
+		chatKeys:        make(map[string]chatSession),
 		orderBuf:        make(map[string][]orderItem),
 		orderTimers:     make(map[string]*time.Timer),
 		verifying:       make(map[string]struct{}),
@@ -101,7 +99,6 @@ func New(actions <-chan UserAction, events chan<- DisplayEvent) (*client, error)
 	return client, nil
 }
 
-// Run starts the client's main event loop.
 func (c *client) Run() {
 	// ensure main keypair is loaded
 	if c.sk == "" {
@@ -142,12 +139,10 @@ func (c *client) Run() {
 
 	c.sendStateUpdate()
 
-	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
+	c.wg.Go(func() {
 		c.updateAllSubscriptions()
 		c.discoverRelays(c.config.AnchorRelays, 1)
-	}()
+	})
 
 	for {
 		select {
@@ -163,19 +158,6 @@ func (c *client) Run() {
 	}
 }
 
-func (c *client) flushAllOrdering() {
-	c.orderMu.Lock()
-	keys := make([]string, 0, len(c.orderTimers))
-	for k := range c.orderTimers {
-		keys = append(keys, k)
-	}
-	c.orderMu.Unlock()
-	for _, k := range keys {
-		c.flushOrdered(k)
-	}
-}
-
-// handleAction dispatches user actions to their respective handlers.
 func (c *client) handleAction(action UserAction) {
 	switch action.Type {
 	case "SEND_MESSAGE":
@@ -303,6 +285,25 @@ func (c *client) manageAnchors(payload string) {
 	}
 }
 
+func (c *client) shutdown() {
+	c.cancel()
+	c.orderMu.Lock()
+	for key, t := range c.orderTimers {
+		if t.Stop() {
+			go c.flushOrdered(key)
+		}
+	}
+	c.orderTimers = make(map[string]*time.Timer)
+	c.orderMu.Unlock()
+	c.wg.Wait()
+	select {
+	case c.eventsChan <- DisplayEvent{Type: "SHUTDOWN"}:
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// Helpers
+
 // triggerSubUpdate safely resets a timer to call updateAllSubscriptions.
 func (c *client) triggerSubUpdate() {
 	c.updateSubMu.Lock()
@@ -323,51 +324,14 @@ func (c *client) triggerSubUpdate() {
 	})
 }
 
-func (c *client) shutdown() {
-	c.cancel()
+func (c *client) flushAllOrdering() {
 	c.orderMu.Lock()
-	for key, t := range c.orderTimers {
-		if t.Stop() {
-			go c.flushOrdered(key)
-		}
+	keys := make([]string, 0, len(c.orderTimers))
+	for k := range c.orderTimers {
+		keys = append(keys, k)
 	}
-	c.orderTimers = make(map[string]*time.Timer)
 	c.orderMu.Unlock()
-	c.wg.Wait()
-	select {
-	case c.eventsChan <- DisplayEvent{Type: "SHUTDOWN"}:
-	case <-time.After(200 * time.Millisecond):
+	for _, k := range keys {
+		c.flushOrdered(k)
 	}
-}
-
-func (c *client) isDiscoveredRelay(url string) bool {
-	if c.discoveredStore == nil {
-		return false
-	}
-	c.discoveredStore.mu.RLock()
-	_, ok := c.discoveredStore.Relays[url]
-	c.discoveredStore.mu.RUnlock()
-	return ok
-}
-
-func (c *client) relayFailed(url string) bool {
-	if c.verifyFailCache == nil || !c.isDiscoveredRelay(url) {
-		return false
-	}
-	norm, err := normalizeRelayURL(url)
-	if err != nil {
-		return false
-	}
-	return c.verifyFailCache.Contains(norm)
-}
-
-func (c *client) markRelayFailed(url string) {
-	if c.verifyFailCache == nil || !c.isDiscoveredRelay(url) {
-		return
-	}
-	norm, err := normalizeRelayURL(url)
-	if err != nil {
-		return
-	}
-	c.verifyFailCache.Add(norm, true)
 }
