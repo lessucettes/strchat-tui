@@ -14,32 +14,52 @@ import (
 )
 
 type client struct {
-	sk                string
-	pk                string
-	n                 string
-	config            *config
-	relays            map[string]*managedRelay
-	relaysMu          sync.Mutex
-	seenCache         *lru.Cache[string, bool]
-	userContext       *lru.Cache[string, userContext]
-	chatKeys          map[string]chatSession
-	actionsChan       <-chan UserAction
-	eventsChan        chan<- DisplayEvent
-	filtersCompiled   []compiledPattern
-	mutesCompiled     []compiledPattern
-	orderMu           sync.Mutex
-	orderBuf          map[string][]orderItem
-	orderTimers       map[string]*time.Timer
+	// Identity & Config
+
+	sk       string // Secret key
+	pk       string // Public key
+	n        string // Global nick
+	config   *config
+	chatKeys map[string]chatSession
+
+	// TUI I/O
+
+	actionsChan <-chan UserAction
+	eventsChan  chan<- DisplayEvent
+
+	// Client Lifecycle
+
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+
+	// Relay State
+
+	relays   map[string]*managedRelay
+	relaysMu sync.Mutex // Protects relays
+
+	// Event Processing State
+
+	seenCache   *lru.Cache[string, bool]
+	userContext *lru.Cache[string, userContext]
+	orderBuf    map[string][]orderItem
+	orderTimers map[string]*time.Timer
+	orderMu     sync.Mutex // Protects orderBuf, orderTimers
+
+	// Relay Discovery State
+
 	discoveredStore   *discoveredRelayStore
-	updateSubTimer    *time.Timer
-	updateSubMu       sync.Mutex
-	verifying         map[string]struct{}
-	verifyingMu       sync.Mutex
-	activeDiscoveries int32
 	verifyFailCache   *lru.Cache[string, bool]
-	ctx               context.Context
-	cancel            context.CancelFunc
-	wg                sync.WaitGroup
+	verifying         map[string]struct{}
+	verifyingMu       sync.Mutex // Protects verifying
+	activeDiscoveries int32
+	updateSubTimer    *time.Timer
+	updateSubMu       sync.Mutex // Protects updateSubTimer
+
+	// Moderation State
+
+	filtersCompiled []compiledPattern
+	mutesCompiled   []compiledPattern
 }
 
 func New(actions <-chan UserAction, events chan<- DisplayEvent) (*client, error) {
