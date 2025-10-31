@@ -15,7 +15,6 @@ import (
 
 type client struct {
 	// Identity & Config
-
 	sk       string // Secret key
 	pk       string // Public key
 	n        string // Global nick
@@ -23,31 +22,27 @@ type client struct {
 	chatKeys map[string]chatSession
 
 	// TUI I/O
-
 	actionsChan <-chan UserAction
 	eventsChan  chan<- DisplayEvent
 
 	// Client Lifecycle
-
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
 	// Relay State
-
 	relays   map[string]*managedRelay
 	relaysMu sync.Mutex // Protects relays
 
 	// Event Processing State
-
 	seenCache   *lru.Cache[string, bool]
+	seenCacheMu sync.Mutex // Protects seenCache
 	userContext *lru.Cache[string, userContext]
 	orderBuf    map[string][]orderItem
 	orderTimers map[string]*time.Timer
 	orderMu     sync.Mutex // Protects orderBuf, orderTimers
 
 	// Relay Discovery State
-
 	discoveredStore   *discoveredRelayStore
 	verifyFailCache   *lru.Cache[string, bool]
 	verifying         map[string]struct{}
@@ -57,7 +52,6 @@ type client struct {
 	updateSubMu       sync.Mutex // Protects updateSubTimer
 
 	// Moderation State
-
 	filtersCompiled []compiledPattern
 	mutesCompiled   []compiledPattern
 }

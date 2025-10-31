@@ -246,7 +246,6 @@ func (c *client) replaceSubscription(mr *managedRelay, chats []string) (bool, er
 	if oldSub != nil {
 		oldSub.Unsub()
 	}
-	log.Printf("Updated subscription for %s with %d chat(s)", mr.url, len(chats))
 
 	c.sendRelaysUpdate()
 
@@ -277,9 +276,6 @@ func (c *client) sendRelaysUpdate() {
 // Event Ingestion & Processing
 
 func (c *client) listenForEvents(mr *managedRelay) {
-	log.Printf("Listener started for relay: %s", mr.url)
-	defer log.Printf("Listener stopped for relay: %s", mr.url)
-
 	const maxReconnectAttempts = 3
 
 	for {
@@ -392,10 +388,13 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 		}
 	}
 
+	c.seenCacheMu.Lock()
 	if c.seenCache.Contains(ev.ID) {
+		c.seenCacheMu.Unlock()
 		return
 	}
 	c.seenCache.Add(ev.ID, true)
+	c.seenCacheMu.Unlock()
 
 	var eventChat string
 	if gTag := ev.Tags.Find("g"); len(gTag) > 1 {

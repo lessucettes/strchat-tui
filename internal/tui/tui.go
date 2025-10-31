@@ -20,6 +20,7 @@ type tui struct {
 	actionsChan chan<- client.UserAction
 
 	// UI Components
+
 	mainFlex            *tview.Flex
 	chatList            *tview.List
 	detailsView         *tview.TextView
@@ -31,12 +32,14 @@ type tui struct {
 	hints               *tview.TextView
 
 	// UI State
+
 	logsMaximized   bool
 	outputMaximized bool
 	narrowMode      bool
 	theme           *theme
 
 	// App Data
+
 	views            []client.View
 	relays           []client.RelayInfo
 	selectedForGroup map[string]bool
@@ -44,6 +47,7 @@ type tui struct {
 	nick             string
 
 	// Input-specific state
+
 	completionEntries []string
 	recentRecipients  []string
 	rrIdx             int
