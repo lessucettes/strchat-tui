@@ -216,7 +216,7 @@ func npubToTokiPona(pubkey string) string {
 	)
 }
 
-var tokiPonaNouns = []string{
+var tokiPonaNouns = [...]string{
 	"ijo", "ilo", "insa", "jan", "jelo", "jo", "kala", "kalama", "kasi", "ken",
 	"kili", "kiwen", "ko", "kon", "kulupu", "lape", "laso", "lawa", "len", "lili",
 	"linja", "lipu", "loje", "luka", "lukin", "lupa", "ma", "mama", "mani", "meli",

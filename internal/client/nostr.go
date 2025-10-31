@@ -392,13 +392,10 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 		}
 	}
 
-	c.seenCacheMu.Lock()
 	if c.seenCache.Contains(ev.ID) {
-		c.seenCacheMu.Unlock()
 		return
 	}
 	c.seenCache.Add(ev.ID, true)
-	c.seenCacheMu.Unlock()
 
 	var eventChat string
 	if gTag := ev.Tags.Find("g"); len(gTag) > 1 {

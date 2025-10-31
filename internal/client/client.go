@@ -21,7 +21,6 @@ type client struct {
 	relays            map[string]*managedRelay
 	relaysMu          sync.Mutex
 	seenCache         *lru.Cache[string, bool]
-	seenCacheMu       sync.Mutex
 	userContext       *lru.Cache[string, userContext]
 	chatKeys          map[string]chatSession
 	actionsChan       <-chan UserAction
@@ -34,8 +33,8 @@ type client struct {
 	discoveredStore   *discoveredRelayStore
 	updateSubTimer    *time.Timer
 	updateSubMu       sync.Mutex
-	verifyingMu       sync.Mutex
 	verifying         map[string]struct{}
+	verifyingMu       sync.Mutex
 	activeDiscoveries int32
 	verifyFailCache   *lru.Cache[string, bool]
 	ctx               context.Context
