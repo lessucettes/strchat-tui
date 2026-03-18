@@ -13,6 +13,8 @@ type theme struct {
 	logInfoColor    tcell.Color
 	logWarnColor    tcell.Color
 	logErrorColor   tcell.Color
+	// Foreground for selected row in Lists whose selection BG is borderColor.
+	listSelectedFg tcell.Color
 }
 
 // defaultTheme is the standard green-on-black theme.
@@ -26,6 +28,7 @@ var defaultTheme = &theme{
 	logInfoColor:    tcell.ColorGrey,
 	logWarnColor:    tcell.ColorYellow,
 	logErrorColor:   tcell.ColorRed,
+	listSelectedFg:  tcell.ColorWhite,
 }
 
 // monochromeTheme is a simple black and white theme for high contrast.
@@ -39,4 +42,5 @@ var monochromeTheme = &theme{
 	logInfoColor:    tcell.ColorWhite,
 	logWarnColor:    tcell.ColorWhite,
 	logErrorColor:   tcell.ColorWhite,
+	listSelectedFg:  tcell.ColorBlack,
 }

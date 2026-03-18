@@ -226,12 +226,14 @@ func (t *tui) initViews() {
 
 	t.chatList = tview.NewList().
 		ShowSecondaryText(false).
-		SetSelectedBackgroundColor(t.theme.borderColor)
+		SetSelectedBackgroundColor(t.theme.borderColor).
+		SetSelectedTextColor(t.theme.listSelectedFg)
 	t.chatList.SetBorder(true).SetTitle(titleChats).SetTitleAlign(tview.AlignLeft)
 
 	t.userList = tview.NewList().
 		ShowSecondaryText(false).
-		SetSelectedBackgroundColor(t.theme.borderColor)
+		SetSelectedBackgroundColor(t.theme.borderColor).
+		SetSelectedTextColor(t.theme.listSelectedFg)
 	t.userList.SetBorder(true).SetTitle(titleUsers).SetTitleAlign(tview.AlignLeft)
 
 	t.detailsView = tview.NewTextView().
