@@ -40,6 +40,9 @@ type tui struct {
 	narrowMode      bool
 	theme           *theme
 
+	// Current user's identity short prefix (for the active view).
+	selfShortPubKey string
+
 	// App Data
 
 	views            []client.View
@@ -377,6 +380,8 @@ func (t *tui) listenForEvents(events <-chan client.DisplayEvent) {
 				t.handleChatUsersUpdate(event)
 			case "DM_TARGET_UPDATE":
 				t.handleDMTargetUpdate(event)
+			case "CHAT_USER_DISCOVERED":
+				t.handleChatUserDiscovered(event)
 			}
 		})
 	}
@@ -490,6 +495,7 @@ func (t *tui) handleStateUpdate(event client.DisplayEvent) {
 	t.views = state.Views
 	t.activeViewIndex = state.ActiveViewIndex
 	t.nick = state.Nick
+	t.selfShortPubKey = state.ShortPubKey
 	t.updateChatList()
 	t.updateDetailsView()
 	t.updateInputLabel()
@@ -521,6 +527,45 @@ func (t *tui) handleChatUsersUpdate(event client.DisplayEvent) {
 	t.chatUsers = users
 	t.chatUsersByPubKey = make(map[string]client.ChatUser, len(users))
 	for _, u := range users {
+		t.chatUsersByPubKey[u.PubKey] = u
+	}
+
+	t.updateUserList()
+}
+
+func (t *tui) handleChatUserDiscovered(event client.DisplayEvent) {
+	u, ok := event.Payload.(client.ChatUser)
+	if !ok {
+		return
+	}
+
+	// Only show users for the currently active chat scope.
+	if len(t.views) == 0 || t.activeViewIndex < 0 || t.activeViewIndex >= len(t.views) {
+		return
+	}
+	activeView := t.views[t.activeViewIndex]
+	if activeView.IsGroup {
+		if !slices.Contains(activeView.Children, u.Chat) {
+			return
+		}
+	} else {
+		if u.Chat != activeView.Name {
+			return
+		}
+	}
+
+	if t.chatUsersByPubKey == nil {
+		t.chatUsersByPubKey = make(map[string]client.ChatUser)
+	}
+
+	if existing, exists := t.chatUsersByPubKey[u.PubKey]; exists {
+		// Update any new nick/hash information.
+		existing.Nick = u.Nick
+		existing.ShortPubKey = u.ShortPubKey
+		existing.Chat = u.Chat
+		t.chatUsersByPubKey[u.PubKey] = existing
+	} else {
+		t.chatUsers = append(t.chatUsers, u)
 		t.chatUsersByPubKey[u.PubKey] = u
 	}
 

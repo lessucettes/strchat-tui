@@ -215,9 +215,12 @@ func (c *client) replaceSubscription(mr *managedRelay, chats []string) (bool, er
 	}
 
 	now := nostr.Now()
+	lookbackSeconds := nostr.Timestamp(userDiscoveryLookback / time.Second)
 	filters := make(nostr.Filters, 0, len(chats))
 	for _, ch := range chats {
-		since := now
+		// Request a window of past events so user discovery (nick/hash) and /dm
+		// resolution work immediately without waiting for new messages.
+		since := now - lookbackSeconds
 		if geohash.Validate(ch) == nil {
 			filters = append(filters, nostr.Filter{
 				Kinds: []int{geoChatKind},
@@ -471,11 +474,32 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 		spk = safeSuffix(ev.PubKey, 4)
 	}
 
+	prevCtx, hadPrev := c.userContext.Get(ev.PubKey)
+
+	// If this user wasn't known before (or context changed), notify UI immediately.
+	// This is what makes the Users list update in real-time.
+	shouldNotifyUI := !hadPrev ||
+		prevCtx.chat != eventChat ||
+		prevCtx.nick != nick ||
+		prevCtx.shortPubKey != spk
+
 	c.userContext.Add(ev.PubKey, userContext{
 		nick:        nick,
 		chat:        eventChat,
 		shortPubKey: spk,
 	})
+
+	if shouldNotifyUI {
+		c.eventsChan <- DisplayEvent{
+			Type: "CHAT_USER_DISCOVERED",
+			Payload: ChatUser{
+				PubKey:       ev.PubKey,
+				Nick:         nick,
+				ShortPubKey:  spk,
+				Chat:         eventChat,
+			},
+		}
+	}
 
 	timestamp := time.Unix(int64(ev.CreatedAt), 0).Format("15:04:05")
 
@@ -501,7 +525,7 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 				c.eventsChan <- DisplayEvent{
 					Type:    "STATUS",
 					Content: fmt.Sprintf("New Private Message From %s", nick),
-					Payload: ChatUser{PubKey: ev.PubKey, Nick: nick, ShortPubKey: spk},
+					Payload: ChatUser{PubKey: ev.PubKey, Nick: nick, ShortPubKey: spk, Chat: eventChat},
 				}
 			}
 		}

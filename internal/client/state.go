@@ -466,6 +466,7 @@ func (c *client) sendStateUpdate() {
 		Views:           c.config.Views,
 		ActiveViewIndex: activeIdx,
 		Nick:            c.n,
+		ShortPubKey:     "",
 	}
 
 	if len(c.config.Views) == 0 || activeIdx == -1 {
@@ -483,6 +484,29 @@ func (c *client) sendStateUpdate() {
 			state.Nick = s.nick
 		} else {
 			state.Nick = npubToTokiPona(c.pk)
+		}
+	}
+
+	// Determine which pubkey identity we currently use for the active view,
+	// then send its short prefix to the UI.
+	v := c.config.Views[activeIdx]
+	if v.IsGroup {
+		if len(c.pk) >= 4 {
+			state.ShortPubKey = c.pk[:4]
+		} else {
+			state.ShortPubKey = c.pk
+		}
+	} else if s, ok := c.chatKeys[v.Name]; ok && len(s.pubKey) > 0 {
+		if len(s.pubKey) >= 4 {
+			state.ShortPubKey = s.pubKey[:4]
+		} else {
+			state.ShortPubKey = s.pubKey
+		}
+	} else {
+		if len(c.pk) >= 4 {
+			state.ShortPubKey = c.pk[:4]
+		} else {
+			state.ShortPubKey = c.pk
 		}
 	}
 

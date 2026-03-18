@@ -19,6 +19,9 @@ const (
 	maxChatNameLen       = 12
 	orderingFlushDelay   = 200 * time.Millisecond
 	perStreamBufferMax   = 256
+	// How far back we ask relays for events to populate user discovery cache.
+	// This helps users resolving /dm immediately after joining.
+	userDiscoveryLookback = 24 * time.Hour
 )
 
 // defaultEphChatRelays provides a fallback list of relays for named chats.
@@ -63,6 +66,7 @@ type ChatUser struct {
 	PubKey       string
 	Nick         string
 	ShortPubKey  string
+	Chat         string
 }
 
 type orderItem struct {
@@ -76,6 +80,7 @@ type StateUpdate struct {
 	Views           []View
 	ActiveViewIndex int
 	Nick            string
+	ShortPubKey     string
 }
 
 type chatSession struct {

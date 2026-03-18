@@ -59,6 +59,7 @@ func (c *client) requestChatUsers(viewName string) {
 				PubKey:       pk,
 				Nick:         fmt.Sprintf("%s-%s", pk[:4], pk[4:8]),
 				ShortPubKey: ctx.shortPubKey,
+				Chat:         ctx.chat,
 			}
 			continue
 		}
@@ -66,6 +67,7 @@ func (c *client) requestChatUsers(viewName string) {
 			PubKey:       pk,
 			Nick:         ctx.nick,
 			ShortPubKey: ctx.shortPubKey,
+			Chat:         ctx.chat,
 		}
 	}
 

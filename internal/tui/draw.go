@@ -114,9 +114,17 @@ func (t *tui) updateUserList() {
 
 	for _, u := range t.chatUsers {
 		// Colorize the user's name using the same palette as chat messages.
-		// No secondary text to keep the name on a single full-width line.
+		// Keep everything on a single line (nick + short pubkey hash).
 		colorTag := pubkeyToColor(u.PubKey, t.theme.nickPalette)
-		t.userList.AddItem(fmt.Sprintf(" %s%s[-]", colorTag, u.Nick), "", 0, nil)
+		short := u.ShortPubKey
+		if short == "" {
+			if len(u.PubKey) >= 4 {
+				short = u.PubKey[len(u.PubKey)-4:]
+			} else {
+				short = "????"
+			}
+		}
+		t.userList.AddItem(fmt.Sprintf(" %s%s[-] #%s", colorTag, u.Nick, short), "", 0, nil)
 	}
 
 	if currentItem >= 0 && currentItem < t.userList.GetItemCount() {
@@ -188,6 +196,11 @@ func (t *tui) updateDetailsView() {
 
 // updateInputLabel sets the prompt label for the input field, including the user's nick.
 func (t *tui) updateInputLabel() {
+	youHash := ""
+	if t.selfShortPubKey != "" {
+		youHash = t.selfShortPubKey
+	}
+
 	if t.dmTargetPubKey != "" {
 		label := t.dmTargetNick
 		if label == "" {
@@ -196,9 +209,17 @@ func (t *tui) updateInputLabel() {
 				label = label[:4] + "..." + label[len(label)-4:]
 			}
 		}
-		t.input.SetLabel(fmt.Sprintf("DM %s > ", label))
+		if youHash != "" {
+			t.input.SetLabel(fmt.Sprintf("DM %s (you #%s) > ", label, youHash))
+		} else {
+			t.input.SetLabel(fmt.Sprintf("DM %s > ", label))
+		}
 	} else if t.nick != "" {
-		t.input.SetLabel(fmt.Sprintf("%s > ", t.nick))
+		if youHash != "" {
+			t.input.SetLabel(fmt.Sprintf("%s #%s > ", t.nick, youHash))
+		} else {
+			t.input.SetLabel(fmt.Sprintf("%s > ", t.nick))
+		}
 	} else {
 		t.input.SetLabel("> ")
 	}

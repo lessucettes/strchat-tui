@@ -52,7 +52,7 @@ func (c *client) setDMTarget(pubkey string) {
 
 	c.eventsChan <- DisplayEvent{
 		Type:    "DM_TARGET_UPDATE",
-		Payload: ChatUser{PubKey: pubkey, Nick: targetNick, ShortPubKey: targetShort},
+		Payload: ChatUser{PubKey: pubkey, Nick: targetNick, ShortPubKey: targetShort, Chat: targetChat},
 	}
 	c.eventsChan <- DisplayEvent{
 		Type:    "STATUS",
