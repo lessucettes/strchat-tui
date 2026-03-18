@@ -215,30 +215,56 @@ func (c *client) replaceSubscription(mr *managedRelay, chats []string) (bool, er
 	}
 
 	now := nostr.Now()
-	lookbackSeconds := nostr.Timestamp(userDiscoveryLookback / time.Second)
+	lookbackSeconds := nostr.Timestamp(messageHistoryLookback / time.Second)
 	filters := make(nostr.Filters, 0, len(chats))
 	for _, ch := range chats {
-		// Request a window of past events so user discovery (nick/hash) and /dm
-		// resolution work immediately without waiting for new messages.
+		// Request a window of past events so history is visible immediately
+		// on joining/switching chats.
 		since := now - lookbackSeconds
 		if geohash.Validate(ch) == nil {
 			filters = append(filters, nostr.Filter{
 				Kinds: []int{geoChatKind},
 				Tags:  nostr.TagMap{"g": []string{ch}},
 				Since: &since,
+				Limit: messageHistoryLimit,
 			})
 		} else {
 			filters = append(filters, nostr.Filter{
 				Kinds: []int{ephChatKind},
 				Tags:  nostr.TagMap{"d": []string{ch}},
 				Since: &since,
+				Limit: messageHistoryLimit,
 			})
 		}
 	}
 
 	newSub, err := mr.relay.Subscribe(c.ctx, filters)
 	if err != nil {
-		return false, fmt.Errorf("subscribe failed: %w", err)
+		// Some relay disconnects keep the subscription channel closed and
+		// make Subscribe fail with "not connected". Reconnect and retry.
+		if mr.relay != nil {
+			_ = mr.relay.Close()
+		}
+
+		connectCtx, cancel := context.WithTimeout(c.ctx, connectTimeout)
+		start := time.Now()
+		relay, connErr := nostr.RelayConnect(connectCtx, mr.url)
+		cancel()
+		if connErr != nil {
+			return false, fmt.Errorf("subscribe failed: %w (reconnect failed: %v)", err, connErr)
+		}
+
+		mr.mu.Lock()
+		mr.relay = relay
+		mr.latency = time.Since(start)
+		mr.connected = true
+		mr.reconnectAttempts = 0
+		mr.mu.Unlock()
+
+		newSub, err = relay.Subscribe(c.ctx, filters)
+		if err != nil {
+			return false, fmt.Errorf("subscribe failed after reconnect: %w", err)
+		}
 	}
 
 	mr.mu.Lock()
@@ -613,12 +639,7 @@ func (c *client) publishMessage(message string) {
 		// send it as a direct message to the selected DM target.
 		if dmTarget := c.getDMTarget(); dmTarget != "" {
 			targetPubKey = dmTarget
-			ctx, ok := c.userContext.Get(dmTarget)
-			if !ok || ctx.chat == "" {
-				c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "Unknown DM target chat context. Try sending once with '@' or wait for messages."}
-				return
-			}
-			targetChat = ctx.chat
+			targetChat = dmChatName(c.pk, dmTarget)
 		} else {
 			activeView := c.getActiveView()
 			if activeView == nil {
@@ -705,6 +726,14 @@ func (c *client) createEvent(message string, kind int, tags nostr.Tags, difficul
 	if active != nil && !active.IsGroup {
 		if session, ok := c.chatKeys[active.Name]; ok && session.nick != "" {
 			baseTags = append(baseTags, nostr.Tag{"n", session.nick})
+		} else if isDMChatName(active.Name) {
+			// DM chats don't use ephemeral per-user identity, so ensure we still
+			// include a stable display name.
+			nick := c.config.Nick
+			if nick == "" {
+				nick = npubToTokiPona(c.pk)
+			}
+			baseTags = append(baseTags, nostr.Tag{"n", nick})
 		}
 	} else if active != nil && active.IsGroup {
 		nick := c.config.Nick

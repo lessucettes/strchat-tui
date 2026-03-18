@@ -325,6 +325,7 @@ func (t *tui) handleChatListKeys(event *tcell.EventKey) *tcell.EventKey {
 			// Toggle DM off.
 			t.dmTargetPubKey = ""
 			t.dmTargetNick = ""
+			t.dmTargetChat = ""
 			t.actionsChan <- client.UserAction{Type: "SET_DM_TARGET", Payload: ""}
 			t.updateChatList()
 			return nil
@@ -347,6 +348,7 @@ func (t *tui) handleChatListKeys(event *tcell.EventKey) *tcell.EventKey {
 		case chatListItemKindDM:
 			t.dmTargetPubKey = ""
 			t.dmTargetNick = ""
+			t.dmTargetChat = ""
 			t.actionsChan <- client.UserAction{Type: "SET_DM_TARGET", Payload: ""}
 			t.updateChatList()
 			return nil
@@ -385,6 +387,7 @@ func (t *tui) handleUserListKeys(event *tcell.EventKey) *tcell.EventKey {
 		if t.dmTargetPubKey == selected.PubKey {
 			t.dmTargetPubKey = ""
 			t.dmTargetNick = ""
+			t.dmTargetChat = ""
 			t.actionsChan <- client.UserAction{Type: "SET_DM_TARGET", Payload: ""}
 		} else {
 			t.dmTargetPubKey = selected.PubKey
@@ -393,7 +396,18 @@ func (t *tui) handleUserListKeys(event *tcell.EventKey) *tcell.EventKey {
 			} else {
 				t.dmTargetNick = selected.ShortPubKey
 			}
-			t.actionsChan <- client.UserAction{Type: "SET_DM_TARGET", Payload: selected.PubKey}
+			chat := selected.Chat
+			if chat == "" && len(t.views) > 0 && t.activeViewIndex >= 0 && t.activeViewIndex < len(t.views) {
+				// Best-effort fallback for cases where user's chat isn't populated yet.
+				// This ensures DM scope matches the currently visible chat scope.
+				if !t.views[t.activeViewIndex].IsGroup {
+					chat = t.views[t.activeViewIndex].Name
+				}
+			}
+			t.actionsChan <- client.UserAction{
+				Type:    "SET_DM_TARGET",
+				Payload: selected.PubKey + "|" + chat,
+			}
 		}
 
 		// Clear input; user types the DM message.
@@ -411,6 +425,7 @@ func (t *tui) handleUserListKeys(event *tcell.EventKey) *tcell.EventKey {
 		if t.dmTargetPubKey == selected.PubKey {
 			t.dmTargetPubKey = ""
 			t.dmTargetNick = ""
+			t.dmTargetChat = ""
 			t.actionsChan <- client.UserAction{Type: "SET_DM_TARGET", Payload: ""}
 		} else {
 			t.dmTargetPubKey = selected.PubKey
@@ -419,7 +434,16 @@ func (t *tui) handleUserListKeys(event *tcell.EventKey) *tcell.EventKey {
 			} else {
 				t.dmTargetNick = selected.ShortPubKey
 			}
-			t.actionsChan <- client.UserAction{Type: "SET_DM_TARGET", Payload: selected.PubKey}
+			chat := selected.Chat
+			if chat == "" && len(t.views) > 0 && t.activeViewIndex >= 0 && t.activeViewIndex < len(t.views) {
+				if !t.views[t.activeViewIndex].IsGroup {
+					chat = t.views[t.activeViewIndex].Name
+				}
+			}
+			t.actionsChan <- client.UserAction{
+				Type:    "SET_DM_TARGET",
+				Payload: selected.PubKey + "|" + chat,
+			}
 		}
 
 		t.input.SetText("")

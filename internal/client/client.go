@@ -60,6 +60,19 @@ type client struct {
 	mutesCompiled   []compiledPattern
 }
 
+func (c *client) resetSeenCache() {
+	seenCache, err := lru.New[string, bool](seenCacheSize)
+	if err != nil {
+		// If cache recreation fails, keep the old one to avoid a crash.
+		log.Printf("Failed to recreate seen cache: %v", err)
+		return
+	}
+
+	c.seenCacheMu.Lock()
+	c.seenCache = seenCache
+	c.seenCacheMu.Unlock()
+}
+
 func New(actions <-chan UserAction, events chan<- DisplayEvent) (*client, error) {
 	cfg, err := loadConfig()
 	if err != nil {

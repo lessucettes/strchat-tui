@@ -22,7 +22,6 @@ func (c *client) dmUser(payload string) {
 
 	// Resolve cached user -> pubkey.
 	var matchedPubKey string
-	var matchedCtx userContext
 	bestScore := -1
 
 	var nickPart string
@@ -66,7 +65,6 @@ func (c *client) dmUser(payload string) {
 		if score > bestScore || (score == bestScore && score >= 0 && pk < matchedPubKey) {
 			bestScore = score
 			matchedPubKey = pk
-			matchedCtx = ctx
 		}
 	}
 
@@ -82,16 +80,6 @@ func (c *client) dmUser(payload string) {
 	if c.getDMTarget() == matchedPubKey {
 		c.clearDMTarget()
 		return
-	}
-
-	// If we have chat context for this user, switch active view so DM events match subscription scope.
-	if matchedCtx.chat != "" {
-		cur := c.getActiveView()
-		if cur == nil || cur.Name != matchedCtx.chat {
-			c.setActiveView(matchedCtx.chat)
-			c.flushAllOrdering()
-			c.updateAllSubscriptions()
-		}
 	}
 
 	c.setDMTarget(matchedPubKey)

@@ -48,6 +48,10 @@ func (t *tui) updateChatList() {
 	}
 
 	for i, view := range t.views {
+		// Skip the dedicated DM view entry; we display DM as a dedicated top item.
+		if t.dmTargetChat != "" && view.Name == t.dmTargetChat {
+			continue
+		}
 		var prefix string
 		isActive := i == t.activeViewIndex
 		isSelected := t.selectedForGroup[view.Name]
@@ -124,7 +128,7 @@ func (t *tui) updateUserList() {
 				short = "????"
 			}
 		}
-		t.userList.AddItem(fmt.Sprintf(" %s%s[-] #%s", colorTag, u.Nick, short), "", 0, nil)
+		t.userList.AddItem(fmt.Sprintf(" %s%s[-]#%s", colorTag, u.Nick, short), "", 0, nil)
 	}
 
 	if currentItem >= 0 && currentItem < t.userList.GetItemCount() {

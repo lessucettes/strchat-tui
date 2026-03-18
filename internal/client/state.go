@@ -385,6 +385,8 @@ func (c *client) handleNickCompletion(prefix string) {
 // Core State Primitives
 
 func (c *client) setActiveView(name string) {
+	prev := c.config.ActiveViewName
+
 	viewExists := false
 	var view *View
 	for i := range c.config.Views {
@@ -403,30 +405,41 @@ func (c *client) setActiveView(name string) {
 		return
 	}
 
+	// When switching chats, we clear the global seen cache so that the relay
+	// backlog (requested with Since/Limit) can be re-rendered in the UI.
+	// Otherwise, events replayed after leaving/rejoining may be suppressed.
+	if prev != name {
+		c.resetSeenCache()
+	}
+
 	if !view.IsGroup {
-		sk := nostr.GeneratePrivateKey()
-		pk, _ := nostr.GetPublicKey(sk)
+		// DM chats are scoped to (sender, recipient) and should be signed with our
+		// main key, not a generated ephemeral identity.
+		if !isDMChatName(name) {
+			sk := nostr.GeneratePrivateKey()
+			pk, _ := nostr.GetPublicKey(sk)
 
-		nick := c.config.Nick
-		custom := false
-		if nick == "" {
-			nick = npubToTokiPona(pk)
-		} else {
-			custom = true
-		}
+			nick := c.config.Nick
+			custom := false
+			if nick == "" {
+				nick = npubToTokiPona(pk)
+			} else {
+				custom = true
+			}
 
-		c.chatKeys[name] = chatSession{
-			privKey:    sk,
-			pubKey:     pk,
-			nick:       nick,
-			customNick: custom,
-		}
+			c.chatKeys[name] = chatSession{
+				privKey:    sk,
+				pubKey:     pk,
+				nick:       nick,
+				customNick: custom,
+			}
 
-		npub, _ := nip19.EncodePublicKey(pk)
-		c.eventsChan <- DisplayEvent{
-			Type: "STATUS",
-			Content: fmt.Sprintf("Generated ephemeral identity for chat '%s': %s (%s)",
-				view.Name, npub, nick),
+			npub, _ := nip19.EncodePublicKey(pk)
+			c.eventsChan <- DisplayEvent{
+				Type: "STATUS",
+				Content: fmt.Sprintf("Generated ephemeral identity for chat '%s': %s (%s)",
+					view.Name, npub, nick),
+			}
 		}
 	}
 

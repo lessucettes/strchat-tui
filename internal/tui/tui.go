@@ -59,6 +59,7 @@ type tui struct {
 	// Private chat (DM) state (client-side; actual filtering is done in client)
 	dmTargetPubKey string
 	dmTargetNick   string
+	dmTargetChat   string
 
 	// Input-specific state
 
@@ -104,6 +105,7 @@ func New(actions chan<- client.UserAction, events <-chan client.DisplayEvent) *t
 		chatUsersByPubKey: make(map[string]client.ChatUser),
 		dmTargetPubKey:   "",
 		dmTargetNick:     "",
+		dmTargetChat:    "",
 		completionEntries: []string{},
 		recentRecipients:  []string{},
 		rrIdx:             -1,
@@ -492,10 +494,20 @@ func (t *tui) handleStateUpdate(event client.DisplayEvent) {
 		fmt.Fprintf(t.logs, "\n[%s]ERROR: Invalid STATE_UPDATE payload[-]", t.theme.logErrorColor)
 		return
 	}
+	prevActiveIndex := t.activeViewIndex
+
 	t.views = state.Views
 	t.activeViewIndex = state.ActiveViewIndex
 	t.nick = state.Nick
 	t.selfShortPubKey = state.ShortPubKey
+
+	// Clear visible message history when switching chats.
+	// Old messages will be re-rendered from the relay backlog (lookback+limit).
+	if prevActiveIndex != t.activeViewIndex {
+		t.output.Clear()
+		t.output.ScrollToBeginning()
+	}
+
 	t.updateChatList()
 	t.updateDetailsView()
 	t.updateInputLabel()
@@ -578,11 +590,17 @@ func (t *tui) handleDMTargetUpdate(event client.DisplayEvent) {
 		return
 	}
 
+	// Clear visible message history when toggling/changing DM.
+	t.output.Clear()
+	t.output.ScrollToBeginning()
+
 	t.dmTargetPubKey = target.PubKey
 	t.dmTargetNick = target.Nick
+	t.dmTargetChat = target.Chat
 
 	if t.dmTargetPubKey == "" {
 		t.dmTargetNick = ""
+		t.dmTargetChat = ""
 	}
 
 	t.updateChatList()
