@@ -51,6 +51,7 @@ type RelayInfo struct {
 type DisplayEvent struct {
 	Type         string
 	Timestamp    string
+	CreatedAt    int64
 	Nick         string
 	Content      string
 	FullPubKey   string
@@ -69,6 +70,7 @@ type ChatUser struct {
 	Nick         string
 	ShortPubKey  string
 	Chat         string
+	LastMsgAt    int64
 }
 
 type orderItem struct {
@@ -97,6 +99,7 @@ type userContext struct {
 	nick        string
 	chat        string
 	shortPubKey string
+	lastMsgAt   int64
 }
 
 // managedRelay wraps a nostr.Relay with additional state for management.

@@ -503,6 +503,7 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 		nick:        nick,
 		chat:        eventChat,
 		shortPubKey: spk,
+		lastMsgAt:  int64(ev.CreatedAt),
 	})
 
 	if shouldNotifyUI {
@@ -513,6 +514,7 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 				Nick:         nick,
 				ShortPubKey:  spk,
 				Chat:         eventChat,
+				LastMsgAt:   int64(ev.CreatedAt),
 			},
 		}
 	}
@@ -535,6 +537,7 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 	c.enqueueOrdered(streamKey, DisplayEvent{
 		Type:         "NEW_MESSAGE",
 		Timestamp:    timestamp,
+		CreatedAt:    int64(ev.CreatedAt),
 		Nick:         nick,
 		FullPubKey:   ev.PubKey,
 		ShortPubKey:  spk,

@@ -87,7 +87,7 @@ func (t *tui) updateUserList() {
 		return t.chatUsers[i].Nick < t.chatUsers[j].Nick
 	})
 
-	for _, u := range t.chatUsers {
+	for idx, u := range t.chatUsers {
 		colorTag := pubkeyToColor(u.PubKey, t.theme.nickPalette)
 		short := u.ShortPubKey
 		if short == "" {
@@ -97,7 +97,7 @@ func (t *tui) updateUserList() {
 				short = "????"
 			}
 		}
-		t.userList.AddItem(fmt.Sprintf(" %s%s[-]#%s", colorTag, u.Nick, short), "", 0, nil)
+		t.userList.AddItem(fmt.Sprintf("%2d %s%s[-]#%s", idx+1, colorTag, u.Nick, short), "", 0, nil)
 	}
 
 	if currentItem >= 0 && currentItem < t.userList.GetItemCount() {

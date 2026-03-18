@@ -6,6 +6,7 @@ import (
 	"log"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
@@ -55,6 +56,13 @@ type tui struct {
 
 	chatListItems []chatListItem
 
+	userPruneStopCh chan struct{}
+
+	// Resize/layout switching (debounced).
+	resizeMu          sync.Mutex
+	desiredNarrowMode bool
+	resizeApplyTimer  *time.Timer
+
 	// Input-specific state
 
 	completionEntries []string
@@ -85,6 +93,7 @@ func New(actions chan<- client.UserAction, events <-chan client.DisplayEvent) *t
 		rrIdx:             -1,
 		lastNickQuery:     "",
 		theme:             defaultTheme,
+		userPruneStopCh:  make(chan struct{}),
 	}
 
 	t.setupViews()
@@ -96,6 +105,7 @@ func New(actions chan<- client.UserAction, events <-chan client.DisplayEvent) *t
 	t.updateDetailsView()
 
 	go t.listenForEvents(events)
+	go t.userPruner()
 
 	return t
 }
@@ -220,48 +230,78 @@ func (t *tui) initLayout() {
 		AddItem(t.userList, 0, 1, false).
 		AddItem(t.detailsView, 0, 2, false)
 
-	sidebarFlexHorizontal := tview.NewFlex().
-		SetDirection(tview.FlexColumn).
-		AddItem(t.chatList, 0, 1, true).
-		AddItem(t.userList, 0, 1, false).
-		AddItem(t.detailsView, 0, 1, false)
-
 	contentGrid := tview.NewGrid().SetBorders(false)
+
+	// Narrow layout: chat + input only (no logs, no right sidebar, no hints).
+	bottomInputFlex := tview.NewFlex().
+		SetDirection(tview.FlexRow).
+		AddItem(t.input, 0, 1, true)
+
+	narrowFlex := tview.NewFlex().
+		SetDirection(tview.FlexRow).
+		// Output takes all remaining vertical space.
+		AddItem(t.output, 0, 1, false).
+		// Bottom input gets a small fixed height so chat reaches the bottom.
+		// Use a minimal fixed height to maximize chat area.
+		AddItem(bottomInputFlex, 1, 0, false)
 
 	const narrowWidth = 100
 	t.app.SetBeforeDrawFunc(func(screen tcell.Screen) bool {
 		w, _ := screen.Size()
 		contentGrid.Clear()
 
-		if w < narrowWidth {
-			if !t.narrowMode {
-				t.narrowMode = true
-				t.logs.SetTitle(titleLogsShort)
-				t.output.SetTitle(titleMessagesShort)
-				t.chatList.SetTitle(titleChatsShort)
-				t.userList.SetTitle(titleUsersShort)
-				t.detailsView.SetTitle(titleInfoShort)
-				t.input.SetTitle(titleInputShort)
-				t.input.SetLabel("> ")
+		desiredNarrow := w < narrowWidth
+
+		// Debounce root switching so it doesn't happen repeatedly during a resize drag.
+		t.resizeMu.Lock()
+		t.desiredNarrowMode = desiredNarrow
+		if desiredNarrow != t.narrowMode {
+			if t.resizeApplyTimer != nil {
+				t.resizeApplyTimer.Stop()
 			}
-			contentGrid.SetRows(0, 5)
-			contentGrid.SetColumns(0)
-			contentGrid.AddItem(t.output, 0, 0, 1, 1, 0, 0, false)
-			contentGrid.AddItem(sidebarFlexHorizontal, 1, 0, 1, 1, 0, 0, false)
-		} else {
-			if t.narrowMode {
-				t.narrowMode = false
-				t.logs.SetTitle(titleLogs)
-				t.output.SetTitle(titleMessages)
-				t.chatList.SetTitle(titleChats)
-				t.userList.SetTitle(titleUsers)
-				t.detailsView.SetTitle(titleInfo)
-				t.input.SetTitle(titleInput)
-				t.updateInputLabel()
-			}
+			t.resizeApplyTimer = time.AfterFunc(150*time.Millisecond, func() {
+				t.resizeMu.Lock()
+				narrow := t.desiredNarrowMode
+				t.resizeMu.Unlock()
+
+				// Apply mode switch on UI goroutine.
+				t.app.QueueUpdateDraw(func() {
+					if narrow == t.narrowMode {
+						return
+					}
+					if narrow {
+						t.narrowMode = true
+						t.logs.SetTitle(titleLogsShort)
+						t.output.SetTitle(titleMessagesShort)
+						t.chatList.SetTitle(titleChatsShort)
+						t.userList.SetTitle(titleUsersShort)
+						t.detailsView.SetTitle(titleInfoShort)
+						t.input.SetTitle(titleInputShort)
+						t.input.SetLabel("> ")
+						t.app.SetRoot(narrowFlex, true).SetFocus(t.input)
+					} else {
+						t.narrowMode = false
+						t.logs.SetTitle(titleLogs)
+						t.output.SetTitle(titleMessages)
+						t.chatList.SetTitle(titleChats)
+						t.userList.SetTitle(titleUsers)
+						t.detailsView.SetTitle(titleInfo)
+						t.input.SetTitle(titleInput)
+						t.updateInputLabel()
+						t.app.SetRoot(t.mainFlex, true)
+					}
+				})
+			})
+		}
+		t.resizeMu.Unlock()
+
+		// Configure grid only for wide mode; in narrow mode it's hidden by a different root.
+		if !desiredNarrow {
 			contentGrid.SetRows(0)
 			// Fixed width of the right sidebar: chat list + users + details.
-			contentGrid.SetColumns(0, 60)
+			// Keep it small enough so "Nick#hash" stays on one line, while
+			// giving more horizontal room to the Messages area.
+			contentGrid.SetColumns(0, 30)
 			contentGrid.AddItem(t.output, 0, 0, 1, 1, 0, 0, false)
 			contentGrid.AddItem(sidebarFlex, 0, 1, 1, 1, 0, 0, false)
 		}
@@ -334,6 +374,13 @@ func (t *tui) handleAutocomplete(currentText string) []string {
 func (t *tui) listenForEvents(events <-chan client.DisplayEvent) {
 	for event := range events {
 		if event.Type == "SHUTDOWN" {
+			// Stop background goroutines.
+			select {
+			case <-t.userPruneStopCh:
+				// already closed
+			default:
+				close(t.userPruneStopCh)
+			}
 			break
 		}
 
@@ -359,6 +406,60 @@ func (t *tui) listenForEvents(events <-chan client.DisplayEvent) {
 		})
 	}
 	t.app.Stop()
+}
+
+func (t *tui) userPruner() {
+	// Periodically drop users whose last message is older than 3 minutes.
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			now := time.Now()
+			t.app.QueueUpdateDraw(func() {
+				t.pruneStaleChatUsers(now)
+			})
+		case <-t.userPruneStopCh:
+			return
+		}
+	}
+}
+
+func (t *tui) pruneStaleChatUsers(now time.Time) {
+	if t.chatUsersByPubKey == nil || len(t.chatUsers) == 0 {
+		return
+	}
+
+	cutoff := now.Add(-3 * time.Minute)
+	newUsers := make([]client.ChatUser, 0, len(t.chatUsers))
+	newByPubKey := make(map[string]client.ChatUser, len(t.chatUsersByPubKey))
+
+	for _, u := range t.chatUsers {
+		if u.PubKey == "" {
+			continue
+		}
+		if u.LastMsgAt <= 0 {
+			continue
+		}
+		last := time.Unix(u.LastMsgAt, 0)
+		if last.Before(cutoff) {
+			continue
+		}
+		newUsers = append(newUsers, u)
+		newByPubKey[u.PubKey] = u
+	}
+
+	// Avoid churn: if nothing changed, don't redraw.
+	if len(newUsers) == len(t.chatUsers) {
+		// Still update map to keep consistency with potential ordering changes.
+		t.chatUsersByPubKey = newByPubKey
+		return
+	}
+
+	t.chatUsers = newUsers
+	t.chatUsersByPubKey = newByPubKey
+	t.updateUserList()
 }
 
 // handleNewMessage processes and displays a new chat message.
@@ -504,8 +605,8 @@ func (t *tui) handleChatUsersUpdate(event client.DisplayEvent) {
 	for _, u := range users {
 		t.chatUsersByPubKey[u.PubKey] = u
 	}
-
-	t.updateUserList()
+	// Immediately prune based on last message timestamps.
+	t.pruneStaleChatUsers(time.Now())
 }
 
 func (t *tui) handleChatUserDiscovered(event client.DisplayEvent) {
@@ -538,6 +639,7 @@ func (t *tui) handleChatUserDiscovered(event client.DisplayEvent) {
 		existing.Nick = u.Nick
 		existing.ShortPubKey = u.ShortPubKey
 		existing.Chat = u.Chat
+		existing.LastMsgAt = u.LastMsgAt
 		t.chatUsersByPubKey[u.PubKey] = existing
 	} else {
 		t.chatUsers = append(t.chatUsers, u)
@@ -581,15 +683,29 @@ func (t *tui) maybeUpsertChatUserFromEvent(event client.DisplayEvent) {
 		return
 	}
 
-	if _, ok := t.chatUsersByPubKey[event.FullPubKey]; ok {
-		return
-	}
-
 	u := client.ChatUser{
 		PubKey:       event.FullPubKey,
 		Nick:         event.Nick,
 		ShortPubKey: event.ShortPubKey,
+		LastMsgAt:   event.CreatedAt,
 	}
+
+	if existing, ok := t.chatUsersByPubKey[event.FullPubKey]; ok {
+		// Update timestamp on every message so pruning is correct.
+		existing.Nick = u.Nick
+		existing.ShortPubKey = u.ShortPubKey
+		existing.LastMsgAt = u.LastMsgAt
+		t.chatUsersByPubKey[event.FullPubKey] = existing
+
+		for i := range t.chatUsers {
+			if t.chatUsers[i].PubKey == event.FullPubKey {
+				t.chatUsers[i] = existing
+				break
+			}
+		}
+		return
+	}
+
 	t.chatUsers = append(t.chatUsers, u)
 	t.chatUsersByPubKey[event.FullPubKey] = u
 	t.updateUserList()
