@@ -10,7 +10,6 @@ import (
 
 	"github.com/mmcloughlin/geohash"
 	"github.com/nbd-wtf/go-nostr"
-	"github.com/nbd-wtf/go-nostr/nip19"
 )
 
 // Chat/Group View
@@ -406,29 +405,24 @@ func (c *client) setActiveView(name string) {
 	}
 
 	if !view.IsGroup {
-		sk := nostr.GeneratePrivateKey()
-		pk, _ := nostr.GetPublicKey(sk)
+		if _, exists := c.chatKeys[name]; !exists {
+			sk := nostr.GeneratePrivateKey()
+			pk, _ := nostr.GetPublicKey(sk)
 
-		nick := c.config.Nick
-		custom := false
-		if nick == "" {
-			nick = npubToTokiPona(pk)
-		} else {
-			custom = true
-		}
+			nick := c.config.Nick
+			custom := false
+			if nick == "" {
+				nick = npubToTokiPona(pk)
+			} else {
+				custom = true
+			}
 
-		c.chatKeys[name] = chatSession{
-			privKey:    sk,
-			pubKey:     pk,
-			nick:       nick,
-			customNick: custom,
-		}
-
-		npub, _ := nip19.EncodePublicKey(pk)
-		c.eventsChan <- DisplayEvent{
-			Type: "STATUS",
-			Content: fmt.Sprintf("Generated ephemeral identity for chat '%s': %s (%s)",
-				view.Name, npub, nick),
+			c.chatKeys[name] = chatSession{
+				privKey:    sk,
+				pubKey:     pk,
+				nick:       nick,
+				customNick: custom,
+			}
 		}
 	}
 

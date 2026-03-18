@@ -51,6 +51,10 @@ type client struct {
 	updateSubTimer    *time.Timer
 	updateSubMu       sync.Mutex // Protects updateSubTimer
 
+	// Avoid duplicate STATUS lines in Logs (listen vs post-switch refresh).
+	subStatusMu      sync.Mutex
+	lastListenLogKey string
+
 	// Moderation State
 	filtersCompiled []compiledPattern
 	mutesCompiled   []compiledPattern
@@ -110,6 +114,59 @@ func (c *client) forceRefreshSubscriptions() {
 	}
 
 	c.updateRelaySubscriptionsWithRefresh(desiredRelayToChats, true)
+
+	n := len(desiredRelayToChats)
+	if n > 0 && activeView != nil {
+		c.emitRelayListenStatus(activeView, n, true)
+	}
+}
+
+// emitRelayListenStatus writes one line to the TUI Logs panel.
+// isChatSwitch: user just changed chat — always show; also updates dedupe key
+// so a follow-up updateAllSubscriptions with the same relay set does not repeat.
+func (c *client) emitRelayListenStatus(view *View, nRelays int, isChatSwitch bool) {
+	if view == nil || nRelays <= 0 {
+		return
+	}
+	key := view.Name + "|" + strconv.Itoa(nRelays)
+	c.subStatusMu.Lock()
+	if !isChatSwitch && key == c.lastListenLogKey {
+		c.subStatusMu.Unlock()
+		return
+	}
+	c.lastListenLogKey = key
+	c.subStatusMu.Unlock()
+
+	var msg string
+	if isChatSwitch {
+		if view.IsGroup {
+			msg = fmt.Sprintf("Group %q — loading history (%d relays)", view.Name, nRelays)
+		} else {
+			msg = fmt.Sprintf("#%s — loading history (%d relays)", strings.TrimPrefix(view.Name, "#"), nRelays)
+		}
+	} else {
+		if view.IsGroup {
+			msg = fmt.Sprintf("Group %q — listening (%d relays)", view.Name, nRelays)
+		} else {
+			msg = fmt.Sprintf("#%s — listening (%d relays)", strings.TrimPrefix(view.Name, "#"), nRelays)
+		}
+	}
+	select {
+	case c.eventsChan <- DisplayEvent{Type: "STATUS", Content: msg}:
+	default:
+	}
+}
+
+// historyLookbackSeconds is the subscription "since" window (Nostr unix seconds).
+func (c *client) historyLookbackSeconds() nostr.Timestamp {
+	m := c.config.HistoryLookbackMinutes
+	if m <= 0 {
+		m = defaultHistoryMin
+	}
+	if m > maxHistoryMin {
+		m = maxHistoryMin
+	}
+	return nostr.Timestamp(m * 60)
 }
 
 func New(actions <-chan UserAction, events chan<- DisplayEvent) (*client, error) {

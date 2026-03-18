@@ -27,6 +27,8 @@ Smart relay management keeps you connected. **Nobody** wants a slow relay. We fi
 * **Geohash Chats:** Ephemeral local vibes via `georelay`. **Huge.**
 * **Stylish Theme:** Hacker aesthetic. Readable. **Classy.**
 
+On join or chat switch, the client asks relays for messages from the **last 10 minutes** (up to 2000 events per room). Override in `config.json`: `"history_lookback_minutes": 15` (max 1440).
+
 ## Supported Chat Types
 
 **DPE Corp** supports a **tremendous** range of Nostr chats — and we’re not stopping.

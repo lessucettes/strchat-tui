@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -71,12 +72,23 @@ func (t *tui) updateChatList() {
 	}
 }
 
+// refreshUserListTitle sets the users panel title to the count shown in that list.
+func (t *tui) refreshUserListTitle() {
+	n := len(t.chatUsers)
+	if t.narrowMode {
+		t.userList.SetTitle(fmt.Sprintf("%s %d", titleUsersShort, n))
+	} else {
+		t.userList.SetTitle(fmt.Sprintf("%s %d", titleUsers, n))
+	}
+}
+
 // updateUserList refreshes the users panel for the currently active view.
 func (t *tui) updateUserList() {
 	currentItem := t.userList.GetCurrentItem()
 	t.userList.Clear()
 
 	if len(t.chatUsers) == 0 {
+		t.refreshUserListTitle()
 		return
 	}
 
@@ -88,7 +100,7 @@ func (t *tui) updateUserList() {
 	})
 
 	for idx, u := range t.chatUsers {
-		colorTag := pubkeyToNickColorTag(u.PubKey)
+		colorTag := t.colorTagForPubkey(u.PubKey)
 		short := u.ShortPubKey
 		if short == "" {
 			if len(u.PubKey) >= 4 {
@@ -105,10 +117,109 @@ func (t *tui) updateUserList() {
 	} else {
 		t.userList.SetCurrentItem(0)
 	}
+	t.refreshUserListTitle()
 }
 
-// updateDetailsView refreshes the details panel, showing relays or group members.
+// rebuildParticipantColorsFull assigns evenly spaced hues to all users in the active chat (unique colors).
+func (t *tui) rebuildParticipantColorsFull() {
+	t.chatColorMu.Lock()
+	defer t.chatColorMu.Unlock()
+	t.participantColorTag = make(map[string]string)
+	t.participantHue = make(map[string]float64)
+	if len(t.chatUsersByPubKey) == 0 {
+		return
+	}
+	keys := make([]string, 0, len(t.chatUsersByPubKey))
+	for pk := range t.chatUsersByPubKey {
+		if pk != "" {
+			keys = append(keys, pk)
+		}
+	}
+	sort.Strings(keys)
+	n := len(keys)
+	if n == 0 {
+		return
+	}
+	nf := float64(n)
+	for i, pk := range keys {
+		hue := float64(i) * 360.0 / nf
+		s := 0.52 + float64(i%6)*0.055
+		v := 0.80 + float64((i/6)%4)*0.04
+		r, g, b := hsvToRGBBytes(hue, s, v)
+		t.participantHue[pk] = hue
+		t.participantColorTag[pk] = fmt.Sprintf("[#%02x%02x%02x]", r, g, b)
+	}
+}
+
+func pickDistinctHue(used []float64) float64 {
+	if len(used) == 0 {
+		return 0
+	}
+	bestH := 0.0
+	bestMin := -1.0
+	for step := 0; step < 72; step++ {
+		cand := float64(step) * 5.0
+		minD := 360.0
+		for _, h := range used {
+			d := math.Abs(cand - h)
+			if d > 180 {
+				d = 360 - d
+			}
+			if d < minD {
+				minD = d
+			}
+		}
+		if minD > bestMin {
+			bestMin = minD
+			bestH = cand
+		}
+	}
+	return bestH
+}
+
+// assignNewParticipantColor gives a new speaker a hue as far as possible from current chat members.
+func (t *tui) assignNewParticipantColor(pubkey string) {
+	if pubkey == "" {
+		return
+	}
+	t.chatColorMu.Lock()
+	defer t.chatColorMu.Unlock()
+	if _, ok := t.participantColorTag[pubkey]; ok {
+		return
+	}
+	used := make([]float64, 0, len(t.participantHue))
+	for _, h := range t.participantHue {
+		used = append(used, h)
+	}
+	h := pickDistinctHue(used)
+	idx := len(t.participantHue)
+	s := 0.52 + float64(idx%6)*0.055
+	v := 0.80 + float64((idx/6)%4)*0.04
+	r, g, b := hsvToRGBBytes(h, s, v)
+	t.participantHue[pubkey] = h
+	t.participantColorTag[pubkey] = fmt.Sprintf("[#%02x%02x%02x]", r, g, b)
+}
+
+func (t *tui) colorTagForPubkey(pubkey string) string {
+	if pubkey == "" {
+		return "[#aaaaaa]"
+	}
+	t.chatColorMu.RLock()
+	tag, ok := t.participantColorTag[pubkey]
+	t.chatColorMu.RUnlock()
+	if ok {
+		return tag
+	}
+	return pubkeyToNickColorTag(pubkey)
+}
+
+// updateDetailsView refreshes the Info list (group members or relays), selectable like other lists.
 func (t *tui) updateDetailsView() {
+	prev := 0
+	if t.detailsView.GetItemCount() > 0 {
+		prev = t.detailsView.GetCurrentItem()
+	}
+
 	onlineCount := 0
 	for _, r := range t.relays {
 		if r.Connected {
@@ -117,17 +228,27 @@ func (t *tui) updateDetailsView() {
 	}
 
 	if t.narrowMode {
-		t.detailsView.SetTitle(fmt.Sprintf("%s ONLINE: %d", titleInfoShort, onlineCount))
+		t.detailsView.SetTitle(fmt.Sprintf("%s RELAYS UP: %d", titleInfoShort, onlineCount))
 	} else {
-		t.detailsView.SetTitle(fmt.Sprintf("%s ONLINE: %d", titleInfo, onlineCount))
+		t.detailsView.SetTitle(fmt.Sprintf("%s RELAYS UP: %d", titleInfo, onlineCount))
 	}
 	t.detailsView.Clear()
 
+	if t.pullingStatus != "" {
+		t.detailsView.AddItem(
+			fmt.Sprintf("[%s::b]PULLING MESSAGES FOR %s[-]", t.theme.titleColor, t.pullingStatus),
+			"", 0, nil)
+	}
+
 	if t.chatList.GetItemCount() == 0 || len(t.chatListItems) == 0 {
+		t.detailsView.AddItem("— select a chat —", "", 0, nil)
+		t.detailsView.SetCurrentItem(0)
 		return
 	}
 	currentIndex := t.chatList.GetCurrentItem()
 	if currentIndex >= len(t.chatListItems) || currentIndex < 0 {
+		t.detailsView.AddItem("— select a chat —", "", 0, nil)
+		t.detailsView.SetCurrentItem(0)
 		return
 	}
 
@@ -138,24 +259,23 @@ func (t *tui) updateDetailsView() {
 	}
 
 	if selectedView != nil && selectedView.IsGroup {
-		var builder strings.Builder
-		builder.WriteString(fmt.Sprintf(" [%s]Chats of %s:[-]\n", t.theme.logWarnColor, selectedView.Name))
-		for _, child := range selectedView.Children {
-			builder.WriteString(fmt.Sprintf(" - %s\n", child))
+		if len(selectedView.Children) == 0 {
+			t.detailsView.AddItem("(no channels)", "", 0, nil)
+		} else {
+			for _, child := range selectedView.Children {
+				t.detailsView.AddItem(child, "", 0, nil)
+			}
 		}
-		fmt.Fprint(t.detailsView, builder.String())
 	} else {
-		var builder strings.Builder
-		builder.WriteString(fmt.Sprintf("[%s]Connected Relays:[-]\n", t.theme.logWarnColor))
-
-		sort.SliceStable(t.relays, func(i, j int) bool {
-			return t.relays[i].URL < t.relays[j].URL
+		relays := append([]client.RelayInfo(nil), t.relays...)
+		sort.SliceStable(relays, func(i, j int) bool {
+			return relays[i].URL < relays[j].URL
 		})
 
-		if len(t.relays) == 0 {
-			builder.WriteString(fmt.Sprintf(" [%s]Not connected...[-]\n", t.theme.logInfoColor))
+		if len(relays) == 0 {
+			t.detailsView.AddItem(fmt.Sprintf("[%s]Not connected[-]", t.theme.logInfoColor), "", 0, nil)
 		} else {
-			for _, r := range t.relays {
+			for _, r := range relays {
 				var statusColor tcell.Color
 				var symbol string
 				switch {
@@ -170,10 +290,20 @@ func (t *tui) updateDetailsView() {
 					symbol = "●"
 				}
 				host := strings.TrimPrefix(strings.TrimPrefix(r.URL, "wss://"), "ws://")
-				builder.WriteString(fmt.Sprintf(" [%s]%s[-] %s\n", statusColor, symbol, host))
+				t.detailsView.AddItem(fmt.Sprintf("[%s]%s[-] %s", statusColor, symbol, host), "", 0, nil)
 			}
 		}
-		fmt.Fprint(t.detailsView, builder.String())
+	}
+
+	n := t.detailsView.GetItemCount()
+	if n > 0 {
+		if prev >= n {
+			prev = n - 1
+		}
+		if prev < 0 {
+			prev = 0
+		}
+		t.detailsView.SetCurrentItem(prev)
 	}
 }
 
@@ -253,6 +383,12 @@ func (t *tui) updateFocusBorders() {
 	} else {
 		t.userList.SetSelectedBackgroundColor(t.theme.backgroundColor)
 	}
+
+	if t.app.GetFocus() == t.detailsView {
+		t.detailsView.SetSelectedBackgroundColor(t.theme.borderColor)
+	} else {
+		t.detailsView.SetSelectedBackgroundColor(t.theme.backgroundColor)
+	}
 }
 
 // updateHints displays context-sensitive hints for the user.
@@ -261,11 +397,15 @@ func (t *tui) updateHints() {
 	highlight := t.theme.titleColor
 	baseHints := fmt.Sprintf("[%[1]s]Alt+...[-]: Focus", highlight)
 
-	// Keep selection highlight in sync with focus (important after maximize/minimize).
 	if t.app.GetFocus() == t.output {
 		t.output.SetSelectedBackgroundColor(t.theme.borderColor)
 	} else {
 		t.output.SetSelectedBackgroundColor(t.theme.backgroundColor)
+	}
+	if t.app.GetFocus() == t.detailsView {
+		t.detailsView.SetSelectedBackgroundColor(t.theme.borderColor)
+	} else {
+		t.detailsView.SetSelectedBackgroundColor(t.theme.backgroundColor)
 	}
 
 	if t.logsMaximized {
@@ -281,15 +421,15 @@ func (t *tui) updateHints() {
 				hintText = fmt.Sprintf("[%[1]s]Enter[-]: Send | [%[1]s]Ctrl+P/N[-]: History | [%[1]s]Tab/Shift+Tab[-]: Cycle Focus | %s", highlight, baseHints)
 			}
 		case t.output:
-			hintText = fmt.Sprintf("[%[1]s]Enter[-]: @nick#id in input | [%[1]s]`[-]: Maximize | [%[1]s]↑/↓[-]: Scroll | [%[1]s]Tab/Shift+Tab[-]: Cycle | %s", highlight, baseHints)
+			hintText = fmt.Sprintf("[%[1]s]c[-]: Copy | [%[1]s]Enter[-]: Reply | [%[1]s]`[-]: Max | [%[1]s]↑/↓[-]: Scroll | %s", highlight, baseHints)
 		case t.detailsView:
-			hintText = fmt.Sprintf("[%[1]s]↑/↓[-]: Scroll | [%[1]s]Tab/Shift+Tab[-]: Cycle Focus | %s", highlight, baseHints)
+			hintText = fmt.Sprintf("[%[1]s]c[-]: Copy | [%[1]s]↑/↓[-]: Select | [%[1]s]Tab/Shift+Tab[-]: Cycle | %s", highlight, baseHints)
 		case t.userList:
-			hintText = fmt.Sprintf("[%[1]s]Enter[-]: Reply | [%[1]s]Tab/Shift+Tab[-]: Cycle Focus | %s", highlight, baseHints)
+			hintText = fmt.Sprintf("[%[1]s]c[-]: Copy | [%[1]s]Enter[-]: Reply | [%[1]s]Tab/Shift+Tab[-]: Cycle | %s", highlight, baseHints)
 		case t.chatList:
-			hintText = fmt.Sprintf("[%[1]s]Space[-]: Select | [%[1]s]Enter[-]: Activate | [%[1]s]Del[-]: Delete | [%[1]s]Tab/Shift+Tab[-]: Cycle Focus | %s", highlight, baseHints)
+			hintText = fmt.Sprintf("[%[1]s]c[-]: Copy | [%[1]s]Space[-]: Toggle | [%[1]s]Enter[-]: Open | [%[1]s]Del[-]: Del | %s", highlight, baseHints)
 		case t.logs:
-			hintText = fmt.Sprintf("[%[1]s]`[-]: Maximize | [%[1]s]Tab/Shift+Tab[-]: Cycle Focus | %s", highlight, baseHints)
+			hintText = fmt.Sprintf("[%[1]s]c[-]: Copy line | [%[1]s]`[-]: Max | [%[1]s]↑/↓[-]: Scroll | %s", highlight, baseHints)
 		default:
 			hintText = baseHints
 		}

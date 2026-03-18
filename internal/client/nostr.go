@@ -69,11 +69,9 @@ func (c *client) updateAllSubscriptions() {
 
 	if len(activeChats) == 0 {
 		c.updateRelaySubscriptions(make(map[string][]string))
-		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "No active chat/group. Relay connections are inactive."}
+		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "No active chat — relays idle."}
 		return
 	}
-
-	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Updating subscriptions for active chat/group..."}
 
 	desiredRelayToChats := make(map[string][]string)
 	for chat := range activeChats {
@@ -87,6 +85,10 @@ func (c *client) updateAllSubscriptions() {
 	}
 
 	c.updateRelaySubscriptions(desiredRelayToChats)
+
+	if activeView != nil && len(desiredRelayToChats) > 0 {
+		c.emitRelayListenStatus(activeView, len(desiredRelayToChats), false)
+	}
 }
 
 func (c *client) updateRelaySubscriptions(desiredRelays map[string][]string) {
@@ -223,7 +225,7 @@ func (c *client) replaceSubscriptionWithRefresh(mr *managedRelay, chats []string
 	}
 
 	now := nostr.Now()
-	lookbackSeconds := nostr.Timestamp(messageHistoryLookback / time.Second)
+	lookbackSeconds := c.historyLookbackSeconds()
 	filters := make(nostr.Filters, 0, len(chats))
 	for _, ch := range chats {
 		// Request a window of past events so history is visible immediately

@@ -138,6 +138,14 @@ func (t *tui) setupHandlers() {
 			return nil
 		}
 
+		if event.Modifiers() == 0 && event.Key() == tcell.KeyRune && isCopyRune(event.Rune()) {
+			if t.app.GetFocus() != t.input {
+				if t.copyFocusedSelectionToClipboard() {
+					return nil
+				}
+			}
+		}
+
 		currentFocus := t.app.GetFocus()
 
 		if currentFocus == t.chatList {
@@ -282,6 +290,12 @@ func (t *tui) cycleFocus(forward bool) {
 // handleMaximizedViewKeys handles key events when a view is maximized.
 func (t *tui) handleMaximizedViewKeys(event *tcell.EventKey) *tcell.EventKey {
 	currentFocus := t.app.GetFocus()
+	if event.Modifiers() == 0 && event.Key() == tcell.KeyRune && isCopyRune(event.Rune()) {
+		if currentFocus == t.logs || currentFocus == t.output {
+			t.copyFocusedSelectionToClipboard()
+			return nil
+		}
+	}
 	switch event.Key() {
 	case tcell.KeyRune:
 		if event.Rune() == '`' {

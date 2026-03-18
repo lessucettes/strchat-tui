@@ -38,7 +38,9 @@ type config struct {
 	BlockedUsers   []blockedUser `json:"blocked_users,omitempty"`
 	Filters        []filter      `json:"filters,omitempty"`
 	Mutes          []filter      `json:"mutes,omitempty"`
-	path           string        `json:"-"`
+	// HistoryLookbackMinutes: relay history window on join/switch (default 10).
+	HistoryLookbackMinutes int `json:"history_lookback_minutes,omitempty"`
+	path                   string `json:"-"`
 }
 
 func loadConfig() (*config, error) {

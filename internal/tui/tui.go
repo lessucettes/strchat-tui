@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -26,7 +25,7 @@ type tui struct {
 	mainFlex            *tview.Flex
 	chatList            *tview.List
 	userList            *tview.List
-	detailsView         *tview.TextView
+	detailsView         *tview.List
 	logs                *tview.TextView
 	maximizedLogsFlex   *tview.Flex
 	output              *tview.List
@@ -63,7 +62,9 @@ type tui struct {
 
 	chatListItems []chatListItem
 
-	outputMessages []outputMessage
+	outputMessages   []outputMessage
+	outputRowToMsg   []int // list row index -> outputMessages index
+	messagesCachedWrapW int
 
 	userPruneStopCh chan struct{}
 
@@ -83,6 +84,14 @@ type tui struct {
 	followEnabled bool
 
 	pendingReply *pendingReply
+
+	// Distinct per-participant colors in the active chat (no duplicate hues among peers).
+	participantColorTag map[string]string
+	participantHue      map[string]float64
+	chatColorMu         sync.RWMutex
+
+	pullingStatus     string     // e.g. "#moscow"; shown in Info until messages arrive
+	pullingStatusTimer *time.Timer
 }
 
 type chatListItem struct {
@@ -90,10 +99,11 @@ type chatListItem struct {
 }
 
 type outputMessage struct {
-	Replyable   bool
-	Nick        string
-	ShortPubKey string
-	Content     string
+	Replyable    bool
+	Nick         string
+	ShortPubKey  string
+	Content      string
+	RawDisplay   string // full styled line(s) source for re-wrap on resize
 }
 
 // pendingReply holds the message being replied to (input title + send formatting).
@@ -122,7 +132,9 @@ func New(actions chan<- client.UserAction, events <-chan client.DisplayEvent) *t
 		lastNickQuery:     "",
 		theme:             defaultTheme,
 		userPruneStopCh:  make(chan struct{}),
-		followEnabled:   true,
+		followEnabled:       true,
+		participantColorTag: make(map[string]string),
+		participantHue:      make(map[string]float64),
 	}
 
 	t.setupViews()
@@ -155,14 +167,14 @@ func (lw *logWriter) Write(p []byte) (int, error) {
 const (
 	titleLogs     = "Logs (Alt+L)"
 	titleChats    = "Chats (Alt+C)"
-	titleUsers    = "Users (Alt+U)"
+	titleUsers    = "(Alt+U) USERS ONLINE:"
 	titleInfo     = "Info (Alt+N)"
 	titleMessages = "Messages (Alt+M)"
 	titleInput    = "Input (Alt+I)"
 
 	titleLogsShort     = "Alt+L"
 	titleChatsShort    = "Alt+C"
-	titleUsersShort    = "Alt+U"
+	titleUsersShort    = "Alt+U USERS ONLINE:"
 	titleInfoShort     = "Alt+N"
 	titleMessagesShort = "Alt+M"
 	titleInputShort    = "Alt+I"
@@ -215,6 +227,7 @@ func (t *tui) initViews() {
 	t.logs = tview.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true).
+		SetWrap(false).
 		SetChangedFunc(func() { t.app.Draw() })
 	t.logs.SetBorder(true).SetTitle(titleLogs).SetTitleAlign(tview.AlignLeft)
 	customWriter := &logWriter{
@@ -234,12 +247,13 @@ func (t *tui) initViews() {
 		ShowSecondaryText(false).
 		SetSelectedBackgroundColor(t.theme.borderColor).
 		SetSelectedTextColor(t.theme.listSelectedFg)
-	t.userList.SetBorder(true).SetTitle(titleUsers).SetTitleAlign(tview.AlignLeft)
+	t.userList.SetBorder(true).SetTitleAlign(tview.AlignLeft)
+	t.refreshUserListTitle()
 
-	t.detailsView = tview.NewTextView().
-		SetDynamicColors(true).
-		SetScrollable(true).
-		SetChangedFunc(func() { t.app.Draw() })
+	t.detailsView = tview.NewList().
+		ShowSecondaryText(false).
+		SetSelectedBackgroundColor(t.theme.borderColor).
+		SetSelectedTextColor(t.theme.listSelectedFg)
 	t.detailsView.SetBorder(true).SetTitle(titleInfo).SetTitleAlign(tview.AlignLeft)
 
 	t.output = tview.NewList().
@@ -339,8 +353,8 @@ func (t *tui) initLayout() {
 						t.logs.SetTitle(titleLogsShort).SetTitleAlign(tview.AlignLeft)
 						t.output.SetTitle(titleMessagesShort + t.followTitleSuffix())
 						t.chatList.SetTitle(titleChatsShort)
-						t.userList.SetTitle(titleUsersShort)
-						t.detailsView.SetTitle(titleInfoShort)
+						t.refreshUserListTitle()
+						t.updateDetailsView()
 						t.updateInputLabel()
 						t.restoreNarrowComposerNormal()
 						t.app.SetRoot(t.narrowFlex, true).SetFocus(t.input)
@@ -349,8 +363,8 @@ func (t *tui) initLayout() {
 						t.logs.SetTitle(titleLogs).SetTitleAlign(tview.AlignLeft)
 						t.output.SetTitle(titleMessages + t.followTitleSuffix())
 						t.chatList.SetTitle(titleChats)
-						t.userList.SetTitle(titleUsers)
-						t.detailsView.SetTitle(titleInfo)
+						t.refreshUserListTitle()
+						t.updateDetailsView()
 						t.input.SetTitle(titleInput)
 						t.updateInputLabel()
 						t.restoreWideComposerNormal()
@@ -360,6 +374,14 @@ func (t *tui) initLayout() {
 			})
 		}
 		t.resizeMu.Unlock()
+
+		nw := t.messagesWrapColumns(w)
+		if nw != t.messagesCachedWrapW {
+			t.messagesCachedWrapW = nw
+			if len(t.outputMessages) > 0 {
+				t.rebuildMessagesOutputPreservingSelection()
+			}
+		}
 
 		// Configure grid only for wide mode; in narrow mode it's hidden by a different root.
 		if !desiredNarrow {
@@ -390,37 +412,6 @@ func (t *tui) initLayout() {
 
 const wideBottomRowsNormal = 4
 
-// @nick#4char — RE2 has no lookahead; boundary checked in nickHashMentionIndices.
-var atNickHashRe = regexp.MustCompile(`@([a-zA-Z0-9_]+)#([a-zA-Z0-9]{4})`)
-
-func nickHashMentionIndices(s string) [][]int {
-	var out [][]int
-	i := 0
-	for i < len(s) {
-		loc := atNickHashRe.FindStringSubmatchIndex(s[i:])
-		if loc == nil {
-			break
-		}
-		for j := range loc {
-			loc[j] += i
-		}
-		fe := loc[1]
-		validEnd := fe >= len(s)
-		if !validEnd {
-			c := s[fe]
-			validEnd = !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-				(c >= '0' && c <= '9') || c == '_' || c == '#')
-		}
-		if validEnd {
-			out = append(out, loc)
-			i = fe
-		} else {
-			i = loc[0] + 1
-		}
-	}
-	return out
-}
-
 func (t *tui) formatContentWithNickMentions(content string) string {
 	if len(t.chatUsersByPubKey) == 0 {
 		return content
@@ -449,7 +440,7 @@ func (t *tui) formatContentWithNickMentions(content string) string {
 		key := nick + "#" + hsh
 		b.WriteString(content[prev:fullStart])
 		if pk, ok := lookup[key]; ok {
-			b.WriteString(pubkeyToNickColorTag(pk))
+			b.WriteString(t.colorTagForPubkey(pk))
 			b.WriteString(content[fullStart:fullEnd])
 			b.WriteString("[-]")
 		} else {
@@ -612,13 +603,14 @@ func (t *tui) pruneStaleChatUsers(now time.Time) {
 
 	// Avoid churn: if nothing changed, don't redraw.
 	if len(newUsers) == len(t.chatUsers) {
-		// Still update map to keep consistency with potential ordering changes.
 		t.chatUsersByPubKey = newByPubKey
+		t.rebuildParticipantColorsFull()
 		return
 	}
 
 	t.chatUsers = newUsers
 	t.chatUsersByPubKey = newByPubKey
+	t.rebuildParticipantColorsFull()
 	t.updateUserList()
 }
 
@@ -643,6 +635,14 @@ func (t *tui) handleNewMessage(event client.DisplayEvent) {
 		return
 	}
 
+	clearedPulling := false
+	if t.pullingStatus != "" {
+		t.clearPullingMessagesStatus()
+		clearedPulling = true
+	}
+
+	t.maybeUpsertChatUserFromEvent(event)
+
 	// Smart follow: only select new message when user was already at bottom.
 	itemCountBefore := t.output.GetItemCount()
 	currentSelBefore := t.output.GetCurrentItem()
@@ -651,7 +651,7 @@ func (t *tui) handleNewMessage(event client.DisplayEvent) {
 		shouldFollow = true
 	}
 
-	nickColorTag := pubkeyToNickColorTag(event.FullPubKey)
+	nickColorTag := t.colorTagForPubkey(event.FullPubKey)
 	ownColorTag := fmt.Sprintf("[%s]", t.theme.inputTextColor)
 	ownNickTag := fmt.Sprintf("[%s::b]", t.theme.inputTextColor)
 
@@ -715,19 +715,57 @@ func (t *tui) handleNewMessage(event client.DisplayEvent) {
 		)
 	}
 
-	t.output.AddItem(display, "", 0, nil)
+	wrapW := t.messagesCachedWrapW
+	if wrapW < 20 {
+		wrapW = 76
+	}
+	lines := wrapTviewDisplay(display, wrapW)
+	msgIdx := len(t.outputMessages)
+	for _, ln := range lines {
+		t.output.AddItem(ln, "", 0, nil)
+		t.outputRowToMsg = append(t.outputRowToMsg, msgIdx)
+	}
 	t.outputMessages = append(t.outputMessages, outputMessage{
 		Replyable:   true,
 		Nick:        event.Nick,
 		ShortPubKey: event.ShortPubKey,
 		Content:     event.Content,
+		RawDisplay:  display,
 	})
 
 	if shouldFollow {
 		t.output.SetCurrentItem(t.output.GetItemCount() - 1)
 	}
+	if clearedPulling {
+		t.updateDetailsView()
+	}
+}
 
-	t.maybeUpsertChatUserFromEvent(event)
+func (t *tui) startPullingMessagesStatus() {
+	if t.pullingStatusTimer != nil {
+		t.pullingStatusTimer.Stop()
+		t.pullingStatusTimer = nil
+	}
+	t.pullingStatus = ""
+	if t.activeViewIndex < 0 || t.activeViewIndex >= len(t.views) {
+		return
+	}
+	v := t.views[t.activeViewIndex]
+	t.pullingStatus = "#" + strings.TrimPrefix(v.Name, "#")
+	t.pullingStatusTimer = time.AfterFunc(12*time.Second, func() {
+		t.app.QueueUpdateDraw(func() {
+			t.clearPullingMessagesStatus()
+			t.updateDetailsView()
+		})
+	})
+}
+
+func (t *tui) clearPullingMessagesStatus() {
+	t.pullingStatus = ""
+	if t.pullingStatusTimer != nil {
+		t.pullingStatusTimer.Stop()
+		t.pullingStatusTimer = nil
+	}
 }
 
 // clearMessagesWindow clears the visible Messages list (local UI only).
@@ -737,6 +775,7 @@ func (t *tui) clearMessagesWindow() {
 	}
 	t.output.Clear()
 	t.outputMessages = nil
+	t.outputRowToMsg = nil
 	if t.output.GetItemCount() > 0 {
 		t.output.SetCurrentItem(0)
 	}
@@ -748,8 +787,21 @@ func (t *tui) handleInfoMessage(event client.DisplayEvent) {
 		return
 	}
 	content := strings.TrimSpace(event.Content)
-	t.output.AddItem(fmt.Sprintf("-- %s", content), "", 0, nil)
-	t.outputMessages = append(t.outputMessages, outputMessage{Replyable: false})
+	disp := fmt.Sprintf("-- %s", content)
+	wrapW := t.messagesCachedWrapW
+	if wrapW < 20 {
+		wrapW = 76
+	}
+	msgIdx := len(t.outputMessages)
+	for _, ln := range wrapTviewDisplay(disp, wrapW) {
+		t.output.AddItem(ln, "", 0, nil)
+		t.outputRowToMsg = append(t.outputRowToMsg, msgIdx)
+	}
+	t.outputMessages = append(t.outputMessages, outputMessage{
+		Replyable:  false,
+		Content:    content,
+		RawDisplay: disp,
+	})
 }
 
 // replyToSelectedMessage starts reply mode: title shows target; send prepends quote block.
@@ -758,10 +810,14 @@ func (t *tui) replyToSelectedMessage() {
 		return
 	}
 	idx := t.output.GetCurrentItem()
-	if idx < 0 || idx >= len(t.outputMessages) {
+	if idx < 0 || idx >= len(t.outputRowToMsg) {
 		return
 	}
-	m := t.outputMessages[idx]
+	mid := t.outputRowToMsg[idx]
+	if mid < 0 || mid >= len(t.outputMessages) {
+		return
+	}
+	m := t.outputMessages[mid]
 	if !m.Replyable {
 		return
 	}
@@ -819,7 +875,9 @@ func (t *tui) handleStateUpdate(event client.DisplayEvent) {
 		t.pendingReply = nil
 		t.output.Clear()
 		t.outputMessages = nil
+		t.outputRowToMsg = nil
 		t.output.SetCurrentItem(0)
+		t.startPullingMessagesStatus()
 	}
 
 	t.updateChatList()
@@ -829,6 +887,7 @@ func (t *tui) handleStateUpdate(event client.DisplayEvent) {
 	// Reset and request users for the newly active view.
 	t.chatUsers = nil
 	t.chatUsersByPubKey = make(map[string]client.ChatUser)
+	t.rebuildParticipantColorsFull()
 	t.updateUserList()
 	t.requestChatUsersForActiveView()
 }
@@ -857,6 +916,8 @@ func (t *tui) handleChatUsersUpdate(event client.DisplayEvent) {
 	}
 	// Immediately prune based on last message timestamps.
 	t.pruneStaleChatUsers(time.Now())
+	t.rebuildParticipantColorsFull()
+	t.updateUserList()
 }
 
 func (t *tui) handleChatUserDiscovered(event client.DisplayEvent) {
@@ -894,6 +955,7 @@ func (t *tui) handleChatUserDiscovered(event client.DisplayEvent) {
 	} else {
 		t.chatUsers = append(t.chatUsers, u)
 		t.chatUsersByPubKey[u.PubKey] = u
+		t.assignNewParticipantColor(u.PubKey)
 	}
 
 	t.updateUserList()
@@ -958,6 +1020,7 @@ func (t *tui) maybeUpsertChatUserFromEvent(event client.DisplayEvent) {
 
 	t.chatUsers = append(t.chatUsers, u)
 	t.chatUsersByPubKey[event.FullPubKey] = u
+	t.assignNewParticipantColor(event.FullPubKey)
 	t.updateUserList()
 }
 

@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/uniseg"
@@ -154,7 +155,46 @@ func highlightPlainMentionOfMe(content, myNick string, inputColor tcell.Color) s
 	return b.String()
 }
 
-var atNickHashScanRE = regexp.MustCompile(`@([a-zA-Z0-9_]+)#([a-zA-Z0-9]{4})`)
+// Nicks may be Latin, Cyrillic, etc.; short id stays ASCII alnum.
+var nickAtMentionRE = regexp.MustCompile(`@([\p{L}\p{N}_]+)#([a-zA-Z0-9]{4})`)
+
+// mentionContinuesAfterHash is true if the rune right after @nick#hhhh looks like more id (reject 5+ char ids).
+func mentionContinuesAfterHash(s string, end int) bool {
+	if end >= len(s) {
+		return false
+	}
+	r, _ := utf8.DecodeRuneInString(s[end:])
+	if r == utf8.RuneError {
+		return false
+	}
+	if r == '#' || r == '_' {
+		return true
+	}
+	return unicode.IsLetter(r) || unicode.IsNumber(r)
+}
+
+// nickHashMentionIndices finds @nick#4char spans (Unicode nicks). Indices are byte offsets.
+func nickHashMentionIndices(s string) [][]int {
+	var out [][]int
+	i := 0
+	for i < len(s) {
+		loc := nickAtMentionRE.FindStringSubmatchIndex(s[i:])
+		if loc == nil {
+			break
+		}
+		for j := range loc {
+			loc[j] += i
+		}
+		fe := loc[1]
+		if !mentionContinuesAfterHash(s, fe) {
+			out = append(out, append([]int(nil), loc...))
+			i = fe
+		} else {
+			i = loc[0] + 1
+		}
+	}
+	return out
+}
 
 // isSelfMentionedInContent is true only if content contains @myNick#myShortId (4-char id),
 // so another user with the same nick but different id does not trigger highlight.
@@ -170,31 +210,11 @@ func isSelfMentionedInContent(content, myNick, myShortPubKey string) bool {
 	if len(sh) != 4 {
 		return false
 	}
-	i := 0
-	for i < len(content) {
-		loc := atNickHashScanRE.FindStringSubmatchIndex(content[i:])
-		if loc == nil {
-			break
-		}
-		for j := range loc {
-			loc[j] += i
-		}
-		fe := loc[1]
-		validEnd := fe >= len(content)
-		if !validEnd {
-			c := content[fe]
-			validEnd = !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-				(c >= '0' && c <= '9') || c == '_' || c == '#')
-		}
-		if validEnd {
-			nick := strings.ToLower(content[loc[2]:loc[3]])
-			h := strings.ToLower(content[loc[4]:loc[5]])
-			if nick == wantNick && h == sh {
-				return true
-			}
-			i = fe
-		} else {
-			i = loc[0] + 1
+	for _, loc := range nickHashMentionIndices(content) {
+		nick := strings.ToLower(content[loc[2]:loc[3]])
+		h := strings.ToLower(content[loc[4]:loc[5]])
+		if nick == wantNick && h == sh {
+			return true
 		}
 	}
 	return false
