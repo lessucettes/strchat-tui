@@ -57,6 +57,14 @@ type DisplayEvent struct {
 	Payload      any
 }
 
+// ChatUser represents a user known inside a chat (cached from received events).
+// It is used to render the users list in the UI and to build private-message prefixes.
+type ChatUser struct {
+	PubKey       string
+	Nick         string
+	ShortPubKey  string
+}
+
 type orderItem struct {
 	ev        DisplayEvent
 	createdAt int64

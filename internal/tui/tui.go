@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -23,6 +24,7 @@ type tui struct {
 
 	mainFlex            *tview.Flex
 	chatList            *tview.List
+	userList            *tview.List
 	detailsView         *tview.TextView
 	logs                *tview.TextView
 	maximizedLogsFlex   *tview.Flex
@@ -46,12 +48,42 @@ type tui struct {
 	activeViewIndex  int
 	nick             string
 
+	chatUsers          []client.ChatUser
+	chatUsersByPubKey map[string]client.ChatUser
+
+	chatListItems []chatListItem
+
+	// Private chat (DM) state (client-side; actual filtering is done in client)
+	dmTargetPubKey string
+	dmTargetNick   string
+
 	// Input-specific state
 
 	completionEntries []string
 	recentRecipients  []string
 	rrIdx             int
 	lastNickQuery     string
+
+	// Sound (bell) on incoming private messages
+	boopEnabled bool
+}
+
+type chatListItemKind int
+
+const (
+	chatListItemKindView chatListItemKind = iota
+	chatListItemKindDM
+)
+
+type chatListItem struct {
+	kind chatListItemKind
+
+	// For kind=View
+	viewIndex int
+
+	// For kind=DM
+	dmPubKey string
+	dmNick   string
 }
 
 // New creates and initializes the entire TUI application.
@@ -65,11 +97,16 @@ func New(actions chan<- client.UserAction, events <-chan client.DisplayEvent) *t
 		relays:            []client.RelayInfo{},
 		selectedForGroup:  make(map[string]bool),
 		activeViewIndex:   0,
+		chatUsers:         []client.ChatUser{},
+		chatUsersByPubKey: make(map[string]client.ChatUser),
+		dmTargetPubKey:   "",
+		dmTargetNick:     "",
 		completionEntries: []string{},
 		recentRecipients:  []string{},
 		rrIdx:             -1,
 		lastNickQuery:     "",
 		theme:             defaultTheme,
+		boopEnabled:      true,
 	}
 
 	t.setupViews()
@@ -101,12 +138,14 @@ func (lw *logWriter) Write(p []byte) (int, error) {
 const (
 	titleLogs     = "Logs (Alt+L)"
 	titleChats    = "Chats (Alt+C)"
+	titleUsers    = "Users (Alt+U)"
 	titleInfo     = "Info (Alt+N)"
 	titleMessages = "Messages (Alt+O)"
 	titleInput    = "Input (Alt+I)"
 
 	titleLogsShort     = "Alt+L"
 	titleChatsShort    = "Alt+C"
+	titleUsersShort    = "Alt+U"
 	titleInfoShort     = "Alt+N"
 	titleMessagesShort = "Alt+O"
 	titleInputShort    = "Alt+I"
@@ -145,6 +184,11 @@ func (t *tui) initViews() {
 		ShowSecondaryText(false).
 		SetSelectedBackgroundColor(t.theme.borderColor)
 	t.chatList.SetBorder(true).SetTitle(titleChats).SetTitleAlign(tview.AlignLeft)
+
+	t.userList = tview.NewList().
+		ShowSecondaryText(false).
+		SetSelectedBackgroundColor(t.theme.borderColor)
+	t.userList.SetBorder(true).SetTitle(titleUsers).SetTitleAlign(tview.AlignLeft)
 
 	t.detailsView = tview.NewTextView().
 		SetDynamicColors(true).
@@ -195,11 +239,13 @@ func (t *tui) initLayout() {
 	sidebarFlex := tview.NewFlex().
 		SetDirection(tview.FlexRow).
 		AddItem(t.chatList, 0, 1, true).
-		AddItem(t.detailsView, 0, 1, false)
+		AddItem(t.userList, 0, 1, false).
+		AddItem(t.detailsView, 0, 2, false)
 
 	sidebarFlexHorizontal := tview.NewFlex().
 		SetDirection(tview.FlexColumn).
 		AddItem(t.chatList, 0, 1, true).
+		AddItem(t.userList, 0, 1, false).
 		AddItem(t.detailsView, 0, 1, false)
 
 	contentGrid := tview.NewGrid().SetBorders(false)
@@ -215,6 +261,7 @@ func (t *tui) initLayout() {
 				t.logs.SetTitle(titleLogsShort)
 				t.output.SetTitle(titleMessagesShort)
 				t.chatList.SetTitle(titleChatsShort)
+				t.userList.SetTitle(titleUsersShort)
 				t.detailsView.SetTitle(titleInfoShort)
 				t.input.SetTitle(titleInputShort)
 				t.input.SetLabel("> ")
@@ -229,12 +276,14 @@ func (t *tui) initLayout() {
 				t.logs.SetTitle(titleLogs)
 				t.output.SetTitle(titleMessages)
 				t.chatList.SetTitle(titleChats)
+				t.userList.SetTitle(titleUsers)
 				t.detailsView.SetTitle(titleInfo)
 				t.input.SetTitle(titleInput)
 				t.updateInputLabel()
 			}
 			contentGrid.SetRows(0)
-			contentGrid.SetColumns(0, 30)
+			// Fixed width of the right sidebar: chat list + users + details.
+			contentGrid.SetColumns(0, 60)
 			contentGrid.AddItem(t.output, 0, 0, 1, 1, 0, 0, false)
 			contentGrid.AddItem(sidebarFlex, 0, 1, 1, 1, 0, 0, false)
 		}
@@ -324,6 +373,10 @@ func (t *tui) listenForEvents(events <-chan client.DisplayEvent) {
 				t.handleRelaysUpdate(event)
 			case "NICK_COMPLETION_RESULT":
 				t.handleNickCompletion(event)
+			case "CHAT_USERS_UPDATE":
+				t.handleChatUsersUpdate(event)
+			case "DM_TARGET_UPDATE":
+				t.handleDMTargetUpdate(event)
 			}
 		})
 	}
@@ -389,6 +442,10 @@ func (t *tui) handleNewMessage(event client.DisplayEvent) {
 			)
 		}
 	}
+
+	if showMessage {
+		t.maybeUpsertChatUserFromEvent(event)
+	}
 	if !t.outputMaximized {
 		t.output.ScrollToEnd()
 	}
@@ -410,6 +467,14 @@ func (t *tui) handleLogMessage(event client.DisplayEvent) {
 		color = t.theme.logErrorColor
 	}
 	fmt.Fprintf(t.logs, "\n[%s][%s] %s: %s[-]", color, time.Now().Format("15:04:05"), event.Type, event.Content)
+
+	// Incoming private message bell (optional).
+	if t.boopEnabled && event.Type == "STATUS" {
+		if _, ok := event.Payload.(client.ChatUser); ok && strings.HasPrefix(event.Content, "New Private Message From ") {
+			// Use terminal bell character. Works in most terminal setups.
+			_, _ = fmt.Fprint(os.Stderr, "\a")
+		}
+	}
 	if !t.logsMaximized {
 		t.logs.ScrollToEnd()
 	}
@@ -428,6 +493,12 @@ func (t *tui) handleStateUpdate(event client.DisplayEvent) {
 	t.updateChatList()
 	t.updateDetailsView()
 	t.updateInputLabel()
+
+	// Reset and request users for the newly active view.
+	t.chatUsers = nil
+	t.chatUsersByPubKey = make(map[string]client.ChatUser)
+	t.updateUserList()
+	t.requestChatUsersForActiveView()
 }
 
 // handleRelaysUpdate refreshes the list of relays.
@@ -439,6 +510,87 @@ func (t *tui) handleRelaysUpdate(event client.DisplayEvent) {
 	}
 	t.relays = relays
 	t.updateDetailsView()
+}
+
+func (t *tui) handleChatUsersUpdate(event client.DisplayEvent) {
+	users, ok := event.Payload.([]client.ChatUser)
+	if !ok {
+		return
+	}
+
+	t.chatUsers = users
+	t.chatUsersByPubKey = make(map[string]client.ChatUser, len(users))
+	for _, u := range users {
+		t.chatUsersByPubKey[u.PubKey] = u
+	}
+
+	t.updateUserList()
+}
+
+func (t *tui) handleDMTargetUpdate(event client.DisplayEvent) {
+	target, ok := event.Payload.(client.ChatUser)
+	if !ok {
+		return
+	}
+
+	t.dmTargetPubKey = target.PubKey
+	t.dmTargetNick = target.Nick
+
+	if t.dmTargetPubKey == "" {
+		t.dmTargetNick = ""
+	}
+
+	t.updateChatList()
+	t.updateInputLabel()
+	t.updateHints()
+}
+
+func (t *tui) requestChatUsersForActiveView() {
+	if len(t.views) == 0 || t.activeViewIndex < 0 || t.activeViewIndex >= len(t.views) {
+		return
+	}
+	activeView := t.views[t.activeViewIndex]
+	if activeView.Name == "" {
+		return
+	}
+
+	t.actionsChan <- client.UserAction{
+		Type:    "REQUEST_CHAT_USERS",
+		Payload: activeView.Name,
+	}
+}
+
+func (t *tui) maybeUpsertChatUserFromEvent(event client.DisplayEvent) {
+	if event.FullPubKey == "" {
+		return
+	}
+	if len(t.views) == 0 || t.activeViewIndex < 0 || t.activeViewIndex >= len(t.views) {
+		return
+	}
+
+	activeView := t.views[t.activeViewIndex]
+	isRelevant := false
+	if activeView.IsGroup {
+		isRelevant = slices.Contains(activeView.Children, event.Chat)
+	} else {
+		isRelevant = event.Chat == activeView.Name
+	}
+	if !isRelevant {
+		return
+	}
+
+	if _, ok := t.chatUsersByPubKey[event.FullPubKey]; ok {
+		return
+	}
+
+	u := client.ChatUser{
+		PubKey:       event.FullPubKey,
+		Nick:         event.Nick,
+		ShortPubKey: event.ShortPubKey,
+	}
+	t.chatUsers = append(t.chatUsers, u)
+	t.chatUsersByPubKey[event.FullPubKey] = u
+	t.updateUserList()
 }
 
 // handleNickCompletion provides completion entries to the input field.

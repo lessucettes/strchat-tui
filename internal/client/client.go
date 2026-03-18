@@ -21,6 +21,10 @@ type client struct {
 	config   *config
 	chatKeys map[string]chatSession
 
+	// Private chat (DM) state
+	dmTargetPubKey string
+	dmMu            sync.RWMutex
+
 	// TUI I/O
 	actionsChan <-chan UserAction
 	eventsChan  chan<- DisplayEvent
@@ -176,18 +180,24 @@ func (c *client) handleAction(action UserAction) {
 	case "SEND_MESSAGE":
 		go c.publishMessage(action.Payload)
 	case "ACTIVATE_VIEW":
+		c.clearDMTarget()
 		c.setActiveView(action.Payload)
 		c.flushAllOrdering()
 		c.updateAllSubscriptions()
 	case "CREATE_GROUP":
+		c.clearDMTarget()
 		c.createGroup(action.Payload)
 	case "JOIN_CHATS":
+		c.clearDMTarget()
 		c.joinChats(action.Payload)
 	case "LEAVE_CHAT":
+		c.clearDMTarget()
 		c.leaveChat(action.Payload)
 	case "DELETE_GROUP":
+		c.clearDMTarget()
 		c.deleteGroup(action.Payload)
 	case "DELETE_VIEW":
+		c.clearDMTarget()
 		c.deleteView(action.Payload)
 	case "REQUEST_NICK_COMPLETION":
 		c.handleNickCompletion(action.Payload)
@@ -221,9 +231,22 @@ func (c *client) handleAction(action UserAction) {
 		c.manageAnchors(action.Payload)
 	case "GET_HELP":
 		c.getHelp()
+	case "REQUEST_CHAT_USERS":
+		c.requestChatUsers(action.Payload)
+	case "SET_DM_TARGET":
+		c.setDMTarget(action.Payload)
+	case "DM_USER":
+		c.dmUser(action.Payload)
 	case "QUIT":
 		c.shutdown()
 	}
+}
+
+func (c *client) clearDMTarget() {
+	c.dmMu.Lock()
+	c.dmTargetPubKey = ""
+	c.dmMu.Unlock()
+	c.eventsChan <- DisplayEvent{Type: "DM_TARGET_UPDATE", Payload: ChatUser{}}
 }
 
 // manageAnchors handles adding/removing/listing anchor relays.

@@ -331,6 +331,8 @@ func (c *client) getHelp() {
 		"* /del [name] - Deletes a chat/group. If no name, deletes the active chat/group. (Alias: /d)\n" +
 		"* /nick [new_nick] - Sets or clears your nickname. (Alias: /n)\n" +
 		"* /pow [number] - Sets Proof-of-Work difficulty for the active chat/group. 0 to disable. (Alias: /p)\n" +
+		"* /dm <nick|@nick#xxxx|short_pubkey|pubkey> - Opens a private DM chat with the user (Alias: /pm). Use '/dm' with no args to disable.\n" +
+		"* /boop [on|off] - Toggle terminal bell sound for incoming private messages. (Alias: /sound)\n" +
 		"* /relay [<num>|url1...] - List, remove (#), or add anchor relays. (Alias: /r)\n" +
 		"* /block [@nick] - Blocks a user. Without nick, lists blocked users. (Alias: /b)\n" +
 		"* /unblock [<num>|@nick|pubkey] - Unblocks a user. Without args, lists blocked users. (Alias: /ub)\n" +

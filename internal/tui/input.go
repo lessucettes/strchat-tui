@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/gdamore/tcell/v2"
@@ -92,6 +93,8 @@ func (t *tui) setupHandlers() {
 			switch event.Rune() {
 			case 'c':
 				t.app.SetFocus(t.chatList)
+			case 'u':
+				t.app.SetFocus(t.userList)
 			case 'o':
 				t.app.SetFocus(t.output)
 			case 'i':
@@ -110,6 +113,9 @@ func (t *tui) setupHandlers() {
 
 		if currentFocus == t.chatList {
 			return t.handleChatListKeys(event)
+		}
+		if currentFocus == t.userList {
+			return t.handleUserListKeys(event)
 		}
 
 		if currentFocus == t.logs && event.Key() == tcell.KeyRune && event.Rune() == '`' {
@@ -207,6 +213,27 @@ func (t *tui) handleCommand(text string) {
 		}
 	case "/relay", "/r":
 		t.actionsChan <- client.UserAction{Type: "MANAGE_ANCHORS", Payload: payload}
+	case "/boop", "/sound":
+		arg := strings.ToLower(strings.TrimSpace(payload))
+		if arg == "" {
+			arg = "off"
+		}
+
+		switch arg {
+		case "on", "enable", "enabled":
+			t.boopEnabled = true
+			fmt.Fprintf(t.logs, "\n[%s]Boop sound enabled[-]", t.theme.logInfoColor)
+		case "off", "disable", "disabled", "0":
+			t.boopEnabled = false
+			fmt.Fprintf(t.logs, "\n[%s]Boop sound disabled[-]", t.theme.logWarnColor)
+		default:
+			fmt.Fprintf(t.logs, "\n[%s]ERROR: Usage: /boop on|off[-]", t.theme.logErrorColor)
+		}
+		t.logs.ScrollToEnd()
+		t.updateHints()
+		return
+	case "/dm", "/pm":
+		t.actionsChan <- client.UserAction{Type: "DM_USER", Payload: payload}
 	case "/help", "/h":
 		t.actionsChan <- client.UserAction{Type: "GET_HELP"}
 	}
@@ -214,7 +241,7 @@ func (t *tui) handleCommand(text string) {
 
 // cycleFocus cycles the focus between the main UI primitives.
 func (t *tui) cycleFocus(forward bool) {
-	primitives := []tview.Primitive{t.input, t.chatList, t.output, t.logs, t.detailsView}
+	primitives := []tview.Primitive{t.input, t.chatList, t.userList, t.output, t.logs, t.detailsView}
 	for i, p := range primitives {
 		if p.HasFocus() {
 			var next int
@@ -266,48 +293,141 @@ func (t *tui) handleChatListKeys(event *tcell.EventKey) *tcell.EventKey {
 	}
 
 	count := t.chatList.GetItemCount()
-	if count == 0 || len(t.views) == 0 {
+	if count == 0 || len(t.chatListItems) == 0 {
 		return event
 	}
 
 	cur := t.chatList.GetCurrentItem()
-	if cur < 0 || cur >= len(t.views) {
+	if cur < 0 || cur >= len(t.chatListItems) {
 		return event
 	}
 
-	selectedView := t.views[cur]
+	item := t.chatListItems[cur]
 	switch event.Key() {
 	case tcell.KeyRune:
 		if event.Rune() == ' ' {
-			if !selectedView.IsGroup {
-				if t.selectedForGroup[selectedView.Name] {
-					delete(t.selectedForGroup, selectedView.Name)
-				} else {
-					t.selectedForGroup[selectedView.Name] = true
+			if item.kind == chatListItemKindView && item.viewIndex >= 0 && item.viewIndex < len(t.views) {
+				selectedView := t.views[item.viewIndex]
+				if !selectedView.IsGroup {
+					if t.selectedForGroup[selectedView.Name] {
+						delete(t.selectedForGroup, selectedView.Name)
+					} else {
+						t.selectedForGroup[selectedView.Name] = true
+					}
+					t.updateChatList()
 				}
-				t.updateChatList()
 			}
 			return nil
 		}
 	case tcell.KeyEnter:
-		if len(t.selectedForGroup) > 1 {
-			var members []string
-			for name := range t.selectedForGroup {
-				members = append(members, name)
+		switch item.kind {
+		case chatListItemKindDM:
+			// Toggle DM off.
+			t.dmTargetPubKey = ""
+			t.dmTargetNick = ""
+			t.actionsChan <- client.UserAction{Type: "SET_DM_TARGET", Payload: ""}
+			t.updateChatList()
+			return nil
+		case chatListItemKindView:
+			selectedView := t.views[item.viewIndex]
+			if len(t.selectedForGroup) > 1 {
+				var members []string
+				for name := range t.selectedForGroup {
+					members = append(members, name)
+				}
+				t.actionsChan <- client.UserAction{Type: "CREATE_GROUP", Payload: strings.Join(members, ",")}
+			} else {
+				t.actionsChan <- client.UserAction{Type: "ACTIVATE_VIEW", Payload: selectedView.Name}
 			}
-			t.actionsChan <- client.UserAction{Type: "CREATE_GROUP", Payload: strings.Join(members, ",")}
-		} else {
-			t.actionsChan <- client.UserAction{Type: "ACTIVATE_VIEW", Payload: selectedView.Name}
+			t.selectedForGroup = make(map[string]bool)
+			return nil
 		}
-		t.selectedForGroup = make(map[string]bool)
-		return nil
 	case tcell.KeyDelete:
-		action := "LEAVE_CHAT"
-		if selectedView.IsGroup {
-			action = "DELETE_GROUP"
+		switch item.kind {
+		case chatListItemKindDM:
+			t.dmTargetPubKey = ""
+			t.dmTargetNick = ""
+			t.actionsChan <- client.UserAction{Type: "SET_DM_TARGET", Payload: ""}
+			t.updateChatList()
+			return nil
+		case chatListItemKindView:
+			selectedView := t.views[item.viewIndex]
+			action := "LEAVE_CHAT"
+			if selectedView.IsGroup {
+				action = "DELETE_GROUP"
+			}
+			t.actionsChan <- client.UserAction{Type: action, Payload: selectedView.Name}
+			return nil
 		}
-		t.actionsChan <- client.UserAction{Type: action, Payload: selectedView.Name}
+	}
+	return event
+}
+
+// handleUserListKeys handles key events for the user list view.
+func (t *tui) handleUserListKeys(event *tcell.EventKey) *tcell.EventKey {
+	if key := event.Key(); key == tcell.KeyUp || key == tcell.KeyDown || key == tcell.KeyHome || key == tcell.KeyEnd {
+		return event
+	}
+
+	cur := t.userList.GetCurrentItem()
+	if cur < 0 || cur >= len(t.chatUsers) {
+		return event
+	}
+
+	selected := t.chatUsers[cur]
+	switch {
+	case event.Key() == tcell.KeyEnter:
+		if selected.PubKey == "" {
+			return nil
+		}
+
+		// Toggle DM target.
+		if t.dmTargetPubKey == selected.PubKey {
+			t.dmTargetPubKey = ""
+			t.dmTargetNick = ""
+			t.actionsChan <- client.UserAction{Type: "SET_DM_TARGET", Payload: ""}
+		} else {
+			t.dmTargetPubKey = selected.PubKey
+			if selected.Nick != "" {
+				t.dmTargetNick = selected.Nick
+			} else {
+				t.dmTargetNick = selected.ShortPubKey
+			}
+			t.actionsChan <- client.UserAction{Type: "SET_DM_TARGET", Payload: selected.PubKey}
+		}
+
+		// Clear input; user types the DM message.
+		t.input.SetText("")
+		t.app.SetFocus(t.input)
+		t.updateInputLabel()
+		t.updateHints()
+		return nil
+	case event.Key() == tcell.KeyRune && event.Rune() == 'p':
+		// Same behavior as Enter for convenience.
+		if selected.PubKey == "" {
+			return nil
+		}
+
+		if t.dmTargetPubKey == selected.PubKey {
+			t.dmTargetPubKey = ""
+			t.dmTargetNick = ""
+			t.actionsChan <- client.UserAction{Type: "SET_DM_TARGET", Payload: ""}
+		} else {
+			t.dmTargetPubKey = selected.PubKey
+			if selected.Nick != "" {
+				t.dmTargetNick = selected.Nick
+			} else {
+				t.dmTargetNick = selected.ShortPubKey
+			}
+			t.actionsChan <- client.UserAction{Type: "SET_DM_TARGET", Payload: selected.PubKey}
+		}
+
+		t.input.SetText("")
+		t.app.SetFocus(t.input)
+		t.updateInputLabel()
+		t.updateHints()
 		return nil
 	}
+
 	return event
 }

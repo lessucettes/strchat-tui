@@ -421,6 +421,24 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 		}
 
 		if isRelevantToActiveView {
+			// DM mode: show only events exchanged between our pubkey and the
+			// selected DM target, within the currently subscribed chat scope.
+			if dmTarget := c.getDMTarget(); dmTarget != "" {
+				pTag := ev.Tags.Find("p")
+				if len(pTag) < 2 {
+					return
+				}
+				recipient := pTag[1]
+				// Accept both directions:
+				// - incoming: sender == dmTarget, recipient is any of our pubkeys
+				// - outgoing: sender is any of our pubkeys, recipient == dmTarget
+				ok := (ev.PubKey == dmTarget && c.isMyPubKey(recipient)) ||
+					(recipient == dmTarget && c.isMyPubKey(ev.PubKey))
+				if !ok {
+					return
+				}
+			}
+
 			requiredPoW := c.effectivePoWForChat(eventChat)
 			if !isPoWValid(ev, requiredPoW) {
 				log.Printf("Dropped event %s from %s for failing PoW check (required: %d)", safeSuffix(ev.ID, 4), eventChat, requiredPoW)
@@ -470,6 +488,21 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 			if ev.PubKey == s.pubKey {
 				isOwn = true
 				break
+			}
+		}
+	}
+
+	// Incoming DM log + optional bell: event has a `p` tag addressed to one
+	// of our pubkeys, and is authored by someone else.
+	if !isOwn {
+		if pTag := ev.Tags.Find("p"); len(pTag) > 1 {
+			recipient := pTag[1]
+			if c.isMyPubKey(recipient) {
+				c.eventsChan <- DisplayEvent{
+					Type:    "STATUS",
+					Content: fmt.Sprintf("New Private Message From %s", nick),
+					Payload: ChatUser{PubKey: ev.PubKey, Nick: nick, ShortPubKey: spk},
+				}
 			}
 		}
 	}
@@ -552,20 +585,32 @@ func (c *client) publishMessage(message string) {
 			return
 		}
 	} else {
-		activeView := c.getActiveView()
-		if activeView == nil {
-			c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "No active chat/group to send message to."}
-			return
+		// DM mode: when enabled and message doesn't start with '@',
+		// send it as a direct message to the selected DM target.
+		if dmTarget := c.getDMTarget(); dmTarget != "" {
+			targetPubKey = dmTarget
+			ctx, ok := c.userContext.Get(dmTarget)
+			if !ok || ctx.chat == "" {
+				c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "Unknown DM target chat context. Try sending once with '@' or wait for messages."}
+				return
+			}
+			targetChat = ctx.chat
+		} else {
+			activeView := c.getActiveView()
+			if activeView == nil {
+				c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "No active chat/group to send message to."}
+				return
+			}
+			if activeView.IsGroup {
+				c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "Broadcasting to a group is disabled. Use @nick to send a message."}
+				return
+			}
+			if activeView.Name == "" {
+				c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "The active chat is invalid."}
+				return
+			}
+			targetChat = activeView.Name
 		}
-		if activeView.IsGroup {
-			c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "Broadcasting to a group is disabled. Use @nick to send a message."}
-			return
-		}
-		if activeView.Name == "" {
-			c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "The active chat is invalid."}
-			return
-		}
-		targetChat = activeView.Name
 	}
 
 	var kind int
