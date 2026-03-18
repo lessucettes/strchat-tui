@@ -20,8 +20,7 @@ const (
 	orderingFlushDelay   = 200 * time.Millisecond
 	perStreamBufferMax   = 256
 	// How far back we ask relays for events to populate history on switch.
-	// Keep it small to avoid slow "replay" on relays.
-	messageHistoryLookback = 5 * time.Minute
+	messageHistoryLookback = 10 * time.Minute
 	// Per-filter maximum number of stored events to request.
 	// This prevents relays from sending an unbounded amount of history.
 	messageHistoryLimit = 2000

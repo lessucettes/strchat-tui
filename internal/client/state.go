@@ -328,11 +328,9 @@ func (c *client) getHelp() {
 		"* /join <chat1> [chat2]... - Joins one or more chats. (Alias: /j)\n" +
 		"* /set [name|names...] - Without args: shows active chat. With one name: activates a chat/group. With multiple names: creates a group. (Alias: /s)\n" +
 		"* /list - Lists all your chats and groups. (Alias: /l)\n" +
-		"* /del [name] - Deletes a chat/group. If no name, deletes the active chat/group. (Alias: /d)\n" +
+		"* /del [name] - Deletes/leaves a chat or group. If no name, deletes the active one. (Alias: /d, /leave)\n" +
 		"* /nick [new_nick] - Sets or clears your nickname. (Alias: /n)\n" +
 		"* /pow [number] - Sets Proof-of-Work difficulty for the active chat/group. 0 to disable. (Alias: /p)\n" +
-		"* /dm <nick|@nick#xxxx|short_pubkey|pubkey> - Opens a private DM chat with the user (Alias: /pm). Use '/dm' with no args to disable.\n" +
-		"* /boop [on|off] - Toggle terminal bell sound for incoming private messages. (Alias: /sound)\n" +
 		"* /relay [<num>|url1...] - List, remove (#), or add anchor relays. (Alias: /r)\n" +
 		"* /block [@nick] - Blocks a user. Without nick, lists blocked users. (Alias: /b)\n" +
 		"* /unblock [<num>|@nick|pubkey] - Unblocks a user. Without args, lists blocked users. (Alias: /ub)\n" +
@@ -405,47 +403,43 @@ func (c *client) setActiveView(name string) {
 		return
 	}
 
-	// When switching chats, we clear the global seen cache so that the relay
-	// backlog (requested with Since/Limit) can be re-rendered in the UI.
-	// Otherwise, events replayed after leaving/rejoining may be suppressed.
-	if prev != name {
-		c.resetSeenCache()
-	}
-
 	if !view.IsGroup {
-		// DM chats are scoped to (sender, recipient) and should be signed with our
-		// main key, not a generated ephemeral identity.
-		if !isDMChatName(name) {
-			sk := nostr.GeneratePrivateKey()
-			pk, _ := nostr.GetPublicKey(sk)
+		sk := nostr.GeneratePrivateKey()
+		pk, _ := nostr.GetPublicKey(sk)
 
-			nick := c.config.Nick
-			custom := false
-			if nick == "" {
-				nick = npubToTokiPona(pk)
-			} else {
-				custom = true
-			}
+		nick := c.config.Nick
+		custom := false
+		if nick == "" {
+			nick = npubToTokiPona(pk)
+		} else {
+			custom = true
+		}
 
-			c.chatKeys[name] = chatSession{
-				privKey:    sk,
-				pubKey:     pk,
-				nick:       nick,
-				customNick: custom,
-			}
+		c.chatKeys[name] = chatSession{
+			privKey:    sk,
+			pubKey:     pk,
+			nick:       nick,
+			customNick: custom,
+		}
 
-			npub, _ := nip19.EncodePublicKey(pk)
-			c.eventsChan <- DisplayEvent{
-				Type: "STATUS",
-				Content: fmt.Sprintf("Generated ephemeral identity for chat '%s': %s (%s)",
-					view.Name, npub, nick),
-			}
+		npub, _ := nip19.EncodePublicKey(pk)
+		c.eventsChan <- DisplayEvent{
+			Type: "STATUS",
+			Content: fmt.Sprintf("Generated ephemeral identity for chat '%s': %s (%s)",
+				view.Name, npub, nick),
 		}
 	}
 
+	// Update active view BEFORE refreshing subscriptions
 	c.config.ActiveViewName = name
 	c.saveConfig()
 	c.sendStateUpdate()
+
+	// When switching chats, force-refresh subscriptions so that the relay
+	// sends us the historical backlog again.
+	if prev != name {
+		go c.forceRefreshSubscriptions()
+	}
 }
 
 func (c *client) getActiveView() *View {

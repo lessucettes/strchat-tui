@@ -21,10 +21,6 @@ type client struct {
 	config   *config
 	chatKeys map[string]chatSession
 
-	// Private chat (DM) state
-	dmTargetPubKey string
-	dmMu            sync.RWMutex
-
 	// TUI I/O
 	actionsChan <-chan UserAction
 	eventsChan  chan<- DisplayEvent
@@ -73,6 +69,49 @@ func (c *client) resetSeenCache() {
 	c.seenCacheMu.Unlock()
 }
 
+// forceRefreshSubscriptions clears the seen cache and forces all relays to
+// re-subscribe with a fresh Since timestamp, making the relay send us
+// historical messages again. This is used when switching chats so the UI
+// can display message history.
+func (c *client) forceRefreshSubscriptions() {
+	c.resetSeenCache()
+
+	activeView := c.getActiveView()
+	activeChats := make(map[string]struct{})
+	if activeView != nil {
+		if activeView.IsGroup {
+			for _, child := range activeView.Children {
+				activeChats[child] = struct{}{}
+			}
+		} else if activeView.Name != "" {
+			activeChats[activeView.Name] = struct{}{}
+		}
+	}
+
+	if len(activeChats) == 0 {
+		return
+	}
+
+	desiredRelayToChats := make(map[string][]string)
+	for chat := range activeChats {
+		relayURLs := c.getRelayPoolForChat(chat)
+		for _, url := range relayURLs {
+			found := false
+			for _, existingChat := range desiredRelayToChats[url] {
+				if existingChat == chat {
+					found = true
+					break
+				}
+			}
+			if !found {
+				desiredRelayToChats[url] = append(desiredRelayToChats[url], chat)
+			}
+		}
+	}
+
+	c.updateRelaySubscriptionsWithRefresh(desiredRelayToChats, true)
+}
+
 func New(actions <-chan UserAction, events chan<- DisplayEvent) (*client, error) {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -81,6 +120,21 @@ func New(actions <-chan UserAction, events chan<- DisplayEvent) (*client, error)
 
 	if cfg.BlockedUsers == nil {
 		cfg.BlockedUsers = []blockedUser{}
+	}
+
+	// Remove legacy DM-prefixed views from config
+	cleanViews := make([]View, 0, len(cfg.Views))
+	for _, v := range cfg.Views {
+		if !strings.HasPrefix(v.Name, "DM-") {
+			cleanViews = append(cleanViews, v)
+		}
+	}
+	if len(cleanViews) != len(cfg.Views) {
+		cfg.Views = cleanViews
+		// Reset active view if it was a DM chat
+		if strings.HasPrefix(cfg.ActiveViewName, "DM-") {
+			cfg.ActiveViewName = ""
+		}
 	}
 
 	seenCache, err := lru.New[string, bool](seenCacheSize)
@@ -193,24 +247,17 @@ func (c *client) handleAction(action UserAction) {
 	case "SEND_MESSAGE":
 		go c.publishMessage(action.Payload)
 	case "ACTIVATE_VIEW":
-		c.clearDMTarget()
 		c.setActiveView(action.Payload)
 		c.flushAllOrdering()
-		c.updateAllSubscriptions()
 	case "CREATE_GROUP":
-		c.clearDMTarget()
 		c.createGroup(action.Payload)
 	case "JOIN_CHATS":
-		c.clearDMTarget()
 		c.joinChats(action.Payload)
 	case "LEAVE_CHAT":
-		c.clearDMTarget()
 		c.leaveChat(action.Payload)
 	case "DELETE_GROUP":
-		c.clearDMTarget()
 		c.deleteGroup(action.Payload)
 	case "DELETE_VIEW":
-		c.clearDMTarget()
 		c.deleteView(action.Payload)
 	case "REQUEST_NICK_COMPLETION":
 		c.handleNickCompletion(action.Payload)
@@ -246,20 +293,9 @@ func (c *client) handleAction(action UserAction) {
 		c.getHelp()
 	case "REQUEST_CHAT_USERS":
 		c.requestChatUsers(action.Payload)
-	case "SET_DM_TARGET":
-		c.setDMTarget(action.Payload)
-	case "DM_USER":
-		c.dmUser(action.Payload)
 	case "QUIT":
 		c.shutdown()
 	}
-}
-
-func (c *client) clearDMTarget() {
-	c.dmMu.Lock()
-	c.dmTargetPubKey = ""
-	c.dmMu.Unlock()
-	c.eventsChan <- DisplayEvent{Type: "DM_TARGET_UPDATE", Payload: ChatUser{}}
 }
 
 // manageAnchors handles adding/removing/listing anchor relays.

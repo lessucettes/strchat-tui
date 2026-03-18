@@ -90,6 +90,10 @@ func (c *client) updateAllSubscriptions() {
 }
 
 func (c *client) updateRelaySubscriptions(desiredRelays map[string][]string) {
+	c.updateRelaySubscriptionsWithRefresh(desiredRelays, false)
+}
+
+func (c *client) updateRelaySubscriptionsWithRefresh(desiredRelays map[string][]string, forceRefresh bool) {
 	c.relaysMu.Lock()
 	currentRelays := make(map[string]*managedRelay, len(c.relays))
 	maps.Copy(currentRelays, c.relays)
@@ -106,7 +110,7 @@ func (c *client) updateRelaySubscriptions(desiredRelays map[string][]string) {
 			wg.Add(1)
 			go func(mr *managedRelay, chats []string) {
 				defer wg.Done()
-				if _, err := c.replaceSubscription(mr, chats); err != nil {
+				if _, err := c.replaceSubscriptionWithRefresh(mr, chats, forceRefresh); err != nil {
 					c.eventsChan <- DisplayEvent{
 						Type:    "ERROR",
 						Content: fmt.Sprintf("Resubscribe failed on %s: %v", mr.url, err),
@@ -206,11 +210,15 @@ func (c *client) manageRelayConnection(url string, chats []string) {
 }
 
 func (c *client) replaceSubscription(mr *managedRelay, chats []string) (bool, error) {
+	return c.replaceSubscriptionWithRefresh(mr, chats, false)
+}
+
+func (c *client) replaceSubscriptionWithRefresh(mr *managedRelay, chats []string, forceRefresh bool) (bool, error) {
 	mr.mu.Lock()
 	oldChats := mrCurrentChatsLocked(mr.subscription)
 	mr.mu.Unlock()
 
-	if sameStringSet(oldChats, chats) {
+	if !forceRefresh && sameStringSet(oldChats, chats) {
 		return false, nil
 	}
 
@@ -450,24 +458,6 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 		}
 
 		if isRelevantToActiveView {
-			// DM mode: show only events exchanged between our pubkey and the
-			// selected DM target, within the currently subscribed chat scope.
-			if dmTarget := c.getDMTarget(); dmTarget != "" {
-				pTag := ev.Tags.Find("p")
-				if len(pTag) < 2 {
-					return
-				}
-				recipient := pTag[1]
-				// Accept both directions:
-				// - incoming: sender == dmTarget, recipient is any of our pubkeys
-				// - outgoing: sender is any of our pubkeys, recipient == dmTarget
-				ok := (ev.PubKey == dmTarget && c.isMyPubKey(recipient)) ||
-					(recipient == dmTarget && c.isMyPubKey(ev.PubKey))
-				if !ok {
-					return
-				}
-			}
-
 			requiredPoW := c.effectivePoWForChat(eventChat)
 			if !isPoWValid(ev, requiredPoW) {
 				log.Printf("Dropped event %s from %s for failing PoW check (required: %d)", safeSuffix(ev.ID, 4), eventChat, requiredPoW)
@@ -538,21 +528,6 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 			if ev.PubKey == s.pubKey {
 				isOwn = true
 				break
-			}
-		}
-	}
-
-	// Incoming DM log + optional bell: event has a `p` tag addressed to one
-	// of our pubkeys, and is authored by someone else.
-	if !isOwn {
-		if pTag := ev.Tags.Find("p"); len(pTag) > 1 {
-			recipient := pTag[1]
-			if c.isMyPubKey(recipient) {
-				c.eventsChan <- DisplayEvent{
-					Type:    "STATUS",
-					Content: fmt.Sprintf("New Private Message From %s", nick),
-					Payload: ChatUser{PubKey: ev.PubKey, Nick: nick, ShortPubKey: spk, Chat: eventChat},
-				}
 			}
 		}
 	}
@@ -635,27 +610,20 @@ func (c *client) publishMessage(message string) {
 			return
 		}
 	} else {
-		// DM mode: when enabled and message doesn't start with '@',
-		// send it as a direct message to the selected DM target.
-		if dmTarget := c.getDMTarget(); dmTarget != "" {
-			targetPubKey = dmTarget
-			targetChat = dmChatName(c.pk, dmTarget)
-		} else {
-			activeView := c.getActiveView()
-			if activeView == nil {
-				c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "No active chat/group to send message to."}
-				return
-			}
-			if activeView.IsGroup {
-				c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "Broadcasting to a group is disabled. Use @nick to send a message."}
-				return
-			}
-			if activeView.Name == "" {
-				c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "The active chat is invalid."}
-				return
-			}
-			targetChat = activeView.Name
+		activeView := c.getActiveView()
+		if activeView == nil {
+			c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "No active chat/group to send message to."}
+			return
 		}
+		if activeView.IsGroup {
+			c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "Broadcasting to a group is disabled. Use @nick to send a message."}
+			return
+		}
+		if activeView.Name == "" {
+			c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "The active chat is invalid."}
+			return
+		}
+		targetChat = activeView.Name
 	}
 
 	var kind int
@@ -726,14 +694,6 @@ func (c *client) createEvent(message string, kind int, tags nostr.Tags, difficul
 	if active != nil && !active.IsGroup {
 		if session, ok := c.chatKeys[active.Name]; ok && session.nick != "" {
 			baseTags = append(baseTags, nostr.Tag{"n", session.nick})
-		} else if isDMChatName(active.Name) {
-			// DM chats don't use ephemeral per-user identity, so ensure we still
-			// include a stable display name.
-			nick := c.config.Nick
-			if nick == "" {
-				nick = npubToTokiPona(c.pk)
-			}
-			baseTags = append(baseTags, nostr.Tag{"n", nick})
 		}
 	} else if active != nil && active.IsGroup {
 		nick := c.config.Nick

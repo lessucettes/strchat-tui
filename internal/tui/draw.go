@@ -18,38 +18,13 @@ func (t *tui) updateChatList() {
 	t.chatList.Clear()
 	t.chatListItems = nil
 
-	// Layout: DM item (if enabled) at the top, then joined views.
-	dmItemCount := 0
-	if t.dmTargetPubKey != "" {
-		dmItemCount = 1
-	}
-
-	// Clamp current index in case panel size changed.
 	if currentItem < 0 {
 		currentItem = 0
 	}
 
-	if t.dmTargetPubKey != "" {
-		t.chatListItems = append(t.chatListItems, chatListItem{
-			kind:     chatListItemKindDM,
-			dmPubKey: t.dmTargetPubKey,
-			dmNick:   t.dmTargetNick,
-		})
-
-		nick := t.dmTargetNick
-		if nick == "" {
-			nick = t.dmTargetPubKey
-			if len(nick) > 10 {
-				nick = nick[:4] + "..." + nick[len(nick)-4:]
-			}
-		}
-
-		t.chatList.AddItem(fmt.Sprintf(" ▶ DM %s", nick), "", 0, nil)
-	}
-
 	for i, view := range t.views {
-		// Skip the dedicated DM view entry; we display DM as a dedicated top item.
-		if t.dmTargetChat != "" && view.Name == t.dmTargetChat {
+		// Skip legacy DM-prefixed views (they were created by old DM logic).
+		if strings.HasPrefix(view.Name, "DM-") {
 			continue
 		}
 		var prefix string
@@ -72,19 +47,15 @@ func (t *tui) updateChatList() {
 		}
 
 		t.chatListItems = append(t.chatListItems, chatListItem{
-			kind:      chatListItemKindView,
 			viewIndex: i,
 		})
 
 		t.chatList.AddItem(fmt.Sprintf(" %s %s", prefix, viewName), "", 0, nil)
 	}
 
-	// Prefer selecting active DM when DM is enabled, else select active view.
 	targetIndex := 0
-	if t.dmTargetPubKey != "" {
-		targetIndex = 0
-	} else if t.activeViewIndex >= 0 {
-		targetIndex = t.activeViewIndex + dmItemCount
+	if t.activeViewIndex >= 0 {
+		targetIndex = t.activeViewIndex
 	}
 
 	if targetIndex < 0 {
@@ -117,8 +88,6 @@ func (t *tui) updateUserList() {
 	})
 
 	for _, u := range t.chatUsers {
-		// Colorize the user's name using the same palette as chat messages.
-		// Keep everything on a single line (nick + short pubkey hash).
 		colorTag := pubkeyToColor(u.PubKey, t.theme.nickPalette)
 		short := u.ShortPubKey
 		if short == "" {
@@ -153,7 +122,7 @@ func (t *tui) updateDetailsView() {
 
 	item := t.chatListItems[currentIndex]
 	var selectedView *client.View
-	if item.kind == chatListItemKindView && item.viewIndex >= 0 && item.viewIndex < len(t.views) {
+	if item.viewIndex >= 0 && item.viewIndex < len(t.views) {
 		selectedView = &t.views[item.viewIndex]
 	}
 
@@ -165,7 +134,6 @@ func (t *tui) updateDetailsView() {
 		}
 		fmt.Fprint(t.detailsView, builder.String())
 	} else {
-		// For DM we still show relay connectivity (same as non-group views).
 		var builder strings.Builder
 		builder.WriteString(fmt.Sprintf("[%s]Connected Relays:[-]\n", t.theme.logWarnColor))
 
@@ -205,20 +173,7 @@ func (t *tui) updateInputLabel() {
 		youHash = t.selfShortPubKey
 	}
 
-	if t.dmTargetPubKey != "" {
-		label := t.dmTargetNick
-		if label == "" {
-			label = t.dmTargetPubKey
-			if len(label) > 10 {
-				label = label[:4] + "..." + label[len(label)-4:]
-			}
-		}
-		if youHash != "" {
-			t.input.SetLabel(fmt.Sprintf("DM %s (you #%s) > ", label, youHash))
-		} else {
-			t.input.SetLabel(fmt.Sprintf("DM %s > ", label))
-		}
-	} else if t.nick != "" {
+	if t.nick != "" {
 		if youHash != "" {
 			t.input.SetLabel(fmt.Sprintf("%s #%s > ", t.nick, youHash))
 		} else {
@@ -269,17 +224,13 @@ func (t *tui) updateHints() {
 	} else {
 		switch t.app.GetFocus() {
 		case t.input:
-			if t.dmTargetPubKey != "" {
-				hintText = fmt.Sprintf("[%[1]s]Enter[-]: Send DM | [%[1]s]Ctrl+P/N[-]: History | [%[1]s]Tab/Shift+Tab[-]: Cycle Focus | %s", highlight, baseHints)
-			} else {
-				hintText = fmt.Sprintf("[%[1]s]Enter[-]: Send | [%[1]s]Ctrl+P/N[-]: History | [%[1]s]Tab/Shift+Tab[-]: Cycle Focus | %s", highlight, baseHints)
-			}
+			hintText = fmt.Sprintf("[%[1]s]Enter[-]: Send | [%[1]s]Ctrl+P/N[-]: History | [%[1]s]Tab/Shift+Tab[-]: Cycle Focus | %s", highlight, baseHints)
 		case t.output:
 			hintText = fmt.Sprintf("[%[1]s]`[-]: Maximize | [%[1]s]↑/↓[-]: Scroll | [%[1]s]Tab/Shift+Tab[-]: Cycle Focus | %s", highlight, baseHints)
 		case t.detailsView:
 			hintText = fmt.Sprintf("[%[1]s]↑/↓[-]: Scroll | [%[1]s]Tab/Shift+Tab[-]: Cycle Focus | %s", highlight, baseHints)
 		case t.userList:
-			hintText = fmt.Sprintf("[%[1]s]Enter[-]: Open DM | [%[1]s]Tab/Shift+Tab[-]: Cycle Focus | %s", highlight, baseHints)
+			hintText = fmt.Sprintf("[%[1]s]Enter[-]: Reply | [%[1]s]Tab/Shift+Tab[-]: Cycle Focus | %s", highlight, baseHints)
 		case t.chatList:
 			hintText = fmt.Sprintf("[%[1]s]Space[-]: Select | [%[1]s]Enter[-]: Activate | [%[1]s]Del[-]: Delete | [%[1]s]Tab/Shift+Tab[-]: Cycle Focus | %s", highlight, baseHints)
 		case t.logs:

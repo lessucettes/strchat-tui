@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"os"
 	"slices"
 	"strings"
 	"time"
@@ -56,38 +55,16 @@ type tui struct {
 
 	chatListItems []chatListItem
 
-	// Private chat (DM) state (client-side; actual filtering is done in client)
-	dmTargetPubKey string
-	dmTargetNick   string
-	dmTargetChat   string
-
 	// Input-specific state
 
 	completionEntries []string
 	recentRecipients  []string
 	rrIdx             int
 	lastNickQuery     string
-
-	// Sound (bell) on incoming private messages
-	boopEnabled bool
 }
 
-type chatListItemKind int
-
-const (
-	chatListItemKindView chatListItemKind = iota
-	chatListItemKindDM
-)
-
 type chatListItem struct {
-	kind chatListItemKind
-
-	// For kind=View
 	viewIndex int
-
-	// For kind=DM
-	dmPubKey string
-	dmNick   string
 }
 
 // New creates and initializes the entire TUI application.
@@ -103,15 +80,11 @@ func New(actions chan<- client.UserAction, events <-chan client.DisplayEvent) *t
 		activeViewIndex:   0,
 		chatUsers:         []client.ChatUser{},
 		chatUsersByPubKey: make(map[string]client.ChatUser),
-		dmTargetPubKey:   "",
-		dmTargetNick:     "",
-		dmTargetChat:    "",
 		completionEntries: []string{},
 		recentRecipients:  []string{},
 		rrIdx:             -1,
 		lastNickQuery:     "",
 		theme:             defaultTheme,
-		boopEnabled:      true,
 	}
 
 	t.setupViews()
@@ -380,8 +353,6 @@ func (t *tui) listenForEvents(events <-chan client.DisplayEvent) {
 				t.handleNickCompletion(event)
 			case "CHAT_USERS_UPDATE":
 				t.handleChatUsersUpdate(event)
-			case "DM_TARGET_UPDATE":
-				t.handleDMTargetUpdate(event)
 			case "CHAT_USER_DISCOVERED":
 				t.handleChatUserDiscovered(event)
 			}
@@ -474,14 +445,6 @@ func (t *tui) handleLogMessage(event client.DisplayEvent) {
 		color = t.theme.logErrorColor
 	}
 	fmt.Fprintf(t.logs, "\n[%s][%s] %s: %s[-]", color, time.Now().Format("15:04:05"), event.Type, event.Content)
-
-	// Incoming private message bell (optional).
-	if t.boopEnabled && event.Type == "STATUS" {
-		if _, ok := event.Payload.(client.ChatUser); ok && strings.HasPrefix(event.Content, "New Private Message From ") {
-			// Use terminal bell character. Works in most terminal setups.
-			_, _ = fmt.Fprint(os.Stderr, "\a")
-		}
-	}
 	if !t.logsMaximized {
 		t.logs.ScrollToEnd()
 	}
@@ -582,30 +545,6 @@ func (t *tui) handleChatUserDiscovered(event client.DisplayEvent) {
 	}
 
 	t.updateUserList()
-}
-
-func (t *tui) handleDMTargetUpdate(event client.DisplayEvent) {
-	target, ok := event.Payload.(client.ChatUser)
-	if !ok {
-		return
-	}
-
-	// Clear visible message history when toggling/changing DM.
-	t.output.Clear()
-	t.output.ScrollToBeginning()
-
-	t.dmTargetPubKey = target.PubKey
-	t.dmTargetNick = target.Nick
-	t.dmTargetChat = target.Chat
-
-	if t.dmTargetPubKey == "" {
-		t.dmTargetNick = ""
-		t.dmTargetChat = ""
-	}
-
-	t.updateChatList()
-	t.updateInputLabel()
-	t.updateHints()
 }
 
 func (t *tui) requestChatUsersForActiveView() {

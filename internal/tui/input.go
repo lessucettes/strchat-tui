@@ -181,7 +181,7 @@ func (t *tui) handleCommand(text string) {
 		}
 	case "/nick", "/n":
 		t.actionsChan <- client.UserAction{Type: "SET_NICK", Payload: payload}
-	case "/del", "/d":
+	case "/del", "/d", "/leave":
 		t.actionsChan <- client.UserAction{Type: "DELETE_VIEW", Payload: payload}
 	case "/block", "/b":
 		if payload == "" {
@@ -213,27 +213,6 @@ func (t *tui) handleCommand(text string) {
 		}
 	case "/relay", "/r":
 		t.actionsChan <- client.UserAction{Type: "MANAGE_ANCHORS", Payload: payload}
-	case "/boop", "/sound":
-		arg := strings.ToLower(strings.TrimSpace(payload))
-		if arg == "" {
-			arg = "off"
-		}
-
-		switch arg {
-		case "on", "enable", "enabled":
-			t.boopEnabled = true
-			fmt.Fprintf(t.logs, "\n[%s]Boop sound enabled[-]", t.theme.logInfoColor)
-		case "off", "disable", "disabled", "0":
-			t.boopEnabled = false
-			fmt.Fprintf(t.logs, "\n[%s]Boop sound disabled[-]", t.theme.logWarnColor)
-		default:
-			fmt.Fprintf(t.logs, "\n[%s]ERROR: Usage: /boop on|off[-]", t.theme.logErrorColor)
-		}
-		t.logs.ScrollToEnd()
-		t.updateHints()
-		return
-	case "/dm", "/pm":
-		t.actionsChan <- client.UserAction{Type: "DM_USER", Payload: payload}
 	case "/help", "/h":
 		t.actionsChan <- client.UserAction{Type: "GET_HELP"}
 	}
@@ -303,64 +282,43 @@ func (t *tui) handleChatListKeys(event *tcell.EventKey) *tcell.EventKey {
 	}
 
 	item := t.chatListItems[cur]
+	if item.viewIndex < 0 || item.viewIndex >= len(t.views) {
+		return event
+	}
+	selectedView := t.views[item.viewIndex]
+
 	switch event.Key() {
 	case tcell.KeyRune:
 		if event.Rune() == ' ' {
-			if item.kind == chatListItemKindView && item.viewIndex >= 0 && item.viewIndex < len(t.views) {
-				selectedView := t.views[item.viewIndex]
-				if !selectedView.IsGroup {
-					if t.selectedForGroup[selectedView.Name] {
-						delete(t.selectedForGroup, selectedView.Name)
-					} else {
-						t.selectedForGroup[selectedView.Name] = true
-					}
-					t.updateChatList()
+			if !selectedView.IsGroup {
+				if t.selectedForGroup[selectedView.Name] {
+					delete(t.selectedForGroup, selectedView.Name)
+				} else {
+					t.selectedForGroup[selectedView.Name] = true
 				}
+				t.updateChatList()
 			}
 			return nil
 		}
 	case tcell.KeyEnter:
-		switch item.kind {
-		case chatListItemKindDM:
-			// Toggle DM off.
-			t.dmTargetPubKey = ""
-			t.dmTargetNick = ""
-			t.dmTargetChat = ""
-			t.actionsChan <- client.UserAction{Type: "SET_DM_TARGET", Payload: ""}
-			t.updateChatList()
-			return nil
-		case chatListItemKindView:
-			selectedView := t.views[item.viewIndex]
-			if len(t.selectedForGroup) > 1 {
-				var members []string
-				for name := range t.selectedForGroup {
-					members = append(members, name)
-				}
-				t.actionsChan <- client.UserAction{Type: "CREATE_GROUP", Payload: strings.Join(members, ",")}
-			} else {
-				t.actionsChan <- client.UserAction{Type: "ACTIVATE_VIEW", Payload: selectedView.Name}
+		if len(t.selectedForGroup) > 1 {
+			var members []string
+			for name := range t.selectedForGroup {
+				members = append(members, name)
 			}
-			t.selectedForGroup = make(map[string]bool)
-			return nil
+			t.actionsChan <- client.UserAction{Type: "CREATE_GROUP", Payload: strings.Join(members, ",")}
+		} else {
+			t.actionsChan <- client.UserAction{Type: "ACTIVATE_VIEW", Payload: selectedView.Name}
 		}
+		t.selectedForGroup = make(map[string]bool)
+		return nil
 	case tcell.KeyDelete:
-		switch item.kind {
-		case chatListItemKindDM:
-			t.dmTargetPubKey = ""
-			t.dmTargetNick = ""
-			t.dmTargetChat = ""
-			t.actionsChan <- client.UserAction{Type: "SET_DM_TARGET", Payload: ""}
-			t.updateChatList()
-			return nil
-		case chatListItemKindView:
-			selectedView := t.views[item.viewIndex]
-			action := "LEAVE_CHAT"
-			if selectedView.IsGroup {
-				action = "DELETE_GROUP"
-			}
-			t.actionsChan <- client.UserAction{Type: action, Payload: selectedView.Name}
-			return nil
+		action := "LEAVE_CHAT"
+		if selectedView.IsGroup {
+			action = "DELETE_GROUP"
 		}
+		t.actionsChan <- client.UserAction{Type: action, Payload: selectedView.Name}
+		return nil
 	}
 	return event
 }
@@ -377,79 +335,14 @@ func (t *tui) handleUserListKeys(event *tcell.EventKey) *tcell.EventKey {
 	}
 
 	selected := t.chatUsers[cur]
-	switch {
-	case event.Key() == tcell.KeyEnter:
+	if event.Key() == tcell.KeyEnter {
 		if selected.PubKey == "" {
 			return nil
 		}
-
-		// Toggle DM target.
-		if t.dmTargetPubKey == selected.PubKey {
-			t.dmTargetPubKey = ""
-			t.dmTargetNick = ""
-			t.dmTargetChat = ""
-			t.actionsChan <- client.UserAction{Type: "SET_DM_TARGET", Payload: ""}
-		} else {
-			t.dmTargetPubKey = selected.PubKey
-			if selected.Nick != "" {
-				t.dmTargetNick = selected.Nick
-			} else {
-				t.dmTargetNick = selected.ShortPubKey
-			}
-			chat := selected.Chat
-			if chat == "" && len(t.views) > 0 && t.activeViewIndex >= 0 && t.activeViewIndex < len(t.views) {
-				// Best-effort fallback for cases where user's chat isn't populated yet.
-				// This ensures DM scope matches the currently visible chat scope.
-				if !t.views[t.activeViewIndex].IsGroup {
-					chat = t.views[t.activeViewIndex].Name
-				}
-			}
-			t.actionsChan <- client.UserAction{
-				Type:    "SET_DM_TARGET",
-				Payload: selected.PubKey + "|" + chat,
-			}
-		}
-
-		// Clear input; user types the DM message.
-		t.input.SetText("")
+		// Insert @nick#hash prefix into input field for quick reply
+		prefix := fmt.Sprintf("@%s#%s ", selected.Nick, selected.ShortPubKey)
+		t.input.SetText(prefix)
 		t.app.SetFocus(t.input)
-		t.updateInputLabel()
-		t.updateHints()
-		return nil
-	case event.Key() == tcell.KeyRune && event.Rune() == 'p':
-		// Same behavior as Enter for convenience.
-		if selected.PubKey == "" {
-			return nil
-		}
-
-		if t.dmTargetPubKey == selected.PubKey {
-			t.dmTargetPubKey = ""
-			t.dmTargetNick = ""
-			t.dmTargetChat = ""
-			t.actionsChan <- client.UserAction{Type: "SET_DM_TARGET", Payload: ""}
-		} else {
-			t.dmTargetPubKey = selected.PubKey
-			if selected.Nick != "" {
-				t.dmTargetNick = selected.Nick
-			} else {
-				t.dmTargetNick = selected.ShortPubKey
-			}
-			chat := selected.Chat
-			if chat == "" && len(t.views) > 0 && t.activeViewIndex >= 0 && t.activeViewIndex < len(t.views) {
-				if !t.views[t.activeViewIndex].IsGroup {
-					chat = t.views[t.activeViewIndex].Name
-				}
-			}
-			t.actionsChan <- client.UserAction{
-				Type:    "SET_DM_TARGET",
-				Payload: selected.PubKey + "|" + chat,
-			}
-		}
-
-		t.input.SetText("")
-		t.app.SetFocus(t.input)
-		t.updateInputLabel()
-		t.updateHints()
 		return nil
 	}
 
