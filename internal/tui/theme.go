@@ -13,7 +13,6 @@ type theme struct {
 	logInfoColor    tcell.Color
 	logWarnColor    tcell.Color
 	logErrorColor   tcell.Color
-	nickPalette     []string
 }
 
 // defaultTheme is the standard green-on-black theme.
@@ -27,13 +26,6 @@ var defaultTheme = &theme{
 	logInfoColor:    tcell.ColorGrey,
 	logWarnColor:    tcell.ColorYellow,
 	logErrorColor:   tcell.ColorRed,
-	nickPalette: []string{
-		"[#33ccff]", // Cyan
-		"[#ff00ff]", // Magenta
-		"[#ffff00]", // Yellow
-		"[#6600ff]", // Purple
-		"[#ff6347]", // Red
-	},
 }
 
 // monochromeTheme is a simple black and white theme for high contrast.
@@ -47,7 +39,4 @@ var monochromeTheme = &theme{
 	logInfoColor:    tcell.ColorWhite,
 	logWarnColor:    tcell.ColorWhite,
 	logErrorColor:   tcell.ColorWhite,
-	nickPalette: []string{
-		"[white]",
-	},
 }

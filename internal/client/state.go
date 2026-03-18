@@ -338,6 +338,8 @@ func (c *client) getHelp() {
 		"* /unfilter [<num>] - Removes a filter by number. Without args, clears all. (Alias: /uf)\n" +
 		"* /mute [word|regex|<num>] - Adds a mute. Without args, lists mutes. With number, toggles off/on. (Alias: /m)\n" +
 		"* /unmute [<num>] - Removes a mute by number. Without args, clears all. (Alias: /um)\n" +
+		"* /follow - Toggle auto-scrolling new messages to the bottom.\n" +
+		"* /clear - Clears the Messages window (display only). (Alias: /c)\n" +
 		"* /quit - Exits the application. (Alias: /q)"
 
 	c.eventsChan <- DisplayEvent{Type: "INFO", Content: helpText}

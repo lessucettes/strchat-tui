@@ -88,7 +88,7 @@ func (t *tui) updateUserList() {
 	})
 
 	for idx, u := range t.chatUsers {
-		colorTag := pubkeyToColor(u.PubKey, t.theme.nickPalette)
+		colorTag := pubkeyToNickColorTag(u.PubKey)
 		short := u.ShortPubKey
 		if short == "" {
 			if len(u.PubKey) >= 4 {
@@ -109,7 +109,18 @@ func (t *tui) updateUserList() {
 
 // updateDetailsView refreshes the details panel, showing relays or group members.
 func (t *tui) updateDetailsView() {
-	t.detailsView.SetTitle(titleInfo)
+	onlineCount := 0
+	for _, r := range t.relays {
+		if r.Connected {
+			onlineCount++
+		}
+	}
+
+	if t.narrowMode {
+		t.detailsView.SetTitle(fmt.Sprintf("%s ONLINE: %d", titleInfoShort, onlineCount))
+	} else {
+		t.detailsView.SetTitle(fmt.Sprintf("%s ONLINE: %d", titleInfo, onlineCount))
+	}
 	t.detailsView.Clear()
 
 	if t.chatList.GetItemCount() == 0 || len(t.chatListItems) == 0 {
@@ -175,12 +186,31 @@ func (t *tui) updateInputLabel() {
 
 	if t.nick != "" {
 		if youHash != "" {
-			t.input.SetLabel(fmt.Sprintf("%s #%s > ", t.nick, youHash))
+			t.input.SetLabel(fmt.Sprintf("%s#%s > ", t.nick, youHash))
 		} else {
 			t.input.SetLabel(fmt.Sprintf("%s > ", t.nick))
 		}
 	} else {
 		t.input.SetLabel("> ")
+	}
+	t.updateInputTitle()
+}
+
+// updateInputTitle shows reply target in the input frame title when replying.
+func (t *tui) updateInputTitle() {
+	if t.pendingReply == nil {
+		if t.narrowMode {
+			t.input.SetTitle(titleInputShort)
+		} else {
+			t.input.SetTitle(titleInput)
+		}
+		return
+	}
+	ref := fmt.Sprintf("@%s#%s", t.pendingReply.Nick, t.pendingReply.ShortPubKey)
+	if t.narrowMode {
+		t.input.SetTitle(fmt.Sprintf("%s Reply %s Alt+Q", titleInputShort, ref))
+	} else {
+		t.input.SetTitle(fmt.Sprintf("%s Reply to %s: (Alt+Q) to cancel", titleInput, ref))
 	}
 }
 
@@ -196,7 +226,7 @@ func (t *tui) updateFocusBorders() {
 		t.userList:    false,
 		t.detailsView: false,
 		t.output:      false,
-		t.input:       false,
+		t.input: false,
 	}
 
 	if _, ok := components[currentFocus]; ok {
@@ -209,24 +239,49 @@ func (t *tui) updateFocusBorders() {
 	t.detailsView.SetBorderColor(map[bool]tcell.Color{true: focusedColor, false: unfocusedColor}[components[t.detailsView]])
 	t.output.SetBorderColor(map[bool]tcell.Color{true: focusedColor, false: unfocusedColor}[components[t.output]])
 	t.input.SetBorderColor(map[bool]tcell.Color{true: focusedColor, false: unfocusedColor}[components[t.input]])
+
+	// Only visually highlight the selected message when messages are focused.
+	if t.app.GetFocus() == t.output {
+		t.output.SetSelectedBackgroundColor(t.theme.borderColor)
+	} else {
+		t.output.SetSelectedBackgroundColor(t.theme.backgroundColor)
+	}
+
+	// Only visually highlight the selected user when Users panel is focused.
+	if t.app.GetFocus() == t.userList {
+		t.userList.SetSelectedBackgroundColor(t.theme.borderColor)
+	} else {
+		t.userList.SetSelectedBackgroundColor(t.theme.backgroundColor)
+	}
 }
 
 // updateHints displays context-sensitive hints for the user.
 func (t *tui) updateHints() {
 	var hintText string
 	highlight := t.theme.titleColor
-	baseHints := fmt.Sprintf("[%[1]s]Alt+...[-]: Focus | [%[1]s]Ctrl+C[-]: Quit", highlight)
+	baseHints := fmt.Sprintf("[%[1]s]Alt+...[-]: Focus", highlight)
+
+	// Keep selection highlight in sync with focus (important after maximize/minimize).
+	if t.app.GetFocus() == t.output {
+		t.output.SetSelectedBackgroundColor(t.theme.borderColor)
+	} else {
+		t.output.SetSelectedBackgroundColor(t.theme.backgroundColor)
+	}
 
 	if t.logsMaximized {
-		hintText = fmt.Sprintf("[%[1]s]`[-]: Restore | [%[1]s]↑/↓[-]: Scroll | [%[1]s]Ctrl+C[-]: Quit", highlight)
+		hintText = fmt.Sprintf("[%[1]s]`[-]: Restore | [%[1]s]↑/↓[-]: Scroll", highlight)
 	} else if t.outputMaximized {
-		hintText = fmt.Sprintf("[%[1]s]`[-]: Restore | [%[1]s]↑/↓[-]: Scroll | [%[1]s]Ctrl+C[-]: Quit", highlight)
+		hintText = fmt.Sprintf("[%[1]s]`[-]: Restore | [%[1]s]↑/↓[-]: Scroll", highlight)
 	} else {
 		switch t.app.GetFocus() {
 		case t.input:
-			hintText = fmt.Sprintf("[%[1]s]Enter[-]: Send | [%[1]s]Ctrl+P/N[-]: History | [%[1]s]Tab/Shift+Tab[-]: Cycle Focus | %s", highlight, baseHints)
+			if t.pendingReply != nil {
+				hintText = fmt.Sprintf("[%[1]s]Enter[-]: Send reply | [%[1]s]Alt+Q[-]: Cancel reply | [%[1]s]Ctrl+P/N[-]: History | %s", highlight, baseHints)
+			} else {
+				hintText = fmt.Sprintf("[%[1]s]Enter[-]: Send | [%[1]s]Ctrl+P/N[-]: History | [%[1]s]Tab/Shift+Tab[-]: Cycle Focus | %s", highlight, baseHints)
+			}
 		case t.output:
-			hintText = fmt.Sprintf("[%[1]s]`[-]: Maximize | [%[1]s]↑/↓[-]: Scroll | [%[1]s]Tab/Shift+Tab[-]: Cycle Focus | %s", highlight, baseHints)
+			hintText = fmt.Sprintf("[%[1]s]Enter[-]: @nick#id in input | [%[1]s]`[-]: Maximize | [%[1]s]↑/↓[-]: Scroll | [%[1]s]Tab/Shift+Tab[-]: Cycle | %s", highlight, baseHints)
 		case t.detailsView:
 			hintText = fmt.Sprintf("[%[1]s]↑/↓[-]: Scroll | [%[1]s]Tab/Shift+Tab[-]: Cycle Focus | %s", highlight, baseHints)
 		case t.userList:

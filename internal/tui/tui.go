@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -28,10 +29,13 @@ type tui struct {
 	detailsView         *tview.TextView
 	logs                *tview.TextView
 	maximizedLogsFlex   *tview.Flex
-	output              *tview.TextView
+	output              *tview.List
 	maximizedOutputFlex *tview.Flex
 	input               *tview.InputField
 	hints               *tview.TextView
+	wideComposerFlex    *tview.Flex
+	wideBottomFlex      *tview.Flex
+	narrowComposerFlex  *tview.Flex
 
 	// UI State
 
@@ -39,6 +43,9 @@ type tui struct {
 	outputMaximized bool
 	narrowMode      bool
 	theme           *theme
+
+	narrowFlex         *tview.Flex
+	contentGrid        *tview.Grid // wide layout middle (messages + sidebar)
 
 	// Current user's identity short prefix (for the active view).
 	selfShortPubKey string
@@ -56,6 +63,8 @@ type tui struct {
 
 	chatListItems []chatListItem
 
+	outputMessages []outputMessage
+
 	userPruneStopCh chan struct{}
 
 	// Resize/layout switching (debounced).
@@ -69,10 +78,29 @@ type tui struct {
 	recentRecipients  []string
 	rrIdx             int
 	lastNickQuery     string
+
+	// Follow means: when enabled, always keep the message list scrolled to newest.
+	followEnabled bool
+
+	pendingReply *pendingReply
 }
 
 type chatListItem struct {
 	viewIndex int
+}
+
+type outputMessage struct {
+	Replyable   bool
+	Nick        string
+	ShortPubKey string
+	Content     string
+}
+
+// pendingReply holds the message being replied to (input title + send formatting).
+type pendingReply struct {
+	Nick        string
+	ShortPubKey string
+	Content     string
 }
 
 // New creates and initializes the entire TUI application.
@@ -94,6 +122,7 @@ func New(actions chan<- client.UserAction, events <-chan client.DisplayEvent) *t
 		lastNickQuery:     "",
 		theme:             defaultTheme,
 		userPruneStopCh:  make(chan struct{}),
+		followEnabled:   true,
 	}
 
 	t.setupViews()
@@ -128,14 +157,14 @@ const (
 	titleChats    = "Chats (Alt+C)"
 	titleUsers    = "Users (Alt+U)"
 	titleInfo     = "Info (Alt+N)"
-	titleMessages = "Messages (Alt+O)"
+	titleMessages = "Messages (Alt+M)"
 	titleInput    = "Input (Alt+I)"
 
 	titleLogsShort     = "Alt+L"
 	titleChatsShort    = "Alt+C"
 	titleUsersShort    = "Alt+U"
 	titleInfoShort     = "Alt+N"
-	titleMessagesShort = "Alt+O"
+	titleMessagesShort = "Alt+M"
 	titleInputShort    = "Alt+I"
 )
 
@@ -152,6 +181,33 @@ func (t *tui) applyTheme() {
 	tview.Styles.PrimaryTextColor = t.theme.textColor
 	tview.Styles.BorderColor = t.theme.borderColor
 	tview.Styles.TitleColor = t.theme.titleColor
+}
+
+func (t *tui) followTitleSuffix() string {
+	if t.followEnabled {
+		return " | FOLLOW: ON"
+	}
+	return " | FOLLOW: OFF"
+}
+
+func (t *tui) refreshFollowTitle() {
+	// FOLLOW status must always be shown on the Messages window.
+	if t.narrowMode {
+		t.output.SetTitle(titleMessagesShort + t.followTitleSuffix())
+	} else {
+		t.output.SetTitle(titleMessages + t.followTitleSuffix())
+	}
+}
+
+// jumpToLastMessage moves selection to the newest message (used when FOLLOW turns ON).
+func (t *tui) jumpToLastMessage() {
+	if t.output == nil {
+		return
+	}
+	n := t.output.GetItemCount()
+	if n > 0 {
+		t.output.SetCurrentItem(n - 1)
+	}
 }
 
 // initViews initializes all the individual widgets for the TUI.
@@ -184,11 +240,14 @@ func (t *tui) initViews() {
 		SetChangedFunc(func() { t.app.Draw() })
 	t.detailsView.SetBorder(true).SetTitle(titleInfo).SetTitleAlign(tview.AlignLeft)
 
-	t.output = tview.NewTextView().
-		SetDynamicColors(true).
-		SetScrollable(true).
-		SetChangedFunc(func() { t.app.Draw() })
-	t.output.SetBorder(true).SetTitle(titleMessages).SetTitleAlign(tview.AlignLeft)
+	t.output = tview.NewList().
+		ShowSecondaryText(false).
+		// Hide selection highlight when messages are not focused.
+		SetSelectedBackgroundColor(t.theme.backgroundColor).
+		SetSelectedTextColor(t.theme.textColor).
+		SetMainTextColor(t.theme.textColor).
+		SetHighlightFullLine(false)
+	t.output.SetBorder(true).SetTitle(titleMessages+t.followTitleSuffix()).SetTitleAlign(tview.AlignLeft)
 
 	t.input = tview.NewInputField().
 		SetLabelStyle(tcell.StyleDefault.Foreground(t.theme.titleColor)).
@@ -230,20 +289,24 @@ func (t *tui) initLayout() {
 		AddItem(t.userList, 0, 1, false).
 		AddItem(t.detailsView, 0, 2, false)
 
-	contentGrid := tview.NewGrid().SetBorders(false)
+	t.contentGrid = tview.NewGrid().SetBorders(false)
+	contentGrid := t.contentGrid
 
-	// Narrow layout: chat + input only (no logs, no right sidebar, no hints).
-	bottomInputFlex := tview.NewFlex().
+	t.wideComposerFlex = tview.NewFlex().
 		SetDirection(tview.FlexRow).
 		AddItem(t.input, 0, 1, true)
-
-	narrowFlex := tview.NewFlex().
+	t.wideBottomFlex = tview.NewFlex().
 		SetDirection(tview.FlexRow).
-		// Output takes all remaining vertical space.
+		AddItem(t.wideComposerFlex, 0, 1, true).
+		AddItem(t.hints, 1, 0, false)
+
+	t.narrowComposerFlex = tview.NewFlex().
+		SetDirection(tview.FlexRow).
+		AddItem(t.input, 0, 1, true)
+	t.narrowFlex = tview.NewFlex().
+		SetDirection(tview.FlexRow).
 		AddItem(t.output, 0, 1, false).
-		// Bottom input gets a small fixed height so chat reaches the bottom.
-		// Use a minimal fixed height to maximize chat area.
-		AddItem(bottomInputFlex, 1, 0, false)
+		AddItem(t.narrowComposerFlex, 1, 0, false)
 
 	const narrowWidth = 100
 	t.app.SetBeforeDrawFunc(func(screen tcell.Screen) bool {
@@ -271,23 +334,24 @@ func (t *tui) initLayout() {
 					}
 					if narrow {
 						t.narrowMode = true
-						t.logs.SetTitle(titleLogsShort)
-						t.output.SetTitle(titleMessagesShort)
+						t.logs.SetTitle(titleLogsShort).SetTitleAlign(tview.AlignLeft)
+						t.output.SetTitle(titleMessagesShort + t.followTitleSuffix())
 						t.chatList.SetTitle(titleChatsShort)
 						t.userList.SetTitle(titleUsersShort)
 						t.detailsView.SetTitle(titleInfoShort)
-						t.input.SetTitle(titleInputShort)
-						t.input.SetLabel("> ")
-						t.app.SetRoot(narrowFlex, true).SetFocus(t.input)
+						t.updateInputLabel()
+						t.restoreNarrowComposerNormal()
+						t.app.SetRoot(t.narrowFlex, true).SetFocus(t.input)
 					} else {
 						t.narrowMode = false
-						t.logs.SetTitle(titleLogs)
-						t.output.SetTitle(titleMessages)
+						t.logs.SetTitle(titleLogs).SetTitleAlign(tview.AlignLeft)
+						t.output.SetTitle(titleMessages + t.followTitleSuffix())
 						t.chatList.SetTitle(titleChats)
 						t.userList.SetTitle(titleUsers)
 						t.detailsView.SetTitle(titleInfo)
 						t.input.SetTitle(titleInput)
 						t.updateInputLabel()
+						t.restoreWideComposerNormal()
 						t.app.SetRoot(t.mainFlex, true)
 					}
 				})
@@ -308,17 +372,6 @@ func (t *tui) initLayout() {
 		return false
 	})
 
-	bottomFlex := tview.NewFlex().
-		SetDirection(tview.FlexRow).
-		AddItem(t.input, 0, 1, true).
-		AddItem(t.hints, 1, 0, false)
-
-	t.mainFlex = tview.NewFlex().
-		SetDirection(tview.FlexRow).
-		AddItem(t.logs, 3, 0, false).
-		AddItem(contentGrid, 0, 1, false).
-		AddItem(bottomFlex, 4, 0, true)
-
 	t.maximizedLogsFlex = tview.NewFlex().
 		SetDirection(tview.FlexRow).
 		AddItem(t.logs, 0, 1, true).
@@ -328,6 +381,111 @@ func (t *tui) initLayout() {
 		SetDirection(tview.FlexRow).
 		AddItem(t.output, 0, 1, true).
 		AddItem(t.hints, 1, 0, false)
+
+	t.mainFlex = tview.NewFlex().SetDirection(tview.FlexRow)
+	t.rebuildMainFlexBottom(wideBottomRowsNormal)
+}
+
+const wideBottomRowsNormal = 4
+
+// @nick#4char — RE2 has no lookahead; boundary checked in nickHashMentionIndices.
+var atNickHashRe = regexp.MustCompile(`@([a-zA-Z0-9_]+)#([a-zA-Z0-9]{4})`)
+
+func nickHashMentionIndices(s string) [][]int {
+	var out [][]int
+	i := 0
+	for i < len(s) {
+		loc := atNickHashRe.FindStringSubmatchIndex(s[i:])
+		if loc == nil {
+			break
+		}
+		for j := range loc {
+			loc[j] += i
+		}
+		fe := loc[1]
+		validEnd := fe >= len(s)
+		if !validEnd {
+			c := s[fe]
+			validEnd = !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+				(c >= '0' && c <= '9') || c == '_' || c == '#')
+		}
+		if validEnd {
+			out = append(out, loc)
+			i = fe
+		} else {
+			i = loc[0] + 1
+		}
+	}
+	return out
+}
+
+func (t *tui) formatContentWithNickMentions(content string) string {
+	if len(t.chatUsersByPubKey) == 0 {
+		return content
+	}
+	lookup := make(map[string]string, len(t.chatUsersByPubKey)*2)
+	for pk, u := range t.chatUsersByPubKey {
+		if u.Nick == "" || u.ShortPubKey == "" {
+			continue
+		}
+		sh := strings.ToLower(u.ShortPubKey)
+		if len(sh) > 4 {
+			sh = sh[len(sh)-4:]
+		}
+		lookup[strings.ToLower(u.Nick)+"#"+sh] = pk
+	}
+	idxs := nickHashMentionIndices(content)
+	if len(idxs) == 0 {
+		return content
+	}
+	var b strings.Builder
+	prev := 0
+	for _, loc := range idxs {
+		fullStart, fullEnd := loc[0], loc[1]
+		nick := strings.ToLower(content[loc[2]:loc[3]])
+		hsh := strings.ToLower(content[loc[4]:loc[5]])
+		key := nick + "#" + hsh
+		b.WriteString(content[prev:fullStart])
+		if pk, ok := lookup[key]; ok {
+			b.WriteString(pubkeyToNickColorTag(pk))
+			b.WriteString(content[fullStart:fullEnd])
+			b.WriteString("[-]")
+		} else {
+			b.WriteString(content[fullStart:fullEnd])
+		}
+		prev = fullEnd
+	}
+	b.WriteString(content[prev:])
+	return b.String()
+}
+
+// rebuildMainFlexBottom sets how many terminal rows the wide-mode input strip uses.
+func (t *tui) rebuildMainFlexBottom(bottomFixed int) {
+	if t.mainFlex == nil || t.contentGrid == nil {
+		return
+	}
+	t.mainFlex.Clear()
+	t.mainFlex.AddItem(t.logs, 3, 0, false).
+		AddItem(t.contentGrid, 0, 1, false).
+		AddItem(t.wideBottomFlex, bottomFixed, 0, true)
+}
+
+// restoreWideComposerNormal puts single-line input back in the wide bottom area.
+func (t *tui) restoreWideComposerNormal() {
+	t.wideComposerFlex.Clear()
+	t.wideComposerFlex.AddItem(t.input, 0, 1, true)
+	t.wideBottomFlex.Clear()
+	t.wideBottomFlex.AddItem(t.wideComposerFlex, 0, 1, true).AddItem(t.hints, 1, 0, false)
+	t.rebuildMainFlexBottom(wideBottomRowsNormal)
+}
+
+// restoreNarrowComposerNormal: chat + single-line input (narrow).
+func (t *tui) restoreNarrowComposerNormal() {
+	t.narrowFlex.Clear()
+	t.narrowFlex.AddItem(t.output, 0, 1, false)
+	t.narrowComposerFlex.Clear()
+	t.narrowComposerFlex.AddItem(t.input, 0, 1, true)
+	t.narrowFlex.AddItem(t.narrowComposerFlex, 1, 0, false)
 }
 
 // handleAutocomplete provides completion entries for the input field.
@@ -479,64 +637,152 @@ func (t *tui) handleNewMessage(event client.DisplayEvent) {
 			showMessage = true
 		}
 	}
-	if showMessage {
-		nickColorTag := pubkeyToColor(event.FullPubKey, t.theme.nickPalette)
+	if !showMessage {
+		return
+	}
 
-		ownColorTag := fmt.Sprintf("[%s]", t.theme.inputTextColor)
-		ownNickTag := fmt.Sprintf("[%s::b]", t.theme.inputTextColor)
+	// Smart follow: only select new message when user was already at bottom.
+	itemCountBefore := t.output.GetItemCount()
+	currentSelBefore := t.output.GetCurrentItem()
+	shouldFollow := itemCountBefore == 0 || currentSelBefore == itemCountBefore-1
+	if t.followEnabled {
+		shouldFollow = true
+	}
 
-		mention := "@" + t.nick
-		content := event.Content
-		if t.nick != "" && strings.Contains(content, mention) {
-			content = strings.ReplaceAll(
-				content,
-				mention,
-				fmt.Sprintf("[%s::b]%s[-::-]", t.theme.inputTextColor, mention),
-			)
-		}
+	nickColorTag := pubkeyToNickColorTag(event.FullPubKey)
+	ownColorTag := fmt.Sprintf("[%s]", t.theme.inputTextColor)
+	ownNickTag := fmt.Sprintf("[%s::b]", t.theme.inputTextColor)
 
-		label := ""
-		activeView := t.views[t.activeViewIndex]
+	label := ""
+	if activeView.IsGroup {
+		label = fmt.Sprintf("[%s]%s[-] ", t.theme.titleColor, event.Chat)
+	}
+
+	// Keep content single-line for list rendering.
+	content := strings.ReplaceAll(event.Content, "\n", " ")
+	mentionMe := !event.IsOwnMessage && isSelfMentionedInContent(content, t.nick, t.selfShortPubKey)
+
+	// Muted dark bar + white text (readable, not loud yellow).
+	const mentionBg = "#2a3544"
+	const mentionFg = "#f8fafc"
+	const mentionMeta = "#94a3b8"
+
+	if t.nick != "" && !mentionMe {
+		content = highlightPlainMentionOfMe(content, t.nick, t.theme.inputTextColor)
+	}
+	content = t.formatContentWithNickMentions(content)
+
+	var display string
+	if mentionMe {
+		mc := strings.ReplaceAll(event.Content, "\n", " ")
+		mc = t.formatContentWithNickMentions(mc)
+		var b strings.Builder
+		b.WriteString(fmt.Sprintf("[%s:%s]", mentionFg, mentionBg))
 		if activeView.IsGroup {
-			label = fmt.Sprintf("[%s]%s[-] ", t.theme.titleColor, event.Chat)
+			b.WriteString(event.Chat)
+			b.WriteString(" ")
 		}
-
-		if event.IsOwnMessage {
-			fmt.Fprintf(
-				t.output,
-				"\n%s%s%s[-::-]#%s> %s%s[-] [%s][%s %s][-]",
-				label,
-				ownNickTag, event.Nick, event.ShortPubKey,
-				ownColorTag, content,
-				t.theme.logInfoColor, event.ID, event.Timestamp,
-			)
-		} else {
-			fmt.Fprintf(
-				t.output,
-				"\n%s%s%s[-::-]#%s> %s [%s][%s %s][-]",
-				label,
-				nickColorTag, event.Nick, event.ShortPubKey,
-				content,
-				t.theme.logInfoColor, event.ID, event.Timestamp,
-			)
-		}
+		b.WriteString(event.Nick)
+		b.WriteString("#")
+		b.WriteString(event.ShortPubKey)
+		b.WriteString("> ")
+		b.WriteString(mc)
+		b.WriteString(fmt.Sprintf(" [%s:%s]", mentionMeta, mentionBg))
+		b.WriteString(event.ID)
+		b.WriteString(" ")
+		b.WriteString(event.Timestamp)
+		b.WriteString("[-]")
+		display = b.String()
+	} else if event.IsOwnMessage {
+		display = fmt.Sprintf(
+			"%s%s%s[-]#%s> %s%s[-] [%s][%s %s][-]",
+			label,
+			ownNickTag, event.Nick,
+			event.ShortPubKey,
+			ownColorTag, content,
+			t.theme.logInfoColor, event.ID, event.Timestamp,
+		)
+	} else {
+		display = fmt.Sprintf(
+			"%s%s%s[-]#%s> %s [%s][%s %s][-]",
+			label,
+			nickColorTag, event.Nick,
+			event.ShortPubKey,
+			content,
+			t.theme.logInfoColor, event.ID, event.Timestamp,
+		)
 	}
 
-	if showMessage {
-		t.maybeUpsertChatUserFromEvent(event)
+	t.output.AddItem(display, "", 0, nil)
+	t.outputMessages = append(t.outputMessages, outputMessage{
+		Replyable:   true,
+		Nick:        event.Nick,
+		ShortPubKey: event.ShortPubKey,
+		Content:     event.Content,
+	})
+
+	if shouldFollow {
+		t.output.SetCurrentItem(t.output.GetItemCount() - 1)
 	}
-	if !t.outputMaximized {
-		t.output.ScrollToEnd()
+
+	t.maybeUpsertChatUserFromEvent(event)
+}
+
+// clearMessagesWindow clears the visible Messages list (local UI only).
+func (t *tui) clearMessagesWindow() {
+	if t.output == nil {
+		return
+	}
+	t.output.Clear()
+	t.outputMessages = nil
+	if t.output.GetItemCount() > 0 {
+		t.output.SetCurrentItem(0)
 	}
 }
 
 // handleInfoMessage displays a generic informational message in the output view.
 func (t *tui) handleInfoMessage(event client.DisplayEvent) {
-	content := tview.Escape(strings.TrimSpace(event.Content))
-	fmt.Fprintf(t.output, "\n[%s]-- %s[-]", t.theme.titleColor, content)
-	if !t.outputMaximized {
-		t.output.ScrollToEnd()
+	if t.output == nil {
+		return
 	}
+	content := strings.TrimSpace(event.Content)
+	t.output.AddItem(fmt.Sprintf("-- %s", content), "", 0, nil)
+	t.outputMessages = append(t.outputMessages, outputMessage{Replyable: false})
+}
+
+// replyToSelectedMessage starts reply mode: title shows target; send prepends quote block.
+func (t *tui) replyToSelectedMessage() {
+	if t.output == nil || t.outputMessages == nil {
+		return
+	}
+	idx := t.output.GetCurrentItem()
+	if idx < 0 || idx >= len(t.outputMessages) {
+		return
+	}
+	m := t.outputMessages[idx]
+	if !m.Replyable {
+		return
+	}
+
+	go func() {
+		t.app.QueueUpdateDraw(func() {
+			t.pendingReply = &pendingReply{
+				Nick:        m.Nick,
+				ShortPubKey: m.ShortPubKey,
+				Content:     m.Content,
+			}
+			t.input.SetText("")
+			t.updateInputLabel()
+			t.app.SetFocus(t.input)
+			t.updateHints()
+			t.updateFocusBorders()
+		})
+	}()
+}
+
+func (t *tui) clearPendingReply() {
+	t.pendingReply = nil
+	t.updateInputLabel()
 }
 
 // handleLogMessage displays a status or error message in the logs view.
@@ -568,8 +814,10 @@ func (t *tui) handleStateUpdate(event client.DisplayEvent) {
 	// Clear visible message history when switching chats.
 	// Old messages will be re-rendered from the relay backlog (lookback+limit).
 	if prevActiveIndex != t.activeViewIndex {
+		t.pendingReply = nil
 		t.output.Clear()
-		t.output.ScrollToBeginning()
+		t.outputMessages = nil
+		t.output.SetCurrentItem(0)
 	}
 
 	t.updateChatList()
@@ -711,14 +959,49 @@ func (t *tui) maybeUpsertChatUserFromEvent(event client.DisplayEvent) {
 	t.updateUserList()
 }
 
+// inputShouldReceiveTabForAutocomplete is true when Tab should go to the input (pick completion)
+// instead of cycling focus — global capture normally eats Tab before tview sees it.
+func (t *tui) inputShouldReceiveTabForAutocomplete() bool {
+	if t.app.GetFocus() != t.input {
+		return false
+	}
+	text := t.input.GetText()
+	trimmed := strings.TrimSpace(text)
+	if strings.HasPrefix(trimmed, "/block ") ||
+		strings.HasPrefix(trimmed, "/unblock ") ||
+		strings.HasPrefix(trimmed, "/b ") ||
+		strings.HasPrefix(trimmed, "/ub ") {
+		parts := strings.SplitN(text, " ", 2)
+		return len(parts) >= 2 && len(t.completionEntries) > 0
+	}
+	nick, complete := extractNickPrefix(text)
+	return !complete && nick != "" && len(t.completionEntries) > 0
+}
+
 // handleNickCompletion provides completion entries to the input field.
 func (t *tui) handleNickCompletion(event client.DisplayEvent) {
 	entries, ok := event.Payload.([]string)
 	if !ok {
 		return
 	}
-	//	if len(entries) == 0 && len(t.completionEntries) > 0 { return }
 	t.completionEntries = entries
+	if len(entries) == 1 {
+		text := t.input.GetText()
+		nick, complete := extractNickPrefix(text)
+		if !complete && nick != "" {
+			lastAt := strings.LastIndex(text, "@")
+			if lastAt >= 0 {
+				ent := strings.TrimSpace(entries[0])
+				ent = strings.TrimPrefix(ent, "@")
+				cname, _, _ := strings.Cut(ent, "#")
+				if strings.HasPrefix(strings.ToLower(cname), strings.ToLower(nick)) {
+					t.input.SetText(text[:lastAt] + entries[0])
+					t.completionEntries = nil
+					return
+				}
+			}
+		}
+	}
 	t.input.Autocomplete()
 }
 

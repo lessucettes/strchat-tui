@@ -17,7 +17,6 @@ func (t *tui) setupHandlers() {
 		if key != tcell.KeyEnter {
 			return
 		}
-		defer t.input.SetText("")
 
 		text := strings.TrimSpace(t.input.GetText())
 		if text == "" {
@@ -25,13 +24,32 @@ func (t *tui) setupHandlers() {
 		}
 
 		if strings.HasPrefix(text, "/") {
+			if t.pendingReply != nil {
+				t.clearPendingReply()
+			}
 			t.handleCommand(text)
-		} else {
-			t.actionsChan <- client.UserAction{Type: "SEND_MESSAGE", Payload: text}
+			t.input.SetText("")
+			return
 		}
 
-		// Logic to add the recipient to the recent recipients list.
-		if !strings.HasPrefix(text, "/") {
+		var payload string
+		wasReply := t.pendingReply != nil
+		if pr := t.pendingReply; pr != nil {
+			quoted := strings.ReplaceAll(strings.TrimSpace(pr.Content), "\n", " ")
+			payload = fmt.Sprintf("> @%s#%s: %s\n\n%s", pr.Nick, pr.ShortPubKey, quoted, text)
+			if graphemeLen(payload) > client.MaxMsgLen {
+				fmt.Fprintf(t.logs, "\n[%s]Reply too long (max %d graphemes)[-]", t.theme.logErrorColor, client.MaxMsgLen)
+				return
+			}
+			t.clearPendingReply()
+		} else {
+			payload = text
+		}
+
+		t.input.SetText("")
+		t.actionsChan <- client.UserAction{Type: "SEND_MESSAGE", Payload: payload}
+
+		if !wasReply {
 			nick, complete := extractNickPrefix(text)
 			if complete {
 				nick = strings.TrimPrefix(nick, "@")
@@ -82,20 +100,31 @@ func (t *tui) setupHandlers() {
 
 		switch event.Key() {
 		case tcell.KeyTab:
+			if t.inputShouldReceiveTabForAutocomplete() {
+				return event
+			}
 			t.cycleFocus(true)
 			return nil
 		case tcell.KeyBacktab:
+			if t.inputShouldReceiveTabForAutocomplete() {
+				return event
+			}
 			t.cycleFocus(false)
 			return nil
 		}
 
 		if event.Modifiers() == tcell.ModAlt {
+			if (event.Rune() == 'q' || event.Rune() == 'Q') && t.pendingReply != nil {
+				t.clearPendingReply()
+				t.updateHints()
+				return nil
+			}
 			switch event.Rune() {
 			case 'c':
 				t.app.SetFocus(t.chatList)
 			case 'u':
 				t.app.SetFocus(t.userList)
-			case 'o':
+			case 'm', 'M':
 				t.app.SetFocus(t.output)
 			case 'i':
 				t.app.SetFocus(t.input)
@@ -116,6 +145,10 @@ func (t *tui) setupHandlers() {
 		}
 		if currentFocus == t.userList {
 			return t.handleUserListKeys(event)
+		}
+		if currentFocus == t.output && event.Key() == tcell.KeyEnter {
+			t.replyToSelectedMessage()
+			return nil
 		}
 
 		if currentFocus == t.logs && event.Key() == tcell.KeyRune && event.Rune() == '`' {
@@ -156,6 +189,13 @@ func (t *tui) handleCommand(text string) {
 	switch command {
 	case "/quit", "/q":
 		t.actionsChan <- client.UserAction{Type: "QUIT"}
+	case "/follow":
+		wasOn := t.followEnabled
+		t.followEnabled = !t.followEnabled
+		t.refreshFollowTitle()
+		if t.followEnabled && !wasOn {
+			t.jumpToLastMessage()
+		}
 	case "/join", "/j":
 		if payload != "" {
 			t.actionsChan <- client.UserAction{Type: "JOIN_CHATS", Payload: payload}
@@ -213,6 +253,8 @@ func (t *tui) handleCommand(text string) {
 		}
 	case "/relay", "/r":
 		t.actionsChan <- client.UserAction{Type: "MANAGE_ANCHORS", Payload: payload}
+	case "/clear", "/c":
+		t.clearMessagesWindow()
 	case "/help", "/h":
 		t.actionsChan <- client.UserAction{Type: "GET_HELP"}
 	}
@@ -252,6 +294,11 @@ func (t *tui) handleMaximizedViewKeys(event *tcell.EventKey) *tcell.EventKey {
 				t.app.SetRoot(t.mainFlex, true).SetFocus(t.output)
 			}
 			t.updateHints()
+			return nil
+		}
+	case tcell.KeyEnter:
+		if currentFocus == t.output {
+			t.replyToSelectedMessage()
 			return nil
 		}
 	case tcell.KeyCtrlC:
