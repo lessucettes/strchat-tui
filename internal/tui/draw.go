@@ -76,10 +76,19 @@ func (t *tui) updateChatList() {
 func (t *tui) refreshUserListTitle() {
 	n := len(t.chatUsers)
 	if t.narrowMode {
-		t.userList.SetTitle(fmt.Sprintf("%s %d", titleUsersShort, n))
+		t.userList.SetTitle(fmt.Sprintf("%s (Alt+U) ONLINE: %d", titleUsersShort, n))
 	} else {
 		t.userList.SetTitle(fmt.Sprintf("%s %d", titleUsers, n))
 	}
+}
+
+func (t *tui) updateRelaysFooter() {
+	if t.relaysFooter == nil {
+		return
+	}
+	s := fmt.Sprintf(" [%s]RELAYS UP:[-] %d  [%s]DOWN:[-] [%s]%d[-]",
+		t.theme.titleColor, t.relaysUpCount, t.theme.logErrorColor, t.theme.logErrorColor, t.relaysDownCount)
+	t.relaysFooter.SetText(s)
 }
 
 // updateUserList refreshes the users panel for the currently active view.
@@ -220,17 +229,10 @@ func (t *tui) updateDetailsView() {
 		prev = t.detailsView.GetCurrentItem()
 	}
 
-	onlineCount := 0
-	for _, r := range t.relays {
-		if r.Connected {
-			onlineCount++
-		}
-	}
-
 	if t.narrowMode {
-		t.detailsView.SetTitle(fmt.Sprintf("%s RELAYS UP: %d", titleInfoShort, onlineCount))
+		t.relaysPanel.SetTitle(titleRelaysShort)
 	} else {
-		t.detailsView.SetTitle(fmt.Sprintf("%s RELAYS UP: %d", titleInfo, onlineCount))
+		t.relaysPanel.SetTitle(titleRelays)
 	}
 	t.detailsView.Clear()
 
@@ -242,12 +244,14 @@ func (t *tui) updateDetailsView() {
 
 	if t.chatList.GetItemCount() == 0 || len(t.chatListItems) == 0 {
 		t.detailsView.AddItem("— select a chat —", "", 0, nil)
+		t.updateRelaysFooter()
 		t.detailsView.SetCurrentItem(0)
 		return
 	}
 	currentIndex := t.chatList.GetCurrentItem()
 	if currentIndex >= len(t.chatListItems) || currentIndex < 0 {
 		t.detailsView.AddItem("— select a chat —", "", 0, nil)
+		t.updateRelaysFooter()
 		t.detailsView.SetCurrentItem(0)
 		return
 	}
@@ -294,6 +298,8 @@ func (t *tui) updateDetailsView() {
 			}
 		}
 	}
+
+	t.updateRelaysFooter()
 
 	n := t.detailsView.GetItemCount()
 	if n > 0 {
@@ -354,19 +360,19 @@ func (t *tui) updateFocusBorders() {
 		t.logs:        false,
 		t.chatList:    false,
 		t.userList:    false,
-		t.detailsView: false,
+		t.relaysPanel: false,
 		t.output:      false,
-		t.input: false,
+		t.input:       false,
 	}
 
 	if _, ok := components[currentFocus]; ok {
 		components[currentFocus] = true
 	}
-
+	relaysFocused := currentFocus == t.detailsView
 	t.logs.SetBorderColor(map[bool]tcell.Color{true: focusedColor, false: unfocusedColor}[components[t.logs]])
 	t.chatList.SetBorderColor(map[bool]tcell.Color{true: focusedColor, false: unfocusedColor}[components[t.chatList]])
 	t.userList.SetBorderColor(map[bool]tcell.Color{true: focusedColor, false: unfocusedColor}[components[t.userList]])
-	t.detailsView.SetBorderColor(map[bool]tcell.Color{true: focusedColor, false: unfocusedColor}[components[t.detailsView]])
+	t.relaysPanel.SetBorderColor(map[bool]tcell.Color{true: focusedColor, false: unfocusedColor}[relaysFocused])
 	t.output.SetBorderColor(map[bool]tcell.Color{true: focusedColor, false: unfocusedColor}[components[t.output]])
 	t.input.SetBorderColor(map[bool]tcell.Color{true: focusedColor, false: unfocusedColor}[components[t.input]])
 

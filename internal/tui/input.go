@@ -130,7 +130,7 @@ func (t *tui) setupHandlers() {
 				t.app.SetFocus(t.input)
 			case 'l':
 				t.app.SetFocus(t.logs)
-			case 'n':
+			case 'r', 'R':
 				t.app.SetFocus(t.detailsView)
 			}
 			t.updateFocusBorders()

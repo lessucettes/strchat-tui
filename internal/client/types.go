@@ -47,6 +47,13 @@ type RelayInfo struct {
 	Connected bool
 }
 
+// RelaysPanelUpdate is sent with RELAYS_UPDATE for the RELAYS TUI panel.
+type RelaysPanelUpdate struct {
+	Relays    []RelayInfo
+	UpCount   int // connected among desired URLs
+	DownCount int // desired minus up (fail cache, pending, disconnected)
+}
+
 // DisplayEvent represents an event sent from the client to the TUI for display.
 type DisplayEvent struct {
 	Type         string

@@ -26,6 +26,8 @@ type tui struct {
 	chatList            *tview.List
 	userList            *tview.List
 	detailsView         *tview.List
+	relaysFooter        *tview.TextView
+	relaysPanel         *tview.Flex
 	logs                *tview.TextView
 	maximizedLogsFlex   *tview.Flex
 	output              *tview.List
@@ -53,6 +55,8 @@ type tui struct {
 
 	views            []client.View
 	relays           []client.RelayInfo
+	relaysUpCount    int
+	relaysDownCount  int
 	selectedForGroup map[string]bool
 	activeViewIndex  int
 	nick             string
@@ -165,19 +169,19 @@ func (lw *logWriter) Write(p []byte) (int, error) {
 
 // Widget titles.
 const (
-	titleLogs     = "Logs (Alt+L)"
-	titleChats    = "Chats (Alt+C)"
-	titleUsers    = "(Alt+U) USERS ONLINE:"
-	titleInfo     = "Info (Alt+N)"
-	titleMessages = "Messages (Alt+M)"
-	titleInput    = "Input (Alt+I)"
+	titleLogs     = "LOGS (Alt+L)"
+	titleChats    = "CHATS (Alt+C)"
+	titleUsers    = "USERS (Alt+U) ONLINE:"
+	titleRelays   = "RELAYS (Alt+R)"
+	titleMessages = "MESSAGES (Alt+M)"
+	titleInput    = "INPUT (Alt+I)"
 
-	titleLogsShort     = "Alt+L"
-	titleChatsShort    = "Alt+C"
-	titleUsersShort    = "Alt+U USERS ONLINE:"
-	titleInfoShort     = "Alt+N"
-	titleMessagesShort = "Alt+M"
-	titleInputShort    = "Alt+I"
+	titleLogsShort     = "LOGS"
+	titleChatsShort    = "CHATS"
+	titleUsersShort    = "USERS"
+	titleRelaysShort   = "RELAYS"
+	titleMessagesShort = "MESSAGES"
+	titleInputShort    = "INPUT"
 )
 
 // setupViews creates and configures all the visual primitives of the TUI.
@@ -254,7 +258,15 @@ func (t *tui) initViews() {
 		ShowSecondaryText(false).
 		SetSelectedBackgroundColor(t.theme.borderColor).
 		SetSelectedTextColor(t.theme.listSelectedFg)
-	t.detailsView.SetBorder(true).SetTitle(titleInfo).SetTitleAlign(tview.AlignLeft)
+	t.relaysFooter = tview.NewTextView().
+		SetDynamicColors(true).
+		SetTextAlign(tview.AlignLeft).
+		SetWrap(false)
+	t.relaysPanel = tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(t.detailsView, 0, 1, true).
+		AddItem(t.relaysFooter, 1, 0, false)
+	t.relaysPanel.SetBorder(true).SetTitle(titleRelays).SetTitleAlign(tview.AlignLeft)
+	t.updateRelaysFooter()
 
 	t.output = tview.NewList().
 		ShowSecondaryText(false).
@@ -303,7 +315,7 @@ func (t *tui) initLayout() {
 		SetDirection(tview.FlexRow).
 		AddItem(t.chatList, 0, 1, true).
 		AddItem(t.userList, 0, 1, false).
-		AddItem(t.detailsView, 0, 2, false)
+		AddItem(t.relaysPanel, 0, 2, false)
 
 	t.contentGrid = tview.NewGrid().SetBorders(false)
 	contentGrid := t.contentGrid
@@ -664,10 +676,10 @@ func (t *tui) handleNewMessage(event client.DisplayEvent) {
 	content := strings.ReplaceAll(event.Content, "\n", " ")
 	mentionMe := !event.IsOwnMessage && isSelfMentionedInContent(content, t.nick, t.selfShortPubKey)
 
-	// Muted dark bar + white text (readable, not loud yellow).
-	const mentionBg = "#2a3544"
-	const mentionFg = "#f8fafc"
-	const mentionMeta = "#94a3b8"
+	// Stand out from normal lines; green tint matches terminal theme.
+	const mentionBg = "#0d280d"
+	const mentionFg = "#c8ffc8"
+	const mentionMeta = "#6b9b6b"
 
 	if t.nick != "" && !mentionMe {
 		content = highlightPlainMentionOfMe(content, t.nick, t.theme.inputTextColor)
@@ -679,7 +691,7 @@ func (t *tui) handleNewMessage(event client.DisplayEvent) {
 		mc := strings.ReplaceAll(event.Content, "\n", " ")
 		mc = t.formatContentWithNickMentions(mc)
 		var b strings.Builder
-		b.WriteString(fmt.Sprintf("[%s:%s]", mentionFg, mentionBg))
+		b.WriteString(fmt.Sprintf("[%s:%s:b]", mentionFg, mentionBg))
 		if activeView.IsGroup {
 			b.WriteString(event.Chat)
 			b.WriteString(" ")
@@ -894,12 +906,26 @@ func (t *tui) handleStateUpdate(event client.DisplayEvent) {
 
 // handleRelaysUpdate refreshes the list of relays.
 func (t *tui) handleRelaysUpdate(event client.DisplayEvent) {
-	relays, ok := event.Payload.([]client.RelayInfo)
-	if !ok {
+	switch p := event.Payload.(type) {
+	case client.RelaysPanelUpdate:
+		t.relays = p.Relays
+		t.relaysUpCount = p.UpCount
+		t.relaysDownCount = p.DownCount
+	case []client.RelayInfo:
+		t.relays = p
+		t.relaysUpCount = 0
+		t.relaysDownCount = 0
+		for _, r := range p {
+			if r.Connected {
+				t.relaysUpCount++
+			} else {
+				t.relaysDownCount++
+			}
+		}
+	default:
 		fmt.Fprintf(t.logs, "\n[%s]ERROR: Invalid RELAYS_UPDATE payload[-]", t.theme.logErrorColor)
 		return
 	}
-	t.relays = relays
 	t.updateDetailsView()
 }
 

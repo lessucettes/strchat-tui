@@ -31,8 +31,9 @@ type client struct {
 	wg     sync.WaitGroup
 
 	// Relay State
-	relays   map[string]*managedRelay
-	relaysMu sync.Mutex // Protects relays
+	relays                    map[string]*managedRelay
+	relaysMu                  sync.Mutex // Protects relays and lastSubscriptionRelayURLs
+	lastSubscriptionRelayURLs []string   // desired relay URLs for active subscription (sorted)
 
 	// Event Processing State
 	seenCache   *lru.Cache[string, bool]

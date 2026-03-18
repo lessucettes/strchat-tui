@@ -155,8 +155,8 @@ func highlightPlainMentionOfMe(content, myNick string, inputColor tcell.Color) s
 	return b.String()
 }
 
-// Nicks may be Latin, Cyrillic, etc.; short id stays ASCII alnum.
-var nickAtMentionRE = regexp.MustCompile(`@([\p{L}\p{N}_]+)#([a-zA-Z0-9]{4})`)
+// Nicks may be Latin, Cyrillic, toki-pona triads with hyphens, etc.
+var nickAtMentionRE = regexp.MustCompile(`@([\p{L}\p{N}_\-]+)#([a-fA-F0-9]{4})`)
 
 // mentionContinuesAfterHash is true if the rune right after @nick#hhhh looks like more id (reject 5+ char ids).
 func mentionContinuesAfterHash(s string, end int) bool {
@@ -196,9 +196,68 @@ func nickHashMentionIndices(s string) [][]int {
 	return out
 }
 
-// isSelfMentionedInContent is true only if content contains @myNick#myShortId (4-char id),
-// so another user with the same nick but different id does not trigger highlight.
+func isHexPubPrefixByte(b byte) bool {
+	return b >= '0' && b <= '9' || b >= 'a' && b <= 'f' || b >= 'A' && b <= 'F'
+}
+
+// isSelfMentionedByPubPrefix is true if content has @<nick>#<my4hex> and my4hex matches
+// our pubkey prefix (what others see as #xxxx). Works even when UI nick ≠ mention text
+// (e.g. "anon" in replies vs toki-pona in state).
+func isSelfMentionedByPubPrefix(content, myShortPubKey string) bool {
+	sh := strings.ToLower(strings.TrimSpace(myShortPubKey))
+	if len(sh) > 4 {
+		sh = sh[len(sh)-4:]
+	}
+	if len(sh) != 4 {
+		return false
+	}
+	for i := 0; i < len(sh); i++ {
+		if !isHexPubPrefixByte(sh[i]) {
+			return false
+		}
+	}
+	lower := strings.ToLower(content)
+	for i := 0; i < len(lower); {
+		j := strings.IndexByte(lower[i:], '@')
+		if j < 0 {
+			break
+		}
+		at := i + j
+		h := strings.IndexByte(lower[at+1:], '#')
+		if h < 0 {
+			i = at + 1
+			continue
+		}
+		h = at + 1 + h
+		nickPart := lower[at+1 : h]
+		if nickPart == "" || strings.ContainsAny(nickPart, " \t\n\r") {
+			i = at + 1
+			continue
+		}
+		if h+4 > len(lower) {
+			i = at + 1
+			continue
+		}
+		idPart := lower[h+1 : h+5]
+		if idPart != sh {
+			i = at + 1
+			continue
+		}
+		// Require exactly 4 hex id (not @x#74a999).
+		if h+5 < len(lower) && isHexPubPrefixByte(lower[h+5]) {
+			i = at + 1
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// isSelfMentionedInContent: @…#myPubPrefix, or exact @myNick#myShortId.
 func isSelfMentionedInContent(content, myNick, myShortPubKey string) bool {
+	if myShortPubKey != "" && isSelfMentionedByPubPrefix(content, myShortPubKey) {
+		return true
+	}
 	if myNick == "" || myShortPubKey == "" {
 		return false
 	}

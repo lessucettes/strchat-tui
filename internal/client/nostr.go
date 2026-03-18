@@ -96,6 +96,15 @@ func (c *client) updateRelaySubscriptions(desiredRelays map[string][]string) {
 }
 
 func (c *client) updateRelaySubscriptionsWithRefresh(desiredRelays map[string][]string, forceRefresh bool) {
+	want := make([]string, 0, len(desiredRelays))
+	for u := range desiredRelays {
+		want = append(want, u)
+	}
+	slices.Sort(want)
+	c.relaysMu.Lock()
+	c.lastSubscriptionRelayURLs = want
+	c.relaysMu.Unlock()
+
 	c.relaysMu.Lock()
 	currentRelays := make(map[string]*managedRelay, len(c.relays))
 	maps.Copy(currentRelays, c.relays)
@@ -293,8 +302,8 @@ func (c *client) replaceSubscriptionWithRefresh(mr *managedRelay, chats []string
 
 func (c *client) sendRelaysUpdate() {
 	c.relaysMu.Lock()
-	defer c.relaysMu.Unlock()
 
+	desired := append([]string(nil), c.lastSubscriptionRelayURLs...)
 	statuses := make([]RelayInfo, 0, len(c.relays))
 	for _, mr := range c.relays {
 		mr.mu.Lock()
@@ -309,7 +318,31 @@ func (c *client) sendRelaysUpdate() {
 		})
 	}
 
-	c.eventsChan <- DisplayEvent{Type: "RELAYS_UPDATE", Payload: statuses}
+	up := 0
+	for _, url := range desired {
+		if c.relayFailed(url) {
+			continue
+		}
+		mr, ok := c.relays[url]
+		if !ok {
+			continue
+		}
+		mr.mu.Lock()
+		conn := mr.connected
+		mr.mu.Unlock()
+		if conn {
+			up++
+		}
+	}
+	down := len(desired) - up
+
+	c.relaysMu.Unlock()
+
+	c.eventsChan <- DisplayEvent{Type: "RELAYS_UPDATE", Payload: RelaysPanelUpdate{
+		Relays:    statuses,
+		UpCount:   up,
+		DownCount: down,
+	}}
 }
 
 // Event Ingestion & Processing
