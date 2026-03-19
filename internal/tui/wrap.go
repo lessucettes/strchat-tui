@@ -8,6 +8,25 @@ import (
 	"github.com/mattn/go-runewidth"
 )
 
+// isMetadataBlock returns true for [id time] content so we count it as visible in wrap.
+func isMetadataBlock(inner string) bool {
+	if len(inner) < 5 || len(inner) > 25 {
+		return false
+	}
+	hasColon := false
+	for _, r := range inner {
+		switch {
+		case r >= '0' && r <= '9', r == ' ', r == ':':
+			if r == ':' {
+				hasColon = true
+			}
+		default:
+			return false
+		}
+	}
+	return hasColon
+}
+
 // wrapTviewDisplay splits styled text into lines that fit maxCells terminal columns.
 // Segments in square brackets (tview color tags) contribute 0 to width.
 func wrapTviewDisplay(s string, maxCells int) []string {
@@ -52,6 +71,24 @@ func wrapOneLine(s string, maxCells int) (line string, consumed int) {
 		if s[i] == '[' {
 			j := strings.IndexByte(s[i+1:], ']')
 			if j >= 0 {
+				inner := s[i+1 : i+1+j]
+				// [id time] metadata block: count as visible so it wraps
+				if isMetadataBlock(inner) {
+					col++
+					i++
+					for i < len(s) && s[i] != ']' {
+						r, rw := utf8.DecodeRuneInString(s[i:])
+						if r != utf8.RuneError {
+							col += runewidth.RuneWidth(r)
+						}
+						i += rw
+					}
+					if i < len(s) {
+						col++
+						i++
+					}
+					continue
+				}
 				i += j + 2
 				continue
 			}

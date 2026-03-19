@@ -87,11 +87,10 @@ func (t *tui) updateChatList() {
 
 func (t *tui) refreshChatListTitle() {
 	n := len(t.chatListItems)
-	g := colorHexTag(t.theme.inputTextColor)
 	if t.narrowMode {
-		t.chatList.SetTitle(fmt.Sprintf("Chats C Count: %s%d[-]", g, n))
+		t.chatList.SetTitle(fmt.Sprintf("Chats C Total: %d", n))
 	} else {
-		t.chatList.SetTitle(fmt.Sprintf("Chats (Alt+C) Count: %s%d[-]", g, n))
+		t.chatList.SetTitle(fmt.Sprintf("Chats (Alt+C) Total: %d", n))
 	}
 	t.chatList.SetTitleAlign(tview.AlignLeft)
 }
@@ -99,11 +98,10 @@ func (t *tui) refreshChatListTitle() {
 // refreshUserListTitle sets the users panel title to the count shown in that list.
 func (t *tui) refreshUserListTitle() {
 	n := len(t.chatUsers)
-	g := colorHexTag(t.theme.inputTextColor)
 	if t.narrowMode {
-		t.userList.SetTitle(fmt.Sprintf("Users Online: %s%d[-]", g, n))
+		t.userList.SetTitle(fmt.Sprintf("Users Online: %d", n))
 	} else {
-		t.userList.SetTitle(fmt.Sprintf("Users (Alt+U) Online: %s%d[-]", g, n))
+		t.userList.SetTitle(fmt.Sprintf("Users (Alt+U) Online: %d", n))
 	}
 	t.userList.SetTitleAlign(tview.AlignLeft)
 }
@@ -115,9 +113,9 @@ func (t *tui) refreshRelaysPanelChrome() {
 	n := len(t.relays)
 	g := colorHexTag(t.theme.inputTextColor)
 	if t.narrowMode {
-		t.relaysPanel.SetTitle(fmt.Sprintf("Relays R Count: %s%d[-]", g, n))
+		t.relaysPanel.SetTitle(fmt.Sprintf("Relays R Total: %d", n))
 	} else {
-		t.relaysPanel.SetTitle(fmt.Sprintf("Relays (Alt+R) Count: %s%d[-]", g, n))
+		t.relaysPanel.SetTitle(fmt.Sprintf("Relays (Alt+R) Total: %d", n))
 	}
 	t.relaysPanel.SetTitleAlign(tview.AlignLeft)
 	if t.relaysFooter != nil {

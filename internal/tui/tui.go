@@ -706,33 +706,35 @@ func (t *tui) handleNewMessage(event client.DisplayEvent) {
 	}
 	mentionBody = t.formatContentWithNickMentions(mentionBody)
 
+	metaTag := colorHexTag(t.theme.logInfoColor)
+	metaBracketed := fmt.Sprintf("[%s %s]", event.ID, event.Timestamp)
 	var display string
 	if event.IsOwnMessage {
 		display = fmt.Sprintf(
-			"%s%s%s[-]#%s> %s%s[-] [%s][%s %s][-]",
+			"%s%s%s[-]#%s> %s%s[-] %s%s[-]",
 			label,
 			ownNickTag, event.Nick,
 			event.ShortPubKey,
 			ownColorTag, content,
-			t.theme.logInfoColor, event.ID, event.Timestamp,
+			metaTag, metaBracketed,
 		)
 	} else if mentionMe {
 		display = fmt.Sprintf(
-			"%s%s%s[-]#%s> %s [%s][%s %s][-]",
+			"%s%s%s[-]#%s> %s %s%s[-]",
 			label,
 			nickColorTag, event.Nick,
 			event.ShortPubKey,
 			mentionBody,
-			t.theme.logInfoColor, event.ID, event.Timestamp,
+			metaTag, metaBracketed,
 		)
 	} else {
 		display = fmt.Sprintf(
-			"%s%s%s[-]#%s> %s [%s][%s %s][-]",
+			"%s%s%s[-]#%s> %s %s%s[-]",
 			label,
 			nickColorTag, event.Nick,
 			event.ShortPubKey,
 			content,
-			t.theme.logInfoColor, event.ID, event.Timestamp,
+			metaTag, metaBracketed,
 		)
 	}
 
@@ -835,6 +837,9 @@ func (t *tui) handleInfoMessage(event client.DisplayEvent) {
 		Content:    content,
 		RawDisplay: disp,
 	})
+	if n := t.output.GetItemCount(); n > 0 {
+		t.output.SetCurrentItem(n - 1)
+	}
 }
 
 // replyToSelectedMessage starts reply mode: title shows target; send prepends quote block.
