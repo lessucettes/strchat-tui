@@ -304,17 +304,30 @@ func (c *client) sendRelaysUpdate() {
 	c.relaysMu.Lock()
 
 	desired := append([]string(nil), c.lastSubscriptionRelayURLs...)
-	statuses := make([]RelayInfo, 0, len(c.relays))
+	// Include every desired URL in the list: from c.relays or as down (not yet in c.relays)
+	statuses := make([]RelayInfo, 0, len(desired)+len(c.relays))
+	seen := make(map[string]bool, len(c.relays))
 	for _, mr := range c.relays {
 		mr.mu.Lock()
 		connected := mr.connected
 		latency := mr.latency
 		mr.mu.Unlock()
-
+		seen[mr.url] = true
 		statuses = append(statuses, RelayInfo{
 			URL:       mr.url,
 			Latency:   latency,
 			Connected: connected,
+		})
+	}
+	for _, url := range desired {
+		if seen[url] {
+			continue
+		}
+		// Desired but not in c.relays (connect failed or pending) — show as down with ✗
+		statuses = append(statuses, RelayInfo{
+			URL:       url,
+			Latency:   0,
+			Connected: false,
 		})
 	}
 

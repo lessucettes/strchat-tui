@@ -110,12 +110,12 @@ func (t *tui) refreshRelaysPanelChrome() {
 	if t.relaysPanel == nil {
 		return
 	}
-	n := len(t.relays)
+	total := t.relaysUpCount + t.relaysDownCount
 	g := colorHexTag(t.theme.inputTextColor)
 	if t.narrowMode {
-		t.relaysPanel.SetTitle(fmt.Sprintf("Relays R Total: %d", n))
+		t.relaysPanel.SetTitle(fmt.Sprintf("Relays R Total: %d", total))
 	} else {
-		t.relaysPanel.SetTitle(fmt.Sprintf("Relays (Alt+R) Total: %d", n))
+		t.relaysPanel.SetTitle(fmt.Sprintf("Relays (Alt+R) Total: %d", total))
 	}
 	t.relaysPanel.SetTitleAlign(tview.AlignLeft)
 	if t.relaysFooter != nil {
@@ -151,7 +151,7 @@ func (t *tui) updateUserList() {
 				short = "????"
 			}
 		}
-		t.userList.AddItem(fmt.Sprintf("%2d %s%s[-]#%s", idx+1, colorTag, u.Nick, short), "", 0, nil)
+		t.userList.AddItem(fmt.Sprintf("%2d %s%s#%s[-]", idx+1, colorTag, u.Nick, short), "", 0, nil)
 	}
 
 	if currentItem >= 0 && currentItem < t.userList.GetItemCount() {
@@ -380,7 +380,7 @@ func (t *tui) updateDetailsView() {
 				switch {
 				case !r.Connected:
 					statusColor = t.theme.logErrorColor
-					symbol = "×"
+					symbol = "✗"
 				case r.Latency > 750*time.Millisecond:
 					statusColor = t.theme.logWarnColor
 					symbol = "●"
