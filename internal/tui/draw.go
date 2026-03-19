@@ -8,10 +8,22 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/mattn/go-runewidth"
 	"github.com/rivo/tview"
 
 	"github.com/lessucettes/strchat-tui/internal/client"
 )
+
+// colorHexTag builds a tview color tag; [%s] with tcell.Color breaks border titles.
+func colorHexTag(c tcell.Color) string {
+	r, g, b := c.RGB()
+	return fmt.Sprintf("[#%02x%02x%02x]", uint8(r), uint8(g), uint8(b))
+}
+
+func colorHexTagBold(c tcell.Color) string {
+	r, g, b := c.RGB()
+	return fmt.Sprintf("[#%02x%02x%02x::b]", uint8(r), uint8(g), uint8(b))
+}
 
 // updateChatList refreshes the chat list view, indicating the active and selected chats.
 func (t *tui) updateChatList() {
@@ -70,25 +82,48 @@ func (t *tui) updateChatList() {
 	} else if currentItem >= 0 {
 		t.chatList.SetCurrentItem(currentItem)
 	}
+	t.refreshChatListTitle()
+}
+
+func (t *tui) refreshChatListTitle() {
+	n := len(t.chatListItems)
+	g := colorHexTag(t.theme.inputTextColor)
+	if t.narrowMode {
+		t.chatList.SetTitle(fmt.Sprintf("Chats C Count: %s%d[-]", g, n))
+	} else {
+		t.chatList.SetTitle(fmt.Sprintf("Chats (Alt+C) Count: %s%d[-]", g, n))
+	}
+	t.chatList.SetTitleAlign(tview.AlignLeft)
 }
 
 // refreshUserListTitle sets the users panel title to the count shown in that list.
 func (t *tui) refreshUserListTitle() {
 	n := len(t.chatUsers)
+	g := colorHexTag(t.theme.inputTextColor)
 	if t.narrowMode {
-		t.userList.SetTitle(fmt.Sprintf("%s (Alt+U) ONLINE: %d", titleUsersShort, n))
+		t.userList.SetTitle(fmt.Sprintf("Users Online: %s%d[-]", g, n))
 	} else {
-		t.userList.SetTitle(fmt.Sprintf("%s %d", titleUsers, n))
+		t.userList.SetTitle(fmt.Sprintf("Users (Alt+U) Online: %s%d[-]", g, n))
 	}
+	t.userList.SetTitleAlign(tview.AlignLeft)
 }
 
-func (t *tui) updateRelaysFooter() {
-	if t.relaysFooter == nil {
+func (t *tui) refreshRelaysPanelChrome() {
+	if t.relaysPanel == nil {
 		return
 	}
-	s := fmt.Sprintf(" [%s]RELAYS UP:[-] %d  [%s]DOWN:[-] [%s]%d[-]",
-		t.theme.titleColor, t.relaysUpCount, t.theme.logErrorColor, t.theme.logErrorColor, t.relaysDownCount)
-	t.relaysFooter.SetText(s)
+	n := len(t.relays)
+	g := colorHexTag(t.theme.inputTextColor)
+	if t.narrowMode {
+		t.relaysPanel.SetTitle(fmt.Sprintf("Relays R Count: %s%d[-]", g, n))
+	} else {
+		t.relaysPanel.SetTitle(fmt.Sprintf("Relays (Alt+R) Count: %s%d[-]", g, n))
+	}
+	t.relaysPanel.SetTitleAlign(tview.AlignLeft)
+	if t.relaysFooter != nil {
+		r := colorHexTag(t.theme.logErrorColor)
+		t.relaysFooter.SetText(fmt.Sprintf("Online: %s%d[-]\nDown: %s%d[-]", g, t.relaysUpCount, r, t.relaysDownCount))
+	}
 }
 
 // updateUserList refreshes the users panel for the currently active view.
@@ -129,34 +164,19 @@ func (t *tui) updateUserList() {
 	t.refreshUserListTitle()
 }
 
-// rebuildParticipantColorsFull assigns evenly spaced hues to all users in the active chat (unique colors).
-func (t *tui) rebuildParticipantColorsFull() {
-	t.chatColorMu.Lock()
-	defer t.chatColorMu.Unlock()
-	t.participantColorTag = make(map[string]string)
-	t.participantHue = make(map[string]float64)
-	if len(t.chatUsersByPubKey) == 0 {
-		return
+func (t *tui) activeViewColorKey() string {
+	if t.activeViewIndex < 0 || t.activeViewIndex >= len(t.views) {
+		return ""
 	}
-	keys := make([]string, 0, len(t.chatUsersByPubKey))
+	return t.views[t.activeViewIndex].Name
+}
+
+// ensureParticipantColorsFromUsers assigns colors only for pubkeys not yet seen in this view.
+func (t *tui) ensureParticipantColorsFromUsers() {
 	for pk := range t.chatUsersByPubKey {
 		if pk != "" {
-			keys = append(keys, pk)
+			t.assignNewParticipantColor(pk)
 		}
-	}
-	sort.Strings(keys)
-	n := len(keys)
-	if n == 0 {
-		return
-	}
-	nf := float64(n)
-	for i, pk := range keys {
-		hue := float64(i) * 360.0 / nf
-		s := 0.52 + float64(i%6)*0.055
-		v := 0.80 + float64((i/6)%4)*0.04
-		r, g, b := hsvToRGBBytes(hue, s, v)
-		t.participantHue[pk] = hue
-		t.participantColorTag[pk] = fmt.Sprintf("[#%02x%02x%02x]", r, g, b)
 	}
 }
 
@@ -186,72 +206,149 @@ func pickDistinctHue(used []float64) float64 {
 	return bestH
 }
 
-// assignNewParticipantColor gives a new speaker a hue as far as possible from current chat members.
+// assignNewParticipantColor gives a new speaker a hue as far as possible from others in this view.
 func (t *tui) assignNewParticipantColor(pubkey string) {
 	if pubkey == "" {
 		return
 	}
-	t.chatColorMu.Lock()
-	defer t.chatColorMu.Unlock()
-	if _, ok := t.participantColorTag[pubkey]; ok {
+	vk := t.activeViewColorKey()
+	if vk == "" {
 		return
 	}
-	used := make([]float64, 0, len(t.participantHue))
-	for _, h := range t.participantHue {
+	t.chatColorMu.Lock()
+	defer t.chatColorMu.Unlock()
+	if t.participantColorByView[vk] == nil {
+		t.participantColorByView[vk] = make(map[string]string)
+		t.participantHueByView[vk] = make(map[string]float64)
+	}
+	tags := t.participantColorByView[vk]
+	hues := t.participantHueByView[vk]
+	if _, ok := tags[pubkey]; ok {
+		return
+	}
+	// Same @nick#hash was colored before this pubkey appeared — reuse that color.
+	if u, ok := t.chatUsersByPubKey[pubkey]; ok && u.Nick != "" && u.ShortPubKey != "" {
+		sh := strings.ToLower(strings.TrimSpace(u.ShortPubKey))
+		if len(sh) > 4 {
+			sh = sh[len(sh)-4:]
+		}
+		if len(sh) == 4 {
+			refKey := "m/" + strings.ToLower(strings.TrimSpace(u.Nick)) + "#" + sh
+			if tag, ok2 := tags[refKey]; ok2 {
+				tags[pubkey] = tag
+				hues[pubkey] = hues[refKey]
+				return
+			}
+		}
+	}
+	used := make([]float64, 0, len(hues))
+	for _, h := range hues {
 		used = append(used, h)
 	}
 	h := pickDistinctHue(used)
-	idx := len(t.participantHue)
+	idx := len(hues)
 	s := 0.52 + float64(idx%6)*0.055
 	v := 0.80 + float64((idx/6)%4)*0.04
 	r, g, b := hsvToRGBBytes(h, s, v)
-	t.participantHue[pubkey] = h
-	t.participantColorTag[pubkey] = fmt.Sprintf("[#%02x%02x%02x]", r, g, b)
+	hues[pubkey] = h
+	tags[pubkey] = fmt.Sprintf("[#%02x%02x%02x]", r, g, b)
+}
+
+// colorTagForMentionNickHash colors @nick#xxxx before that user is in the roster
+// (e.g. A tags B before B’s first message). When B appears, assignNewParticipantColor
+// reuses this color so mentions match B’s nick color.
+func (t *tui) colorTagForMentionNickHash(nick, hex4 string) string {
+	nick = strings.TrimSpace(nick)
+	hex4 = strings.TrimSpace(strings.ToLower(hex4))
+	if nick == "" || len(hex4) < 4 {
+		return "[#aaaaaa]"
+	}
+	if len(hex4) > 4 {
+		hex4 = hex4[len(hex4)-4:]
+	}
+	refKey := "m/" + strings.ToLower(nick) + "#" + hex4
+	vk := t.activeViewColorKey()
+	if vk == "" {
+		return pubkeyToNickColorTag(refKey)
+	}
+	t.chatColorMu.Lock()
+	defer t.chatColorMu.Unlock()
+	if t.participantColorByView[vk] == nil {
+		t.participantColorByView[vk] = make(map[string]string)
+		t.participantHueByView[vk] = make(map[string]float64)
+	}
+	tags := t.participantColorByView[vk]
+	hues := t.participantHueByView[vk]
+	if tag, ok := tags[refKey]; ok {
+		return tag
+	}
+	used := make([]float64, 0, len(hues))
+	for _, h := range hues {
+		used = append(used, h)
+	}
+	h := pickDistinctHue(used)
+	idx := len(hues)
+	s := 0.52 + float64(idx%6)*0.055
+	v := 0.80 + float64((idx/6)%4)*0.04
+	r, g, b := hsvToRGBBytes(h, s, v)
+	hues[refKey] = h
+	tag := fmt.Sprintf("[#%02x%02x%02x]", r, g, b)
+	tags[refKey] = tag
+	return tag
 }
 
 func (t *tui) colorTagForPubkey(pubkey string) string {
 	if pubkey == "" {
 		return "[#aaaaaa]"
 	}
+	vk := t.activeViewColorKey()
 	t.chatColorMu.RLock()
-	tag, ok := t.participantColorTag[pubkey]
+	if vk != "" && t.participantColorByView[vk] != nil {
+		if tag, ok := t.participantColorByView[vk][pubkey]; ok {
+			t.chatColorMu.RUnlock()
+			return tag
+		}
+	}
 	t.chatColorMu.RUnlock()
-	if ok {
-		return tag
+	if vk != "" {
+		t.assignNewParticipantColor(pubkey)
+		t.chatColorMu.RLock()
+		var tag string
+		if m := t.participantColorByView[vk]; m != nil {
+			tag = m[pubkey]
+		}
+		t.chatColorMu.RUnlock()
+		if tag != "" {
+			return tag
+		}
 	}
 	return pubkeyToNickColorTag(pubkey)
 }
 
-// updateDetailsView refreshes the Info list (group members or relays), selectable like other lists.
+// updateDetailsView refreshes the relays panel list (group members or per-relay rows).
 func (t *tui) updateDetailsView() {
 	prev := 0
 	if t.detailsView.GetItemCount() > 0 {
 		prev = t.detailsView.GetCurrentItem()
 	}
 
-	if t.narrowMode {
-		t.relaysPanel.SetTitle(titleRelaysShort)
-	} else {
-		t.relaysPanel.SetTitle(titleRelays)
-	}
+	t.refreshRelaysPanelChrome()
 	t.detailsView.Clear()
 
 	if t.pullingStatus != "" {
 		t.detailsView.AddItem(
-			fmt.Sprintf("[%s::b]PULLING MESSAGES FOR %s[-]", t.theme.titleColor, t.pullingStatus),
+			fmt.Sprintf("%sPULLING %s[-]", colorHexTagBold(t.theme.titleColor), t.pullingStatus),
 			"", 0, nil)
 	}
 
 	if t.chatList.GetItemCount() == 0 || len(t.chatListItems) == 0 {
 		t.detailsView.AddItem("— select a chat —", "", 0, nil)
-		t.updateRelaysFooter()
 		t.detailsView.SetCurrentItem(0)
 		return
 	}
 	currentIndex := t.chatList.GetCurrentItem()
 	if currentIndex >= len(t.chatListItems) || currentIndex < 0 {
 		t.detailsView.AddItem("— select a chat —", "", 0, nil)
-		t.updateRelaysFooter()
 		t.detailsView.SetCurrentItem(0)
 		return
 	}
@@ -277,7 +374,7 @@ func (t *tui) updateDetailsView() {
 		})
 
 		if len(relays) == 0 {
-			t.detailsView.AddItem(fmt.Sprintf("[%s]Not connected[-]", t.theme.logInfoColor), "", 0, nil)
+			t.detailsView.AddItem(fmt.Sprintf("%sNot connected[-]", colorHexTag(t.theme.logInfoColor)), "", 0, nil)
 		} else {
 			for _, r := range relays {
 				var statusColor tcell.Color
@@ -294,12 +391,13 @@ func (t *tui) updateDetailsView() {
 					symbol = "●"
 				}
 				host := strings.TrimPrefix(strings.TrimPrefix(r.URL, "wss://"), "ws://")
-				t.detailsView.AddItem(fmt.Sprintf("[%s]%s[-] %s", statusColor, symbol, host), "", 0, nil)
+				if runewidth.StringWidth(host) > 24 {
+					host = runewidth.Truncate(host, 20, "…")
+				}
+				t.detailsView.AddItem(fmt.Sprintf("%s%s[-] %s", colorHexTag(statusColor), symbol, host), "", 0, nil)
 			}
 		}
 	}
-
-	t.updateRelaysFooter()
 
 	n := t.detailsView.GetItemCount()
 	if n > 0 {
@@ -376,6 +474,16 @@ func (t *tui) updateFocusBorders() {
 	t.output.SetBorderColor(map[bool]tcell.Color{true: focusedColor, false: unfocusedColor}[components[t.output]])
 	t.input.SetBorderColor(map[bool]tcell.Color{true: focusedColor, false: unfocusedColor}[components[t.input]])
 
+	if t.logsMaxList != nil {
+		logsMaxFocused := t.logsMaximized && currentFocus == t.logsMaxList
+		t.logsMaxList.SetBorderColor(map[bool]tcell.Color{true: focusedColor, false: unfocusedColor}[logsMaxFocused])
+		if logsMaxFocused {
+			t.logsMaxList.SetSelectedBackgroundColor(t.theme.borderColor)
+		} else {
+			t.logsMaxList.SetSelectedBackgroundColor(t.theme.backgroundColor)
+		}
+	}
+
 	// Only visually highlight the selected message when messages are focused.
 	if t.app.GetFocus() == t.output {
 		t.output.SetSelectedBackgroundColor(t.theme.borderColor)
@@ -415,7 +523,7 @@ func (t *tui) updateHints() {
 	}
 
 	if t.logsMaximized {
-		hintText = fmt.Sprintf("[%[1]s]`[-]: Restore | [%[1]s]↑/↓[-]: Scroll", highlight)
+		hintText = fmt.Sprintf("[%[1]s]`[-]: Back | [%[1]s]↑/↓ j/k[-]: Select | [%[1]s]c[-]: Copy", highlight)
 	} else if t.outputMaximized {
 		hintText = fmt.Sprintf("[%[1]s]`[-]: Restore | [%[1]s]↑/↓[-]: Scroll", highlight)
 	} else {

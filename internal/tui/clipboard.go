@@ -76,6 +76,14 @@ func (t *tui) copyFocusedSelectionToClipboard() bool {
 		main, _ := t.detailsView.GetItemText(i)
 		text = stripTviewTags(main)
 
+	case t.logsMaxList:
+		i := t.logsMaxList.GetCurrentItem()
+		if i < 0 || i >= t.logsMaxList.GetItemCount() {
+			return true
+		}
+		main, _ := t.logsMaxList.GetItemText(i)
+		text = stripTviewTags(main)
+
 	case t.logs:
 		raw := t.logs.GetText(true)
 		raw = strings.TrimRight(raw, "\n")

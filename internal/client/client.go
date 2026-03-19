@@ -279,7 +279,7 @@ func (c *client) Run() {
 		}
 	}
 
-	c.sendStateUpdate()
+	c.sendStateUpdate(false)
 
 	c.wg.Go(func() {
 		c.updateAllSubscriptions()
@@ -477,4 +477,16 @@ func (c *client) flushAllOrdering() {
 	for _, k := range keys {
 		c.flushOrdered(k)
 	}
+}
+
+// discardOrderedStream drops buffered messages for a stream without emitting them
+// (e.g. when reloading chat history after identity rotation).
+func (c *client) discardOrderedStream(streamKey string) {
+	c.orderMu.Lock()
+	if t, ok := c.orderTimers[streamKey]; ok {
+		t.Stop()
+		delete(c.orderTimers, streamKey)
+	}
+	delete(c.orderBuf, streamKey)
+	c.orderMu.Unlock()
 }

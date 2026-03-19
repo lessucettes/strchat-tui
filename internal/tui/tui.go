@@ -29,6 +29,7 @@ type tui struct {
 	relaysFooter        *tview.TextView
 	relaysPanel         *tview.Flex
 	logs                *tview.TextView
+	logsMaxList         *tview.List // fullscreen logs: one row per line, visible selection
 	maximizedLogsFlex   *tview.Flex
 	output              *tview.List
 	maximizedOutputFlex *tview.Flex
@@ -89,13 +90,14 @@ type tui struct {
 
 	pendingReply *pendingReply
 
-	// Distinct per-participant colors in the active chat (no duplicate hues among peers).
-	participantColorTag map[string]string
-	participantHue      map[string]float64
-	chatColorMu         sync.RWMutex
+	// Per chat view: stable pubkey→color for the session (switching away and back keeps colors).
+	participantColorByView map[string]map[string]string
+	participantHueByView   map[string]map[string]float64
+	chatColorMu            sync.RWMutex
 
 	pullingStatus     string     // e.g. "#moscow"; shown in Info until messages arrive
 	pullingStatusTimer *time.Timer
+
 }
 
 type chatListItem struct {
@@ -108,6 +110,8 @@ type outputMessage struct {
 	ShortPubKey  string
 	Content      string
 	RawDisplay   string // full styled line(s) source for re-wrap on resize
+	MentionToMe    bool // highlight full row(s) — @you in message
+	IsOwnMessage   bool // multiline wrap: continue input color on following rows
 }
 
 // pendingReply holds the message being replied to (input title + send formatting).
@@ -136,9 +140,9 @@ func New(actions chan<- client.UserAction, events <-chan client.DisplayEvent) *t
 		lastNickQuery:     "",
 		theme:             defaultTheme,
 		userPruneStopCh:  make(chan struct{}),
-		followEnabled:       true,
-		participantColorTag: make(map[string]string),
-		participantHue:      make(map[string]float64),
+		followEnabled:          true,
+		participantColorByView: make(map[string]map[string]string),
+		participantHueByView:   make(map[string]map[string]float64),
 	}
 
 	t.setupViews()
@@ -167,21 +171,18 @@ func (lw *logWriter) Write(p []byte) (int, error) {
 	return fmt.Fprintf(lw.textViewWriter, "\n[%s][%s] %s[-]", lw.getColor(), ts, msg)
 }
 
-// Widget titles.
+// Widget titles (short = narrow layout).
 const (
-	titleLogs     = "LOGS (Alt+L)"
-	titleChats    = "CHATS (Alt+C)"
-	titleUsers    = "USERS (Alt+U) ONLINE:"
-	titleRelays   = "RELAYS (Alt+R)"
-	titleMessages = "MESSAGES (Alt+M)"
-	titleInput    = "INPUT (Alt+I)"
-
-	titleLogsShort     = "LOGS"
-	titleChatsShort    = "CHATS"
-	titleUsersShort    = "USERS"
-	titleRelaysShort   = "RELAYS"
-	titleMessagesShort = "MESSAGES"
-	titleInputShort    = "INPUT"
+	titleLogs          = "Logs (Alt+L)"
+	titleChats         = "Chats (Alt+C)"
+	titleUsers         = "Users (Alt+U)"
+	titleMessages      = "Messages (Alt+M)"
+	titleInput         = "Input (Alt+I)"
+	titleLogsShort     = "Logs"
+	titleChatsShort    = "Chats"
+	titleUsersShort    = "Users"
+	titleMessagesShort = "Messages"
+	titleInputShort    = "Input"
 )
 
 // setupViews creates and configures all the visual primitives of the TUI.
@@ -201,9 +202,9 @@ func (t *tui) applyTheme() {
 
 func (t *tui) followTitleSuffix() string {
 	if t.followEnabled {
-		return " | FOLLOW: ON"
+		return " Follow: ON"
 	}
-	return " | FOLLOW: OFF"
+	return " Follow: OFF"
 }
 
 func (t *tui) refreshFollowTitle() {
@@ -232,8 +233,28 @@ func (t *tui) initViews() {
 		SetDynamicColors(true).
 		SetScrollable(true).
 		SetWrap(false).
-		SetChangedFunc(func() { t.app.Draw() })
+		SetChangedFunc(func() {
+			if t.logsMaximized && t.logsMaxList != nil {
+				nOld := t.logsMaxList.GetItemCount()
+				cur := t.logsMaxList.GetCurrentItem()
+				atEnd := nOld > 0 && cur >= nOld-1
+				t.rebuildMaximizedLogsList(atEnd)
+			}
+			t.app.Draw()
+		})
 	t.logs.SetBorder(true).SetTitle(titleLogs).SetTitleAlign(tview.AlignLeft)
+
+	t.logsMaxList = tview.NewList().
+		ShowSecondaryText(false).
+		SetSelectedBackgroundColor(t.theme.borderColor).
+		SetSelectedTextColor(t.theme.listSelectedFg).
+		SetHighlightFullLine(true)
+	t.logsMaxList.SetBorder(true)
+	t.logsMaxList.SetTitle("Logs")
+	t.logsMaxList.SetTitleAlign(tview.AlignLeft)
+	t.logsMaxList.SetChangedFunc(func(int, string, string, rune) {
+		t.refreshLogsFullscreenTitle()
+	})
 	customWriter := &logWriter{
 		textViewWriter: tview.ANSIWriter(t.logs),
 		getColor:       func() tcell.Color { return t.theme.logInfoColor },
@@ -245,7 +266,8 @@ func (t *tui) initViews() {
 		ShowSecondaryText(false).
 		SetSelectedBackgroundColor(t.theme.borderColor).
 		SetSelectedTextColor(t.theme.listSelectedFg)
-	t.chatList.SetBorder(true).SetTitle(titleChats).SetTitleAlign(tview.AlignLeft)
+	t.chatList.SetBorder(true).SetTitleAlign(tview.AlignLeft)
+	t.refreshChatListTitle()
 
 	t.userList = tview.NewList().
 		ShowSecondaryText(false).
@@ -260,13 +282,13 @@ func (t *tui) initViews() {
 		SetSelectedTextColor(t.theme.listSelectedFg)
 	t.relaysFooter = tview.NewTextView().
 		SetDynamicColors(true).
-		SetTextAlign(tview.AlignLeft).
+		SetTextAlign(tview.AlignCenter).
 		SetWrap(false)
 	t.relaysPanel = tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(t.detailsView, 0, 1, true).
-		AddItem(t.relaysFooter, 1, 0, false)
-	t.relaysPanel.SetBorder(true).SetTitle(titleRelays).SetTitleAlign(tview.AlignLeft)
-	t.updateRelaysFooter()
+		AddItem(t.relaysFooter, 2, 0, false)
+	t.relaysPanel.SetBorder(true).SetTitleAlign(tview.AlignLeft)
+	t.refreshRelaysPanelChrome()
 
 	t.output = tview.NewList().
 		ShowSecondaryText(false).
@@ -364,7 +386,7 @@ func (t *tui) initLayout() {
 						t.narrowMode = true
 						t.logs.SetTitle(titleLogsShort).SetTitleAlign(tview.AlignLeft)
 						t.output.SetTitle(titleMessagesShort + t.followTitleSuffix())
-						t.chatList.SetTitle(titleChatsShort)
+						t.refreshChatListTitle()
 						t.refreshUserListTitle()
 						t.updateDetailsView()
 						t.updateInputLabel()
@@ -374,7 +396,7 @@ func (t *tui) initLayout() {
 						t.narrowMode = false
 						t.logs.SetTitle(titleLogs).SetTitleAlign(tview.AlignLeft)
 						t.output.SetTitle(titleMessages + t.followTitleSuffix())
-						t.chatList.SetTitle(titleChats)
+						t.refreshChatListTitle()
 						t.refreshUserListTitle()
 						t.updateDetailsView()
 						t.input.SetTitle(titleInput)
@@ -410,7 +432,7 @@ func (t *tui) initLayout() {
 
 	t.maximizedLogsFlex = tview.NewFlex().
 		SetDirection(tview.FlexRow).
-		AddItem(t.logs, 0, 1, true).
+		AddItem(t.logsMaxList, 0, 1, true).
 		AddItem(t.hints, 1, 0, false)
 
 	t.maximizedOutputFlex = tview.NewFlex().
@@ -425,10 +447,7 @@ func (t *tui) initLayout() {
 const wideBottomRowsNormal = 4
 
 func (t *tui) formatContentWithNickMentions(content string) string {
-	if len(t.chatUsersByPubKey) == 0 {
-		return content
-	}
-	lookup := make(map[string]string, len(t.chatUsersByPubKey)*2)
+	lookup := make(map[string]string, len(t.chatUsersByPubKey)*2+1)
 	for pk, u := range t.chatUsersByPubKey {
 		if u.Nick == "" || u.ShortPubKey == "" {
 			continue
@@ -456,7 +475,9 @@ func (t *tui) formatContentWithNickMentions(content string) string {
 			b.WriteString(content[fullStart:fullEnd])
 			b.WriteString("[-]")
 		} else {
+			b.WriteString(t.colorTagForMentionNickHash(content[loc[2]:loc[3]], content[loc[4]:loc[5]]))
 			b.WriteString(content[fullStart:fullEnd])
+			b.WriteString("[-]")
 		}
 		prev = fullEnd
 	}
@@ -616,13 +637,11 @@ func (t *tui) pruneStaleChatUsers(now time.Time) {
 	// Avoid churn: if nothing changed, don't redraw.
 	if len(newUsers) == len(t.chatUsers) {
 		t.chatUsersByPubKey = newByPubKey
-		t.rebuildParticipantColorsFull()
 		return
 	}
 
 	t.chatUsers = newUsers
 	t.chatUsersByPubKey = newByPubKey
-	t.rebuildParticipantColorsFull()
 	t.updateUserList()
 }
 
@@ -672,48 +691,38 @@ func (t *tui) handleNewMessage(event client.DisplayEvent) {
 		label = fmt.Sprintf("[%s]%s[-] ", t.theme.titleColor, event.Chat)
 	}
 
-	// Keep content single-line for list rendering.
-	content := strings.ReplaceAll(event.Content, "\n", " ")
-	mentionMe := !event.IsOwnMessage && isSelfMentionedInContent(content, t.nick, t.selfShortPubKey)
+	rawLine := strings.ReplaceAll(event.Content, "\n", " ")
+	mentionMe := !event.IsOwnMessage && isSelfMentionedInContent(rawLine, t.nick, t.selfShortPubKey)
 
-	// Stand out from normal lines; green tint matches terminal theme.
-	const mentionBg = "#0d280d"
-	const mentionFg = "#c8ffc8"
-	const mentionMeta = "#6b9b6b"
-
+	content := rawLine
 	if t.nick != "" && !mentionMe {
 		content = highlightPlainMentionOfMe(content, t.nick, t.theme.inputTextColor)
 	}
 	content = t.formatContentWithNickMentions(content)
 
+	mentionBody := rawLine
+	if t.nick != "" {
+		mentionBody = highlightPlainMentionOfMe(mentionBody, t.nick, t.theme.inputTextColor)
+	}
+	mentionBody = t.formatContentWithNickMentions(mentionBody)
+
 	var display string
-	if mentionMe {
-		mc := strings.ReplaceAll(event.Content, "\n", " ")
-		mc = t.formatContentWithNickMentions(mc)
-		var b strings.Builder
-		b.WriteString(fmt.Sprintf("[%s:%s:b]", mentionFg, mentionBg))
-		if activeView.IsGroup {
-			b.WriteString(event.Chat)
-			b.WriteString(" ")
-		}
-		b.WriteString(event.Nick)
-		b.WriteString("#")
-		b.WriteString(event.ShortPubKey)
-		b.WriteString("> ")
-		b.WriteString(mc)
-		b.WriteString(fmt.Sprintf(" [%s:%s]", mentionMeta, mentionBg))
-		b.WriteString(event.ID)
-		b.WriteString(" ")
-		b.WriteString(event.Timestamp)
-		b.WriteString("[-]")
-		display = b.String()
-	} else if event.IsOwnMessage {
+	if event.IsOwnMessage {
 		display = fmt.Sprintf(
 			"%s%s%s[-]#%s> %s%s[-] [%s][%s %s][-]",
 			label,
 			ownNickTag, event.Nick,
 			event.ShortPubKey,
 			ownColorTag, content,
+			t.theme.logInfoColor, event.ID, event.Timestamp,
+		)
+	} else if mentionMe {
+		display = fmt.Sprintf(
+			"%s%s%s[-]#%s> %s [%s][%s %s][-]",
+			label,
+			nickColorTag, event.Nick,
+			event.ShortPubKey,
+			mentionBody,
 			t.theme.logInfoColor, event.ID, event.Timestamp,
 		)
 	} else {
@@ -732,6 +741,16 @@ func (t *tui) handleNewMessage(event client.DisplayEvent) {
 		wrapW = 76
 	}
 	lines := wrapTviewDisplay(display, wrapW)
+	// Full-row highlight on every wrapped line so @mentions are easy to spot.
+	if mentionMe {
+		const rowFg = "#fff8dc"
+		const rowBg = "#5c4318"
+		for i := range lines {
+			lines[i] = fmt.Sprintf("[%s:%s:-]%s[-]", rowFg, rowBg, lines[i])
+		}
+	} else if event.IsOwnMessage {
+		t.applyOwnMessageMultilineGreen(lines)
+	}
 	msgIdx := len(t.outputMessages)
 	for _, ln := range lines {
 		t.output.AddItem(ln, "", 0, nil)
@@ -743,6 +762,8 @@ func (t *tui) handleNewMessage(event client.DisplayEvent) {
 		ShortPubKey: event.ShortPubKey,
 		Content:     event.Content,
 		RawDisplay:  display,
+		MentionToMe:  mentionMe,
+		IsOwnMessage: event.IsOwnMessage,
 	})
 
 	if shouldFollow {
@@ -881,9 +902,9 @@ func (t *tui) handleStateUpdate(event client.DisplayEvent) {
 	t.nick = state.Nick
 	t.selfShortPubKey = state.ShortPubKey
 
-	// Clear visible message history when switching chats.
+	// Clear visible message history when switching chats or reloading same chat (new identity).
 	// Old messages will be re-rendered from the relay backlog (lookback+limit).
-	if prevActiveIndex != t.activeViewIndex {
+	if prevActiveIndex != t.activeViewIndex || state.ClearMessagePane {
 		t.pendingReply = nil
 		t.output.Clear()
 		t.outputMessages = nil
@@ -896,10 +917,9 @@ func (t *tui) handleStateUpdate(event client.DisplayEvent) {
 	t.updateDetailsView()
 	t.updateInputLabel()
 
-	// Reset and request users for the newly active view.
+	// Reset and request users for the newly active view (per-view colors stay in participantColorByView).
 	t.chatUsers = nil
 	t.chatUsersByPubKey = make(map[string]client.ChatUser)
-	t.rebuildParticipantColorsFull()
 	t.updateUserList()
 	t.requestChatUsersForActiveView()
 }
@@ -942,7 +962,7 @@ func (t *tui) handleChatUsersUpdate(event client.DisplayEvent) {
 	}
 	// Immediately prune based on last message timestamps.
 	t.pruneStaleChatUsers(time.Now())
-	t.rebuildParticipantColorsFull()
+	t.ensureParticipantColorsFromUsers()
 	t.updateUserList()
 }
 
@@ -1094,6 +1114,93 @@ func (t *tui) handleNickCompletion(event client.DisplayEvent) {
 		}
 	}
 	t.input.Autocomplete()
+}
+
+// applyOwnMessageMultilineGreen restyles wrapped continuation rows: each List row is
+// drawn separately, so text after a line break must re-open the input (green) color.
+func (t *tui) applyOwnMessageMultilineGreen(lines []string) {
+	if len(lines) <= 1 {
+		return
+	}
+	tag := fmt.Sprintf("[%s]", t.theme.inputTextColor)
+	for i := 1; i < len(lines); i++ {
+		lines[i] = tag + lines[i]
+		if i < len(lines)-1 {
+			lines[i] += "[-]"
+		}
+	}
+}
+
+func (t *tui) logsLineSlice() []string {
+	raw := strings.TrimRight(t.logs.GetText(true), "\n")
+	if raw == "" {
+		return []string{""}
+	}
+	return strings.Split(raw, "\n")
+}
+
+func (t *tui) rebuildMaximizedLogsList(scrollToEnd bool) {
+	if t.logsMaxList == nil {
+		return
+	}
+	nOld := t.logsMaxList.GetItemCount()
+	cur := t.logsMaxList.GetCurrentItem()
+	atEnd := scrollToEnd || (nOld > 0 && cur >= nOld-1)
+
+	lines := t.logsLineSlice()
+	t.logsMaxList.Clear()
+	for _, ln := range lines {
+		s := ln
+		if s == "" {
+			s = " "
+		}
+		t.logsMaxList.AddItem(s, "", 0, nil)
+	}
+	n := t.logsMaxList.GetItemCount()
+	if n == 0 {
+		t.logsMaxList.AddItem("(empty)", "", 0, nil)
+		n = 1
+	}
+	if atEnd {
+		t.logsMaxList.SetCurrentItem(n - 1)
+	} else if cur >= 0 && cur < n {
+		t.logsMaxList.SetCurrentItem(cur)
+	} else {
+		t.logsMaxList.SetCurrentItem(max(0, n-1))
+	}
+	t.refreshLogsFullscreenTitle()
+}
+
+func (t *tui) refreshLogsFullscreenTitle() {
+	if !t.logsMaximized || t.logsMaxList == nil {
+		return
+	}
+	n := t.logsMaxList.GetItemCount()
+	if n < 1 {
+		n = 1
+	}
+	sel := t.logsMaxList.GetCurrentItem()
+	if sel < 0 {
+		sel = 0
+	}
+	t.logsMaxList.SetTitle(fmt.Sprintf("Logs %d/%d · c copy · ` exit", sel+1, n))
+	t.logsMaxList.SetTitleAlign(tview.AlignLeft)
+}
+
+func (t *tui) initLogsFullscreenSelection() {
+	t.rebuildMaximizedLogsList(true)
+	t.app.SetFocus(t.logsMaxList)
+	t.updateFocusBorders()
+	t.refreshLogsFullscreenTitle()
+}
+
+func (t *tui) refreshLogsTitleForLayout() {
+	if t.narrowMode {
+		t.logs.SetTitle(titleLogsShort)
+	} else {
+		t.logs.SetTitle(titleLogs)
+	}
+	t.logs.SetTitleAlign(tview.AlignLeft)
 }
 
 // Run starts the TUI application.

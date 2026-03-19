@@ -161,7 +161,8 @@ func (t *tui) setupHandlers() {
 
 		if currentFocus == t.logs && event.Key() == tcell.KeyRune && event.Rune() == '`' {
 			t.logsMaximized = true
-			t.app.SetRoot(t.maximizedLogsFlex, true).SetFocus(t.logs)
+			t.app.SetRoot(t.maximizedLogsFlex, true)
+			t.initLogsFullscreenSelection()
 			t.updateHints()
 			return nil
 		}
@@ -291,17 +292,47 @@ func (t *tui) cycleFocus(forward bool) {
 func (t *tui) handleMaximizedViewKeys(event *tcell.EventKey) *tcell.EventKey {
 	currentFocus := t.app.GetFocus()
 	if event.Modifiers() == 0 && event.Key() == tcell.KeyRune && isCopyRune(event.Rune()) {
-		if currentFocus == t.logs || currentFocus == t.output {
+		if currentFocus == t.logsMaxList || currentFocus == t.output {
 			t.copyFocusedSelectionToClipboard()
 			return nil
+		}
+	}
+	if t.logsMaximized && currentFocus == t.logsMaxList && event.Modifiers() == 0 {
+		switch event.Key() {
+		case tcell.KeyRune:
+			switch event.Rune() {
+			case 'j':
+				n := t.logsMaxList.GetItemCount()
+				c := t.logsMaxList.GetCurrentItem()
+				if c < n-1 {
+					t.logsMaxList.SetCurrentItem(c + 1)
+				}
+				return nil
+			case 'k':
+				c := t.logsMaxList.GetCurrentItem()
+				if c > 0 {
+					t.logsMaxList.SetCurrentItem(c - 1)
+				}
+				return nil
+			case 'g':
+				t.logsMaxList.SetCurrentItem(0)
+				return nil
+			case 'G':
+				n := t.logsMaxList.GetItemCount()
+				if n > 0 {
+					t.logsMaxList.SetCurrentItem(n - 1)
+				}
+				return nil
+			}
 		}
 	}
 	switch event.Key() {
 	case tcell.KeyRune:
 		if event.Rune() == '`' {
-			if currentFocus == t.logs {
+			if currentFocus == t.logsMaxList {
 				t.logsMaximized = false
 				t.app.SetRoot(t.mainFlex, true).SetFocus(t.logs)
+				t.refreshLogsTitleForLayout()
 			}
 			if currentFocus == t.output {
 				t.outputMaximized = false
@@ -320,7 +351,8 @@ func (t *tui) handleMaximizedViewKeys(event *tcell.EventKey) *tcell.EventKey {
 		return nil
 	case tcell.KeyTab, tcell.KeyBacktab:
 		return nil
-	case tcell.KeyUp, tcell.KeyDown, tcell.KeyPgUp, tcell.KeyPgDn, tcell.KeyHome, tcell.KeyEnd:
+	}
+	if currentFocus == t.logsMaxList || currentFocus == t.output {
 		return event
 	}
 	return nil

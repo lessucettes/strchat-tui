@@ -132,7 +132,7 @@ func (c *client) createGroup(payload string) {
 	c.config.ActiveViewName = name
 	c.saveConfig()
 
-	c.sendStateUpdate()
+	c.sendStateUpdate(false)
 	c.updateAllSubscriptions()
 }
 
@@ -171,7 +171,7 @@ func (c *client) leaveChat(chatName string) {
 		c.config.ActiveViewName = ""
 	}
 	c.saveConfig()
-	c.sendStateUpdate()
+	c.sendStateUpdate(false)
 	c.updateAllSubscriptions()
 
 	delete(c.chatKeys, chatName)
@@ -189,7 +189,7 @@ func (c *client) deleteGroup(groupName string) {
 		c.config.ActiveViewName = ""
 	}
 	c.saveConfig()
-	c.sendStateUpdate()
+	c.sendStateUpdate(false)
 	c.updateAllSubscriptions()
 }
 
@@ -253,7 +253,7 @@ func (c *client) setNick(nick string) {
 	}
 
 	c.saveConfig()
-	c.sendStateUpdate()
+	c.sendStateUpdate(false)
 }
 
 func (c *client) setPoW(difficultyStr string) {
@@ -282,7 +282,7 @@ func (c *client) setPoW(difficultyStr string) {
 	}
 
 	c.saveConfig()
-	c.sendStateUpdate()
+	c.sendStateUpdate(false)
 
 	if difficulty > 0 {
 		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("PoW difficulty for %s set to %d.", activeView.Name, difficulty)}
@@ -404,6 +404,19 @@ func (c *client) setActiveView(name string) {
 		return
 	}
 
+	// Enter on the same 1:1 chat in the list while already there: new ephemeral identity.
+	// Only when a session already exists (not on cold start: empty chatKeys + same active view).
+	shouldRefreshSubs := prev != name
+	clearMessagePane := false
+	if !view.IsGroup && prev == name {
+		if _, had := c.chatKeys[name]; had {
+			delete(c.chatKeys, name)
+			shouldRefreshSubs = true
+			clearMessagePane = true
+			c.discardOrderedStream("chat:" + name)
+		}
+	}
+
 	if !view.IsGroup {
 		if _, exists := c.chatKeys[name]; !exists {
 			sk := nostr.GeneratePrivateKey()
@@ -429,11 +442,10 @@ func (c *client) setActiveView(name string) {
 	// Update active view BEFORE refreshing subscriptions
 	c.config.ActiveViewName = name
 	c.saveConfig()
-	c.sendStateUpdate()
+	c.sendStateUpdate(clearMessagePane)
 
-	// When switching chats, force-refresh subscriptions so that the relay
-	// sends us the historical backlog again.
-	if prev != name {
+	// Switching chats or rotating identity: refresh subscriptions for backlog.
+	if shouldRefreshSubs {
 		go c.forceRefreshSubscriptions()
 	}
 }
@@ -452,7 +464,7 @@ func (c *client) getActiveView() *View {
 
 // Helpers
 
-func (c *client) sendStateUpdate() {
+func (c *client) sendStateUpdate(clearMessagePane bool) {
 	activeIdx := -1
 	for i := range c.config.Views {
 		if c.config.Views[i].Name == c.config.ActiveViewName {
@@ -466,10 +478,11 @@ func (c *client) sendStateUpdate() {
 	}
 
 	state := StateUpdate{
-		Views:           c.config.Views,
-		ActiveViewIndex: activeIdx,
-		Nick:            c.n,
-		ShortPubKey:     "",
+		Views:            c.config.Views,
+		ActiveViewIndex:  activeIdx,
+		Nick:             c.n,
+		ShortPubKey:      "",
+		ClearMessagePane: clearMessagePane,
 	}
 
 	if len(c.config.Views) == 0 || activeIdx == -1 {

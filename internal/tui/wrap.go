@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"unicode/utf8"
 
@@ -111,7 +112,17 @@ func (t *tui) rebuildMessagesOutputPreservingSelection() {
 		if disp == "" {
 			continue
 		}
-		for _, ln := range wrapTviewDisplay(disp, w) {
+		lines := wrapTviewDisplay(disp, w)
+		if om.MentionToMe {
+			const rowFg = "#fff8dc"
+			const rowBg = "#5c4318"
+			for i := range lines {
+				lines[i] = fmt.Sprintf("[%s:%s:-]%s[-]", rowFg, rowBg, lines[i])
+			}
+		} else if om.IsOwnMessage {
+			t.applyOwnMessageMultilineGreen(lines)
+		}
+		for _, ln := range lines {
 			t.output.AddItem(ln, "", 0, nil)
 			t.outputRowToMsg = append(t.outputRowToMsg, mi)
 		}

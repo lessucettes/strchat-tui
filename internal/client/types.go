@@ -92,6 +92,8 @@ type StateUpdate struct {
 	ActiveViewIndex int
 	Nick            string
 	ShortPubKey     string
+	// ClearMessagePane: clear backlog UI and reload (same chat, new ephemeral identity).
+	ClearMessagePane bool
 }
 
 type chatSession struct {
