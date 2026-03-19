@@ -27,6 +27,8 @@ const (
 	cacheFileName = "georelays_cache.csv"
 	remoteURL     = "https://raw.githubusercontent.com/permissionlesstech/georelays/refs/heads/main/nostr_relays.csv"
 	cacheTTL      = 24 * time.Hour
+	// Extra relay that we always include in the geo-relay candidate set.
+	extraGeoRelayHost = "nostr.quali.chat"
 )
 
 // haversine calculates the great-circle distance in kilometers between two points on the Earth.
@@ -51,13 +53,17 @@ func loadRelays() ([]relayEntry, error) {
 	cachePath := filepath.Join(appDir, cacheFileName)
 
 	if info, err := os.Stat(cachePath); err == nil && time.Since(info.ModTime()) < cacheTTL {
-		return parseCSV(cachePath)
+		relays, err := parseCSV(cachePath)
+		if err != nil {
+			return nil, err
+		}
+		return ensureExtraRelay(relays), nil
 	}
 
 	resp, err := http.Get(remoteURL)
 	if err != nil {
 		if relays, err2 := parseCSV(cachePath); err2 == nil {
-			return relays, nil
+			return ensureExtraRelay(relays), nil
 		}
 		return nil, err
 	}
@@ -76,7 +82,24 @@ func loadRelays() ([]relayEntry, error) {
 		return nil, err
 	}
 
-	return parseCSV(cachePath)
+	relays, err := parseCSV(cachePath)
+	if err != nil {
+		return nil, err
+	}
+	return ensureExtraRelay(relays), nil
+}
+
+func ensureExtraRelay(relays []relayEntry) []relayEntry {
+	for _, r := range relays {
+		if strings.EqualFold(strings.TrimSpace(r.Host), extraGeoRelayHost) {
+			return relays
+		}
+	}
+	return append(relays, relayEntry{
+		Host: extraGeoRelayHost,
+		Lat:  0,
+		Lon:  0,
+	})
 }
 
 // parseCSV opens and parses the CSV file at the given path.

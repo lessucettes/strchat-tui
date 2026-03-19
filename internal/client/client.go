@@ -31,8 +31,9 @@ type client struct {
 	wg     sync.WaitGroup
 
 	// Relay State
-	relays   map[string]*managedRelay
-	relaysMu sync.Mutex // Protects relays
+	relays                    map[string]*managedRelay
+	relaysMu                  sync.Mutex // Protects relays and lastSubscriptionRelayURLs
+	lastSubscriptionRelayURLs []string   // desired relay URLs for active subscription (sorted)
 
 	// Event Processing State
 	seenCache   *lru.Cache[string, bool]
@@ -51,9 +52,122 @@ type client struct {
 	updateSubTimer    *time.Timer
 	updateSubMu       sync.Mutex // Protects updateSubTimer
 
+	// Avoid duplicate STATUS lines in Logs (listen vs post-switch refresh).
+	subStatusMu      sync.Mutex
+	lastListenLogKey string
+
 	// Moderation State
 	filtersCompiled []compiledPattern
 	mutesCompiled   []compiledPattern
+}
+
+func (c *client) resetSeenCache() {
+	seenCache, err := lru.New[string, bool](seenCacheSize)
+	if err != nil {
+		// If cache recreation fails, keep the old one to avoid a crash.
+		log.Printf("Failed to recreate seen cache: %v", err)
+		return
+	}
+
+	c.seenCacheMu.Lock()
+	c.seenCache = seenCache
+	c.seenCacheMu.Unlock()
+}
+
+// forceRefreshSubscriptions clears the seen cache and forces all relays to
+// re-subscribe with a fresh Since timestamp, making the relay send us
+// historical messages again. This is used when switching chats so the UI
+// can display message history.
+func (c *client) forceRefreshSubscriptions() {
+	c.resetSeenCache()
+
+	activeView := c.getActiveView()
+	activeChats := make(map[string]struct{})
+	if activeView != nil {
+		if activeView.IsGroup {
+			for _, child := range activeView.Children {
+				activeChats[child] = struct{}{}
+			}
+		} else if activeView.Name != "" {
+			activeChats[activeView.Name] = struct{}{}
+		}
+	}
+
+	if len(activeChats) == 0 {
+		return
+	}
+
+	desiredRelayToChats := make(map[string][]string)
+	for chat := range activeChats {
+		relayURLs := c.getRelayPoolForChat(chat)
+		for _, url := range relayURLs {
+			found := false
+			for _, existingChat := range desiredRelayToChats[url] {
+				if existingChat == chat {
+					found = true
+					break
+				}
+			}
+			if !found {
+				desiredRelayToChats[url] = append(desiredRelayToChats[url], chat)
+			}
+		}
+	}
+
+	c.updateRelaySubscriptionsWithRefresh(desiredRelayToChats, true)
+
+	n := len(desiredRelayToChats)
+	if n > 0 && activeView != nil {
+		c.emitRelayListenStatus(activeView, n, true)
+	}
+}
+
+// emitRelayListenStatus writes one line to the TUI Logs panel.
+// isChatSwitch: user just changed chat — always show; also updates dedupe key
+// so a follow-up updateAllSubscriptions with the same relay set does not repeat.
+func (c *client) emitRelayListenStatus(view *View, nRelays int, isChatSwitch bool) {
+	if view == nil || nRelays <= 0 {
+		return
+	}
+	key := view.Name + "|" + strconv.Itoa(nRelays)
+	c.subStatusMu.Lock()
+	if !isChatSwitch && key == c.lastListenLogKey {
+		c.subStatusMu.Unlock()
+		return
+	}
+	c.lastListenLogKey = key
+	c.subStatusMu.Unlock()
+
+	var msg string
+	if isChatSwitch {
+		if view.IsGroup {
+			msg = fmt.Sprintf("Group %q — loading history (%d relays)", view.Name, nRelays)
+		} else {
+			msg = fmt.Sprintf("#%s — loading history (%d relays)", strings.TrimPrefix(view.Name, "#"), nRelays)
+		}
+	} else {
+		if view.IsGroup {
+			msg = fmt.Sprintf("Group %q — listening (%d relays)", view.Name, nRelays)
+		} else {
+			msg = fmt.Sprintf("#%s — listening (%d relays)", strings.TrimPrefix(view.Name, "#"), nRelays)
+		}
+	}
+	select {
+	case c.eventsChan <- DisplayEvent{Type: "STATUS", Content: msg}:
+	default:
+	}
+}
+
+// historyLookbackSeconds is the subscription "since" window (Nostr unix seconds).
+func (c *client) historyLookbackSeconds() nostr.Timestamp {
+	m := c.config.HistoryLookbackMinutes
+	if m <= 0 {
+		m = defaultHistoryMin
+	}
+	if m > maxHistoryMin {
+		m = maxHistoryMin
+	}
+	return nostr.Timestamp(m * 60)
 }
 
 func New(actions <-chan UserAction, events chan<- DisplayEvent) (*client, error) {
@@ -64,6 +178,21 @@ func New(actions <-chan UserAction, events chan<- DisplayEvent) (*client, error)
 
 	if cfg.BlockedUsers == nil {
 		cfg.BlockedUsers = []blockedUser{}
+	}
+
+	// Remove legacy DM-prefixed views from config
+	cleanViews := make([]View, 0, len(cfg.Views))
+	for _, v := range cfg.Views {
+		if !strings.HasPrefix(v.Name, "DM-") {
+			cleanViews = append(cleanViews, v)
+		}
+	}
+	if len(cleanViews) != len(cfg.Views) {
+		cfg.Views = cleanViews
+		// Reset active view if it was a DM chat
+		if strings.HasPrefix(cfg.ActiveViewName, "DM-") {
+			cfg.ActiveViewName = ""
+		}
 	}
 
 	seenCache, err := lru.New[string, bool](seenCacheSize)
@@ -150,7 +279,7 @@ func (c *client) Run() {
 		}
 	}
 
-	c.sendStateUpdate()
+	c.sendStateUpdate(false)
 
 	c.wg.Go(func() {
 		c.updateAllSubscriptions()
@@ -178,7 +307,6 @@ func (c *client) handleAction(action UserAction) {
 	case "ACTIVATE_VIEW":
 		c.setActiveView(action.Payload)
 		c.flushAllOrdering()
-		c.updateAllSubscriptions()
 	case "CREATE_GROUP":
 		c.createGroup(action.Payload)
 	case "JOIN_CHATS":
@@ -221,6 +349,8 @@ func (c *client) handleAction(action UserAction) {
 		c.manageAnchors(action.Payload)
 	case "GET_HELP":
 		c.getHelp()
+	case "REQUEST_CHAT_USERS":
+		c.requestChatUsers(action.Payload)
 	case "QUIT":
 		c.shutdown()
 	}
@@ -347,4 +477,16 @@ func (c *client) flushAllOrdering() {
 	for _, k := range keys {
 		c.flushOrdered(k)
 	}
+}
+
+// discardOrderedStream drops buffered messages for a stream without emitting them
+// (e.g. when reloading chat history after identity rotation).
+func (c *client) discardOrderedStream(streamKey string) {
+	c.orderMu.Lock()
+	if t, ok := c.orderTimers[streamKey]; ok {
+		t.Stop()
+		delete(c.orderTimers, streamKey)
+	}
+	delete(c.orderBuf, streamKey)
+	c.orderMu.Unlock()
 }

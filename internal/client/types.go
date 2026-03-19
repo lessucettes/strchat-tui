@@ -18,7 +18,12 @@ const (
 	MaxMsgLen            = 2000
 	maxChatNameLen       = 12
 	orderingFlushDelay   = 200 * time.Millisecond
-	perStreamBufferMax   = 256
+	perStreamBufferMax = 256
+	defaultHistoryMin  = 10
+	maxHistoryMin      = 24 * 60
+	// Per-filter maximum number of stored events to request.
+	// This prevents relays from sending an unbounded amount of history.
+	messageHistoryLimit = 2000
 )
 
 // defaultEphChatRelays provides a fallback list of relays for named chats.
@@ -42,10 +47,18 @@ type RelayInfo struct {
 	Connected bool
 }
 
+// RelaysPanelUpdate is sent with RELAYS_UPDATE for the RELAYS TUI panel.
+type RelaysPanelUpdate struct {
+	Relays    []RelayInfo
+	UpCount   int // connected among desired URLs
+	DownCount int // desired minus up (fail cache, pending, disconnected)
+}
+
 // DisplayEvent represents an event sent from the client to the TUI for display.
 type DisplayEvent struct {
 	Type         string
 	Timestamp    string
+	CreatedAt    int64
 	Nick         string
 	Content      string
 	FullPubKey   string
@@ -55,6 +68,16 @@ type DisplayEvent struct {
 	ID           string
 	Chat         string
 	Payload      any
+}
+
+// ChatUser represents a user known inside a chat (cached from received events).
+// It is used to render the users list in the UI and to build private-message prefixes.
+type ChatUser struct {
+	PubKey       string
+	Nick         string
+	ShortPubKey  string
+	Chat         string
+	LastMsgAt    int64
 }
 
 type orderItem struct {
@@ -68,6 +91,9 @@ type StateUpdate struct {
 	Views           []View
 	ActiveViewIndex int
 	Nick            string
+	ShortPubKey     string
+	// ClearMessagePane: clear backlog UI and reload (same chat, new ephemeral identity).
+	ClearMessagePane bool
 }
 
 type chatSession struct {
@@ -82,6 +108,7 @@ type userContext struct {
 	nick        string
 	chat        string
 	shortPubKey string
+	lastMsgAt   int64
 }
 
 // managedRelay wraps a nostr.Relay with additional state for management.

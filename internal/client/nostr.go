@@ -69,11 +69,9 @@ func (c *client) updateAllSubscriptions() {
 
 	if len(activeChats) == 0 {
 		c.updateRelaySubscriptions(make(map[string][]string))
-		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "No active chat/group. Relay connections are inactive."}
+		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "No active chat — relays idle."}
 		return
 	}
-
-	c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Updating subscriptions for active chat/group..."}
 
 	desiredRelayToChats := make(map[string][]string)
 	for chat := range activeChats {
@@ -87,9 +85,26 @@ func (c *client) updateAllSubscriptions() {
 	}
 
 	c.updateRelaySubscriptions(desiredRelayToChats)
+
+	if activeView != nil && len(desiredRelayToChats) > 0 {
+		c.emitRelayListenStatus(activeView, len(desiredRelayToChats), false)
+	}
 }
 
 func (c *client) updateRelaySubscriptions(desiredRelays map[string][]string) {
+	c.updateRelaySubscriptionsWithRefresh(desiredRelays, false)
+}
+
+func (c *client) updateRelaySubscriptionsWithRefresh(desiredRelays map[string][]string, forceRefresh bool) {
+	want := make([]string, 0, len(desiredRelays))
+	for u := range desiredRelays {
+		want = append(want, u)
+	}
+	slices.Sort(want)
+	c.relaysMu.Lock()
+	c.lastSubscriptionRelayURLs = want
+	c.relaysMu.Unlock()
+
 	c.relaysMu.Lock()
 	currentRelays := make(map[string]*managedRelay, len(c.relays))
 	maps.Copy(currentRelays, c.relays)
@@ -106,7 +121,7 @@ func (c *client) updateRelaySubscriptions(desiredRelays map[string][]string) {
 			wg.Add(1)
 			go func(mr *managedRelay, chats []string) {
 				defer wg.Done()
-				if _, err := c.replaceSubscription(mr, chats); err != nil {
+				if _, err := c.replaceSubscriptionWithRefresh(mr, chats, forceRefresh); err != nil {
 					c.eventsChan <- DisplayEvent{
 						Type:    "ERROR",
 						Content: fmt.Sprintf("Resubscribe failed on %s: %v", mr.url, err),
@@ -206,36 +221,69 @@ func (c *client) manageRelayConnection(url string, chats []string) {
 }
 
 func (c *client) replaceSubscription(mr *managedRelay, chats []string) (bool, error) {
+	return c.replaceSubscriptionWithRefresh(mr, chats, false)
+}
+
+func (c *client) replaceSubscriptionWithRefresh(mr *managedRelay, chats []string, forceRefresh bool) (bool, error) {
 	mr.mu.Lock()
 	oldChats := mrCurrentChatsLocked(mr.subscription)
 	mr.mu.Unlock()
 
-	if sameStringSet(oldChats, chats) {
+	if !forceRefresh && sameStringSet(oldChats, chats) {
 		return false, nil
 	}
 
 	now := nostr.Now()
+	lookbackSeconds := c.historyLookbackSeconds()
 	filters := make(nostr.Filters, 0, len(chats))
 	for _, ch := range chats {
-		since := now
+		// Request a window of past events so history is visible immediately
+		// on joining/switching chats.
+		since := now - lookbackSeconds
 		if geohash.Validate(ch) == nil {
 			filters = append(filters, nostr.Filter{
 				Kinds: []int{geoChatKind},
 				Tags:  nostr.TagMap{"g": []string{ch}},
 				Since: &since,
+				Limit: messageHistoryLimit,
 			})
 		} else {
 			filters = append(filters, nostr.Filter{
 				Kinds: []int{ephChatKind},
 				Tags:  nostr.TagMap{"d": []string{ch}},
 				Since: &since,
+				Limit: messageHistoryLimit,
 			})
 		}
 	}
 
 	newSub, err := mr.relay.Subscribe(c.ctx, filters)
 	if err != nil {
-		return false, fmt.Errorf("subscribe failed: %w", err)
+		// Some relay disconnects keep the subscription channel closed and
+		// make Subscribe fail with "not connected". Reconnect and retry.
+		if mr.relay != nil {
+			_ = mr.relay.Close()
+		}
+
+		connectCtx, cancel := context.WithTimeout(c.ctx, connectTimeout)
+		start := time.Now()
+		relay, connErr := nostr.RelayConnect(connectCtx, mr.url)
+		cancel()
+		if connErr != nil {
+			return false, fmt.Errorf("subscribe failed: %w (reconnect failed: %v)", err, connErr)
+		}
+
+		mr.mu.Lock()
+		mr.relay = relay
+		mr.latency = time.Since(start)
+		mr.connected = true
+		mr.reconnectAttempts = 0
+		mr.mu.Unlock()
+
+		newSub, err = relay.Subscribe(c.ctx, filters)
+		if err != nil {
+			return false, fmt.Errorf("subscribe failed after reconnect: %w", err)
+		}
 	}
 
 	mr.mu.Lock()
@@ -254,23 +302,60 @@ func (c *client) replaceSubscription(mr *managedRelay, chats []string) (bool, er
 
 func (c *client) sendRelaysUpdate() {
 	c.relaysMu.Lock()
-	defer c.relaysMu.Unlock()
 
-	statuses := make([]RelayInfo, 0, len(c.relays))
+	desired := append([]string(nil), c.lastSubscriptionRelayURLs...)
+	// Include every desired URL in the list: from c.relays or as down (not yet in c.relays)
+	statuses := make([]RelayInfo, 0, len(desired)+len(c.relays))
+	seen := make(map[string]bool, len(c.relays))
 	for _, mr := range c.relays {
 		mr.mu.Lock()
 		connected := mr.connected
 		latency := mr.latency
 		mr.mu.Unlock()
-
+		seen[mr.url] = true
 		statuses = append(statuses, RelayInfo{
 			URL:       mr.url,
 			Latency:   latency,
 			Connected: connected,
 		})
 	}
+	for _, url := range desired {
+		if seen[url] {
+			continue
+		}
+		// Desired but not in c.relays (connect failed or pending) — show as down with ✗
+		statuses = append(statuses, RelayInfo{
+			URL:       url,
+			Latency:   0,
+			Connected: false,
+		})
+	}
 
-	c.eventsChan <- DisplayEvent{Type: "RELAYS_UPDATE", Payload: statuses}
+	up := 0
+	for _, url := range desired {
+		if c.relayFailed(url) {
+			continue
+		}
+		mr, ok := c.relays[url]
+		if !ok {
+			continue
+		}
+		mr.mu.Lock()
+		conn := mr.connected
+		mr.mu.Unlock()
+		if conn {
+			up++
+		}
+	}
+	down := len(desired) - up
+
+	c.relaysMu.Unlock()
+
+	c.eventsChan <- DisplayEvent{Type: "RELAYS_UPDATE", Payload: RelaysPanelUpdate{
+		Relays:    statuses,
+		UpCount:   up,
+		DownCount: down,
+	}}
 }
 
 // Event Ingestion & Processing
@@ -453,11 +538,34 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 		spk = safeSuffix(ev.PubKey, 4)
 	}
 
+	prevCtx, hadPrev := c.userContext.Get(ev.PubKey)
+
+	// If this user wasn't known before (or context changed), notify UI immediately.
+	// This is what makes the Users list update in real-time.
+	shouldNotifyUI := !hadPrev ||
+		prevCtx.chat != eventChat ||
+		prevCtx.nick != nick ||
+		prevCtx.shortPubKey != spk
+
 	c.userContext.Add(ev.PubKey, userContext{
 		nick:        nick,
 		chat:        eventChat,
 		shortPubKey: spk,
+		lastMsgAt:  int64(ev.CreatedAt),
 	})
+
+	if shouldNotifyUI {
+		c.eventsChan <- DisplayEvent{
+			Type: "CHAT_USER_DISCOVERED",
+			Payload: ChatUser{
+				PubKey:       ev.PubKey,
+				Nick:         nick,
+				ShortPubKey:  spk,
+				Chat:         eventChat,
+				LastMsgAt:   int64(ev.CreatedAt),
+			},
+		}
+	}
 
 	timestamp := time.Unix(int64(ev.CreatedAt), 0).Format("15:04:05")
 
@@ -477,6 +585,7 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 	c.enqueueOrdered(streamKey, DisplayEvent{
 		Type:         "NEW_MESSAGE",
 		Timestamp:    timestamp,
+		CreatedAt:    int64(ev.CreatedAt),
 		Nick:         nick,
 		FullPubKey:   ev.PubKey,
 		ShortPubKey:  spk,

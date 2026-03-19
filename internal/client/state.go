@@ -10,7 +10,6 @@ import (
 
 	"github.com/mmcloughlin/geohash"
 	"github.com/nbd-wtf/go-nostr"
-	"github.com/nbd-wtf/go-nostr/nip19"
 )
 
 // Chat/Group View
@@ -133,7 +132,7 @@ func (c *client) createGroup(payload string) {
 	c.config.ActiveViewName = name
 	c.saveConfig()
 
-	c.sendStateUpdate()
+	c.sendStateUpdate(false)
 	c.updateAllSubscriptions()
 }
 
@@ -172,7 +171,7 @@ func (c *client) leaveChat(chatName string) {
 		c.config.ActiveViewName = ""
 	}
 	c.saveConfig()
-	c.sendStateUpdate()
+	c.sendStateUpdate(false)
 	c.updateAllSubscriptions()
 
 	delete(c.chatKeys, chatName)
@@ -190,7 +189,7 @@ func (c *client) deleteGroup(groupName string) {
 		c.config.ActiveViewName = ""
 	}
 	c.saveConfig()
-	c.sendStateUpdate()
+	c.sendStateUpdate(false)
 	c.updateAllSubscriptions()
 }
 
@@ -254,7 +253,7 @@ func (c *client) setNick(nick string) {
 	}
 
 	c.saveConfig()
-	c.sendStateUpdate()
+	c.sendStateUpdate(false)
 }
 
 func (c *client) setPoW(difficultyStr string) {
@@ -283,7 +282,7 @@ func (c *client) setPoW(difficultyStr string) {
 	}
 
 	c.saveConfig()
-	c.sendStateUpdate()
+	c.sendStateUpdate(false)
 
 	if difficulty > 0 {
 		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("PoW difficulty for %s set to %d.", activeView.Name, difficulty)}
@@ -328,7 +327,7 @@ func (c *client) getHelp() {
 		"* /join <chat1> [chat2]... - Joins one or more chats. (Alias: /j)\n" +
 		"* /set [name|names...] - Without args: shows active chat. With one name: activates a chat/group. With multiple names: creates a group. (Alias: /s)\n" +
 		"* /list - Lists all your chats and groups. (Alias: /l)\n" +
-		"* /del [name] - Deletes a chat/group. If no name, deletes the active chat/group. (Alias: /d)\n" +
+		"* /del [name] - Deletes/leaves a chat or group. If no name, deletes the active one. (Alias: /d, /leave)\n" +
 		"* /nick [new_nick] - Sets or clears your nickname. (Alias: /n)\n" +
 		"* /pow [number] - Sets Proof-of-Work difficulty for the active chat/group. 0 to disable. (Alias: /p)\n" +
 		"* /relay [<num>|url1...] - List, remove (#), or add anchor relays. (Alias: /r)\n" +
@@ -338,6 +337,8 @@ func (c *client) getHelp() {
 		"* /unfilter [<num>] - Removes a filter by number. Without args, clears all. (Alias: /uf)\n" +
 		"* /mute [word|regex|<num>] - Adds a mute. Without args, lists mutes. With number, toggles off/on. (Alias: /m)\n" +
 		"* /unmute [<num>] - Removes a mute by number. Without args, clears all. (Alias: /um)\n" +
+		"* /follow - Toggle auto-scrolling new messages to the bottom.\n" +
+		"* /clear - Clears the Messages window (display only). (Alias: /c)\n" +
 		"* /quit - Exits the application. (Alias: /q)"
 
 	c.eventsChan <- DisplayEvent{Type: "INFO", Content: helpText}
@@ -383,6 +384,8 @@ func (c *client) handleNickCompletion(prefix string) {
 // Core State Primitives
 
 func (c *client) setActiveView(name string) {
+	prev := c.config.ActiveViewName
+
 	viewExists := false
 	var view *View
 	for i := range c.config.Views {
@@ -401,36 +404,50 @@ func (c *client) setActiveView(name string) {
 		return
 	}
 
-	if !view.IsGroup {
-		sk := nostr.GeneratePrivateKey()
-		pk, _ := nostr.GetPublicKey(sk)
-
-		nick := c.config.Nick
-		custom := false
-		if nick == "" {
-			nick = npubToTokiPona(pk)
-		} else {
-			custom = true
-		}
-
-		c.chatKeys[name] = chatSession{
-			privKey:    sk,
-			pubKey:     pk,
-			nick:       nick,
-			customNick: custom,
-		}
-
-		npub, _ := nip19.EncodePublicKey(pk)
-		c.eventsChan <- DisplayEvent{
-			Type: "STATUS",
-			Content: fmt.Sprintf("Generated ephemeral identity for chat '%s': %s (%s)",
-				view.Name, npub, nick),
+	// Enter on the same 1:1 chat in the list while already there: new ephemeral identity.
+	// Only when a session already exists (not on cold start: empty chatKeys + same active view).
+	shouldRefreshSubs := prev != name
+	clearMessagePane := false
+	if !view.IsGroup && prev == name {
+		if _, had := c.chatKeys[name]; had {
+			delete(c.chatKeys, name)
+			shouldRefreshSubs = true
+			clearMessagePane = true
+			c.discardOrderedStream("chat:" + name)
 		}
 	}
 
+	if !view.IsGroup {
+		if _, exists := c.chatKeys[name]; !exists {
+			sk := nostr.GeneratePrivateKey()
+			pk, _ := nostr.GetPublicKey(sk)
+
+			nick := c.config.Nick
+			custom := false
+			if nick == "" {
+				nick = npubToTokiPona(pk)
+			} else {
+				custom = true
+			}
+
+			c.chatKeys[name] = chatSession{
+				privKey:    sk,
+				pubKey:     pk,
+				nick:       nick,
+				customNick: custom,
+			}
+		}
+	}
+
+	// Update active view BEFORE refreshing subscriptions
 	c.config.ActiveViewName = name
 	c.saveConfig()
-	c.sendStateUpdate()
+	c.sendStateUpdate(clearMessagePane)
+
+	// Switching chats or rotating identity: refresh subscriptions for backlog.
+	if shouldRefreshSubs {
+		go c.forceRefreshSubscriptions()
+	}
 }
 
 func (c *client) getActiveView() *View {
@@ -447,7 +464,7 @@ func (c *client) getActiveView() *View {
 
 // Helpers
 
-func (c *client) sendStateUpdate() {
+func (c *client) sendStateUpdate(clearMessagePane bool) {
 	activeIdx := -1
 	for i := range c.config.Views {
 		if c.config.Views[i].Name == c.config.ActiveViewName {
@@ -461,9 +478,11 @@ func (c *client) sendStateUpdate() {
 	}
 
 	state := StateUpdate{
-		Views:           c.config.Views,
-		ActiveViewIndex: activeIdx,
-		Nick:            c.n,
+		Views:            c.config.Views,
+		ActiveViewIndex:  activeIdx,
+		Nick:             c.n,
+		ShortPubKey:      "",
+		ClearMessagePane: clearMessagePane,
 	}
 
 	if len(c.config.Views) == 0 || activeIdx == -1 {
@@ -481,6 +500,29 @@ func (c *client) sendStateUpdate() {
 			state.Nick = s.nick
 		} else {
 			state.Nick = npubToTokiPona(c.pk)
+		}
+	}
+
+	// Determine which pubkey identity we currently use for the active view,
+	// then send its short prefix to the UI.
+	v := c.config.Views[activeIdx]
+	if v.IsGroup {
+		if len(c.pk) >= 4 {
+			state.ShortPubKey = c.pk[:4]
+		} else {
+			state.ShortPubKey = c.pk
+		}
+	} else if s, ok := c.chatKeys[v.Name]; ok && len(s.pubKey) > 0 {
+		if len(s.pubKey) >= 4 {
+			state.ShortPubKey = s.pubKey[:4]
+		} else {
+			state.ShortPubKey = s.pubKey
+		}
+	} else {
+		if len(c.pk) >= 4 {
+			state.ShortPubKey = c.pk[:4]
+		} else {
+			state.ShortPubKey = c.pk
 		}
 	}
 
