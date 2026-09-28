@@ -3,392 +3,363 @@ package client
 import (
 	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
-	"strings"
-	"sync"
-	"sync/atomic"
+	"errors"
+	"fmt"
+	"math/rand/v2"
+	"slices"
 	"time"
 
+	"github.com/coder/websocket"
+	"github.com/mmcloughlin/geohash"
 	"github.com/nbd-wtf/go-nostr"
 )
 
 const (
-	maxDiscoveryDepth    = 2
-	maxActiveDiscoveries = 10
-	discoveryKind        = 10002
-	connectTimeout       = 10 * time.Second
-	verifyTimeout        = 5 * time.Second
-	debounceDelay        = 60 * time.Second
+	maxActiveRelays = 12
+	connectTimeout  = 5 * time.Second
+	maxFrameBytes   = 64 << 10
 )
 
-// DiscoveredRelay describes a relay entry in relays.json.
-type DiscoveredRelay struct {
-	URL      string `json:"url"`
-	LastSeen int64  `json:"last_seen"`
+// The client loop owns these handles; the worker owns its socket and subscription.
+type managedRelay struct {
+	url       string
+	cancel    context.CancelFunc
+	done      chan struct{}
+	chats     []string
+	updates   chan []string
+	publish   chan relayPublish
+	connected bool
+	latency   time.Duration
 }
 
-type discoveredRelayStore struct {
-	mu     sync.RWMutex
-	Path   string
-	Relays map[string]DiscoveredRelay
+type relayPublish struct {
+	ctx    context.Context
+	event  nostr.Event
+	result chan error
 }
 
-// Persistent store management
-
-func (c *client) loadDiscoveredRelayStore() error {
-	appConfigDir, err := getAppConfigDir()
-	if err != nil {
-		return err
-	}
-	path := filepath.Join(appConfigDir, "relays.json")
-
-	s := &discoveredRelayStore{Path: path, Relays: make(map[string]DiscoveredRelay)}
-	data, err := os.ReadFile(path)
-	if err == nil {
-		var tmp struct {
-			Discovered []DiscoveredRelay `json:"discovered"`
-		}
-		if json.Unmarshal(data, &tmp) == nil {
-			for _, r := range tmp.Discovered {
-				s.Relays[r.URL] = r
-			}
-		}
-	}
-
-	c.discoveredStore = s
-	return nil
+type relayEvent struct {
+	worker    *managedRelay
+	event     *nostr.Event
+	connected bool
+	latency   time.Duration
 }
 
-func (c *client) saveDiscoveredRelayStore() error {
-	s := c.discoveredStore
-	s.mu.RLock()
-	list := make([]DiscoveredRelay, 0, len(s.Relays))
-	for _, r := range s.Relays {
-		list = append(list, r)
+func (c *client) getRelayPoolForChat(chat string) []string {
+	urls := slices.Clone(c.config.AnchorRelays)
+	if geohash.Validate(chat) == nil {
+		// Nearest relays of both bundled catalogs (BitChat iOS and upstream
+		// georelays), because the two variants target different nearest sets.
+		if closest, err := closestRelays(chat, defaultRelayCount); err == nil {
+			urls = append(urls, closest...)
+		}
 	}
-	s.mu.RUnlock()
-
-	data, _ := json.MarshalIndent(map[string]any{"discovered": list}, "", "  ")
-	tmpPath := s.Path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
-		return err
+	if len(urls) == 0 {
+		urls = defaultEphChatRelays
 	}
-	return os.Rename(tmpPath, s.Path)
+	seen := make(map[string]bool)
+	var result []string
+	for _, raw := range urls {
+		url, err := normalizeRelayURL(raw)
+		if err == nil && !seen[url] {
+			seen[url] = true
+			result = append(result, url)
+		}
+	}
+	return result
 }
 
-func (c *client) getDiscoveredRelayURLs() []string {
-	c.discoveredStore.mu.RLock()
-	defer c.discoveredStore.mu.RUnlock()
-
-	urls := make([]string, 0, len(c.discoveredStore.Relays))
-	for url := range c.discoveredStore.Relays {
-		urls = append(urls, url)
+func (c *client) updateAllSubscriptions() {
+	var chats []string
+	if view := c.getActiveView(); view != nil {
+		if view.IsGroup {
+			chats = slices.Clone(view.Children)
+		} else {
+			chats = []string{view.Name}
+		}
 	}
-	return urls
-}
-
-// Discovery logic
-
-func (c *client) discoverRelays(anchors []string, depth int) {
-	for _, anchor := range anchors {
-		norm, err := normalizeRelayURL(anchor)
-		if err != nil {
-			continue
-		}
-		c.wg.Add(1)
-		go c.discoverOnAnchor(norm, depth)
-	}
-}
-
-// discoverOnAnchor connects to an anchor relay and listens for kind=10002,
-// automatically reconnecting on failure. Event processing is asynchronous
-// to avoid blocking the subscription feed.
-func (c *client) discoverOnAnchor(anchorURL string, depth int) {
-	defer c.wg.Done()
-
-	if depth > maxDiscoveryDepth {
-		return
-	}
-
-	if atomic.LoadInt32(&c.activeDiscoveries) >= maxActiveDiscoveries {
-		return
-	}
-	atomic.AddInt32(&c.activeDiscoveries, 1)
-	defer atomic.AddInt32(&c.activeDiscoveries, -1)
-
-	for {
-		// If client is shutting down, exit
-		select {
-		case <-c.ctx.Done():
-			return
-		default:
-		}
-
-		// connection with a short timeout
-		connectCtx, cancelConnect := context.WithTimeout(c.ctx, connectTimeout)
-		relay, err := nostr.RelayConnect(connectCtx, anchorURL)
-		cancelConnect()
-		if err != nil {
-			time.Sleep(15 * time.Second) // wait before reconnecting
-			continue
-		}
-
-		// subscription to 10002
-		f := nostr.Filter{Kinds: []int{discoveryKind}}
-		sub, err := relay.Subscribe(c.ctx, nostr.Filters{f})
-		if err != nil {
-			relay.Close()
-			time.Sleep(15 * time.Second) // wait before reconnecting
-			continue
-		}
-
-		// event reading loop
-		for {
-			select {
-			case <-c.ctx.Done():
-				sub.Unsub()
-				relay.Close()
-				return
-
-			case ev, ok := <-sub.Events:
-				if !ok {
-					// connection lost - trigger reconnect
-					sub.Unsub()
-					relay.Close()
-					time.Sleep(5 * time.Second)
-					goto retry // break inner loop, continue outer
-				}
-
-				// Process async to avoid blocking the event feed
-				c.wg.Add(1)
-				go func(e *nostr.Event) {
-					defer c.wg.Done()
-					c.parseRelayEvent(e, verifyTimeout, depth)
-				}(ev)
-			}
-		}
-
-	retry:
-		continue
-	}
-}
-
-// parseRelayEvent processes a kind=10002 event and asynchronously verifies
-// new relays. Verification is done in separate goroutines.
-func (c *client) parseRelayEvent(ev *nostr.Event, verifyTimeout time.Duration, depth int) {
-	if ev.Kind != discoveryKind {
-		return
-	}
-
-	store := c.discoveredStore
-
-	for _, tag := range ev.Tags {
-		if len(tag) < 2 || tag[0] != "r" {
-			continue
-		}
-
-		url, err := normalizeRelayURL(tag[1])
-		if err != nil {
-			continue
-		}
-
-		// skip read/write specific
-		if len(tag) >= 3 {
-			mode := strings.ToLower(strings.TrimSpace(tag[2]))
-			if mode == "read" || mode == "write" {
+	slices.Sort(chats)
+	desired := make(map[string][]string)
+	for _, chat := range chats {
+		for _, url := range c.getRelayPoolForChat(chat) {
+			if _, exists := desired[url]; !exists && len(desired) >= maxActiveRelays {
 				continue
 			}
+			desired[url] = append(desired[url], chat)
 		}
+	}
+	c.updateRelaySubscriptions(desired)
+}
 
-		// skip if it's one of our own anchor relays
-		isAnchor := false
-		for _, a := range c.config.AnchorRelays {
-			na, err := normalizeRelayURL(a)
-			if err == nil && na == url {
-				isAnchor = true
-				break
+func (c *client) updateRelaySubscriptions(desired map[string][]string) {
+	var retired []*managedRelay
+	for url, worker := range c.relays {
+		if _, needed := desired[url]; !needed {
+			worker.cancel()
+			retired = append(retired, worker)
+			delete(c.relays, url)
+		}
+	}
+	// Cancel all first, then join before starting replacements. The relay cap
+	// bounds live workers even when views change faster than sockets shut down.
+	for _, worker := range retired {
+		if worker.done != nil {
+			<-worker.done
+		}
+	}
+	urls := make([]string, 0, len(desired))
+	for url := range desired {
+		urls = append(urls, url)
+	}
+	slices.Sort(urls)
+	for _, url := range urls {
+		chats := slices.Clone(desired[url])
+		slices.Sort(chats)
+		chats = slices.Compact(chats)
+		if len(chats) == 0 {
+			continue
+		}
+		if worker := c.relays[url]; worker != nil {
+			if slices.Equal(worker.chats, chats) {
+				continue
+			}
+			worker.chats = chats
+			select {
+			case <-worker.updates:
+			default:
+			}
+			worker.updates <- chats
+		} else if len(c.relays) < maxActiveRelays {
+			ctx, cancel := context.WithCancel(c.ctx)
+			worker := &managedRelay{url: url, cancel: cancel, done: make(chan struct{}), chats: chats, updates: make(chan []string, 1), publish: make(chan relayPublish, 1)}
+			c.relays[url] = worker
+			c.wg.Go(func() { defer close(worker.done); c.runRelay(ctx, worker, chats) })
+		}
+	}
+	c.sendRelaysUpdate()
+}
+
+func chatFilters(chats []string, since nostr.Timestamp) nostr.Filters {
+	var geo, topics []string
+	for _, chat := range chats {
+		if geohash.Validate(chat) == nil {
+			geo = append(geo, chat)
+		} else {
+			topics = append(topics, chat)
+		}
+	}
+	var filters nostr.Filters
+	if len(geo) > 0 {
+		filters = append(filters, nostr.Filter{Kinds: []int{geoChatKind}, Tags: nostr.TagMap{"g": geo}, Since: &since, Limit: 200})
+	}
+	if len(topics) > 0 {
+		filters = append(filters, nostr.Filter{Kinds: []int{ephChatKind}, Tags: nostr.TagMap{"d": topics}, Since: &since, Limit: 200})
+	}
+	return filters
+}
+
+func (c *client) relayStatus(ctx context.Context, worker *managedRelay, connected bool, latency time.Duration) {
+	select {
+	case c.incoming <- relayEvent{worker: worker, connected: connected, latency: latency}:
+	case <-ctx.Done():
+	}
+}
+
+// Retry forever while selected. Neither an initial failure nor CLOSED permanently
+// blacklists a relay. Backoff resets only after a stable connection, not a handshake.
+func (c *client) runRelay(ctx context.Context, worker *managedRelay, chats []string) {
+	delay := 500 * time.Millisecond
+	since := nostr.Now()
+	for ctx.Err() == nil {
+		start := time.Now()
+		dialCtx, cancel := context.WithTimeout(ctx, connectTimeout)
+		conn, _, err := websocket.Dial(dialCtx, worker.url, nil)
+		cancel()
+		if err == nil {
+			conn.SetReadLimit(maxFrameBytes)
+			c.relayStatus(ctx, worker, true, time.Since(start))
+			chats = c.serveRelay(ctx, worker, conn, chats, since)
+			conn.CloseNow()
+			c.relayStatus(ctx, worker, false, 0)
+			if time.Since(start) > time.Minute {
+				delay = 500 * time.Millisecond
 			}
 		}
-		if isAnchor {
-			continue
+		// Only a small overlap is requested; ephemeral relays need not retain it.
+		since = max(since, nostr.Now()-30)
+		timer := time.NewTimer(delay/2 + time.Duration(rand.Int64N(int64(delay/2)+1)))
+	wait:
+		for {
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case chats = <-worker.updates:
+				since = nostr.Now()
+			case request := <-worker.publish:
+				request.result <- errors.New("relay is reconnecting")
+			case <-timer.C:
+				break wait
+			}
 		}
+		delay = min(delay*2, 30*time.Second)
+	}
+}
 
-		// if in fail-cache, skip
-		if c.verifyFailCache != nil && c.verifyFailCache.Contains(url) {
-			continue
-		}
+func writeFrame(ctx context.Context, conn *websocket.Conn, frame any) error {
+	data, err := json.Marshal(frame)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, connectTimeout)
+	defer cancel()
+	return conn.Write(ctx, websocket.MessageText, data)
+}
 
-		// uniqueness check block
-		c.verifyingMu.Lock()
+func subscribe(ctx context.Context, conn *websocket.Conn, chats []string, since nostr.Timestamp) error {
+	frame := []any{"REQ", "chat"}
+	for _, filter := range chatFilters(chats, since) {
+		frame = append(frame, filter)
+	}
+	return writeFrame(ctx, conn, frame)
+}
 
-		// already being verified
-		if _, ok := c.verifying[url]; ok {
-			c.verifyingMu.Unlock()
-			continue
-		}
-
-		// already active
-		if _, ok := c.relays[url]; ok {
-			c.verifyingMu.Unlock()
-			continue
-		}
-
-		// already in discovered
-		if _, ok := store.Relays[url]; ok {
-			c.verifyingMu.Unlock()
-			continue
-		}
-
-		// mark as "being verified"
-		c.verifying[url] = struct{}{}
-		c.verifyingMu.Unlock()
-
-		// async verification
-		c.wg.Add(1)
-		go func(url string) {
-			defer c.wg.Done()
-
-			// remove from "verifying" map when done
-			defer func() {
-				c.verifyingMu.Lock()
-				delete(c.verifying, url)
-				c.verifyingMu.Unlock()
-			}()
-
-			ok := c.verifyRelay(url, verifyTimeout)
-			if !ok {
-				// add to fail-cache
-				if c.verifyFailCache != nil {
-					c.verifyFailCache.Add(url, true)
-				}
+// One reader, one bounded queue, no goroutine per frame. The websocket library
+// handles control frames while Read is active; Ping has a bounded pong deadline.
+func (c *client) serveRelay(ctx context.Context, worker *managedRelay, conn *websocket.Conn, chats []string, since nostr.Timestamp) []string {
+	ctx, cancel := context.WithCancel(ctx)
+	frames := make(chan []byte, 16)
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		defer close(frames)
+		for {
+			kind, data, err := conn.Read(ctx)
+			if err != nil {
 				return
 			}
-
-			// save to discoveredStore
-			store.mu.Lock()
-			store.Relays[url] = DiscoveredRelay{
-				URL:      url,
-				LastSeen: time.Now().Unix(),
+			if kind != websocket.MessageText {
+				continue
 			}
-			store.mu.Unlock()
-
-			// connect immediately
-			go c.manageRelayConnection(url, nil)
-
-			// update subscriptions (debounced)
-			c.triggerSubUpdate()
-
-			// recursive discovery (if depth allows)
-			if depth < maxDiscoveryDepth {
-				c.wg.Add(1)
-				go c.discoverOnAnchor(url, depth+1)
+			select {
+			case frames <- data:
+			case <-ctx.Done():
+				return
 			}
-
-		}(url)
+		}
+	}()
+	defer func() { cancel(); conn.CloseNow(); <-readerDone }()
+	var pending *relayPublish
+	var pendingDone <-chan struct{}
+	defer func() {
+		if pending != nil {
+			pending.result <- errors.New("relay disconnected before acknowledgement")
+		}
+	}()
+	if subscribe(ctx, conn, chats, since) != nil {
+		return chats
 	}
-}
-
-// Verification logic
-
-func (c *client) verifyRelay(url string, timeout time.Duration) bool {
-	rctx, cancel := context.WithTimeout(c.ctx, timeout)
-	defer cancel()
-
-	relay, err := nostr.RelayConnect(rctx, url)
-	if err != nil {
-		return false
-	}
-	defer relay.Close()
-
-	// create test event
-	dummy := nostr.Event{
-		CreatedAt: nostr.Now(),
-		Kind:      geoChatKind, // Kind=20000
-		Tags:      nostr.Tags{{"client", "strchat-tui"}},
-		Content:   "",
-		PubKey:    c.pk,
-	}
-	if c.sk == "" {
-		return false
-	}
-	if err := dummy.Sign(c.sk); err != nil {
-		return false
-	}
-
-	// try to publish
-	if err := relay.Publish(rctx, dummy); err != nil {
-		return false // publish failed
-	}
-
-	// now read this event back by its ID
-	readCtx, cancelRead := context.WithTimeout(rctx, timeout/2)
-	defer cancelRead()
-
-	f := nostr.Filter{
-		Kinds: []int{geoChatKind},
-		IDs:   []string{dummy.ID},
-		Limit: 1,
-	}
-
-	sub, err := relay.Subscribe(readCtx, nostr.Filters{f})
-	if err != nil {
-		return false
-	}
-	defer sub.Unsub()
-
-	gotResponse := false
+	ping := time.NewTicker(30 * time.Second)
+	defer ping.Stop()
 	for {
 		select {
-		case <-readCtx.Done():
-			return gotResponse
-
-		case ev, ok := <-sub.Events:
+		case <-ctx.Done():
+			return chats
+		case <-pendingDone:
+			pending.result <- pending.ctx.Err()
+			pending = nil
+			pendingDone = nil
+		case <-ping.C:
+			pingCtx, stop := context.WithTimeout(ctx, connectTimeout)
+			err := conn.Ping(pingCtx)
+			stop()
+			if err != nil {
+				return chats
+			}
+		case chats = <-worker.updates:
+			since = nostr.Now()
+			if subscribe(ctx, conn, chats, since) != nil {
+				return chats
+			}
+		case request := <-worker.publish:
+			if request.ctx.Err() != nil {
+				request.result <- request.ctx.Err()
+				continue
+			}
+			if pending != nil {
+				request.result <- errors.New("relay publish queue is busy")
+				continue
+			}
+			if err := writeFrame(request.ctx, conn, []any{"EVENT", request.event}); err != nil {
+				request.result <- err
+				return chats
+			}
+			pending = &request
+			pendingDone = request.ctx.Done()
+		case data, ok := <-frames:
 			if !ok {
-				return false
+				return chats
 			}
-			if ev != nil {
-				gotResponse = true
+			var frame []json.RawMessage
+			if json.Unmarshal(data, &frame) != nil || len(frame) < 2 {
+				continue
 			}
-
-		case <-sub.EndOfStoredEvents:
-			return true
+			var label, id string
+			if json.Unmarshal(frame[0], &label) != nil || json.Unmarshal(frame[1], &id) != nil {
+				continue
+			}
+			switch label {
+			case "EVENT":
+				if id != "chat" || len(frame) != 3 {
+					continue
+				}
+				var event nostr.Event
+				if json.Unmarshal(frame[2], &event) != nil {
+					continue
+				}
+				select {
+				case c.incoming <- relayEvent{worker: worker, event: &event}:
+				case <-ctx.Done():
+					return chats
+				}
+			case "CLOSED":
+				if id == "chat" {
+					return chats
+				}
+			case "OK":
+				if len(frame) != 4 || pending == nil || id != pending.event.ID {
+					continue
+				}
+				var accepted bool
+				var reason string
+				if json.Unmarshal(frame[2], &accepted) != nil || json.Unmarshal(frame[3], &reason) != nil {
+					continue
+				}
+				var err error
+				if !accepted {
+					err = fmt.Errorf("relay rejected event: %s", truncateString(sanitizeString(reason), 200))
+				}
+				pending.result <- err
+				pending = nil
+				pendingDone = nil
+			}
 		}
 	}
 }
 
-// Helpers
-
-func (c *client) isDiscoveredRelay(url string) bool {
-	if c.discoveredStore == nil {
-		return false
+func (c *client) sendRelaysUpdate() {
+	statuses := make([]RelayInfo, 0, len(c.relays))
+	for _, worker := range c.relays {
+		statuses = append(statuses, RelayInfo{URL: worker.url, Connected: worker.connected, Latency: worker.latency})
 	}
-	c.discoveredStore.mu.RLock()
-	_, ok := c.discoveredStore.Relays[url]
-	c.discoveredStore.mu.RUnlock()
-	return ok
-}
-
-// relayFailed checks if a discovered relay is in the fail cache.
-func (c *client) relayFailed(url string) bool {
-	if c.verifyFailCache == nil || !c.isDiscoveredRelay(url) {
-		return false
-	}
-	norm, err := normalizeRelayURL(url)
-	if err != nil {
-		return false
-	}
-	return c.verifyFailCache.Contains(norm)
-}
-
-// markRelayFailed adds a discovered relay to the fail cache.
-func (c *client) markRelayFailed(url string) {
-	if c.verifyFailCache == nil || !c.isDiscoveredRelay(url) {
-		return
-	}
-	norm, err := normalizeRelayURL(url)
-	if err != nil {
-		return
-	}
-	c.verifyFailCache.Add(norm, true)
+	slices.SortFunc(statuses, func(a, b RelayInfo) int {
+		if a.URL < b.URL {
+			return -1
+		}
+		if a.URL > b.URL {
+			return 1
+		}
+		return 0
+	})
+	c.emit(DisplayEvent{Type: "RELAYS_UPDATE", Payload: statuses})
 }

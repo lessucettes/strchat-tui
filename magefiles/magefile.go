@@ -52,6 +52,7 @@ func All() {
 		func() error { return build("windows", "amd64", binBase+".exe") },
 		func() error { return build("darwin", "amd64", binBase+"-macos-intel") },
 		func() error { return build("darwin", "arm64", binBase+"-macos-arm") },
+		func() error { return build("android", "arm64", binBase+"-android-arm64") },
 	)
 }
 
@@ -73,6 +74,11 @@ func MacIntel() error {
 // Build for macOS/arm64
 func MacARM() error {
 	return build("darwin", "arm64", binBase)
+}
+
+// Build for Android/arm64 (runs on Android and Termux)
+func Android() error {
+	return build("android", "arm64", binBase+"-android-arm64")
 }
 
 // Build for macOS

@@ -3,57 +3,32 @@ package client
 import (
 	"context"
 	"fmt"
-	"log"
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/nbd-wtf/go-nostr"
 )
 
+// Run is the only owner of configuration, identities, caches and relay handles.
+// Workers receive immutable snapshots and return results through bounded channels.
 type client struct {
-	// Identity & Config
-	sk       string // Secret key
-	pk       string // Public key
-	n        string // Global nick
-	config   *config
-	chatKeys map[string]chatSession
-
-	// TUI I/O
-	actionsChan <-chan UserAction
-	eventsChan  chan<- DisplayEvent
-
-	// Client Lifecycle
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
-
-	// Relay State
-	relays   map[string]*managedRelay
-	relaysMu sync.Mutex // Protects relays
-
-	// Event Processing State
-	seenCache   *lru.Cache[string, bool]
-	seenCacheMu sync.Mutex // Protects seenCache
-	userContext *lru.Cache[string, userContext]
-	orderBuf    map[string][]orderItem
-	orderTimers map[string]*time.Timer
-	orderMu     sync.Mutex // Protects orderBuf, orderTimers
-
-	// Relay Discovery State
-	discoveredStore   *discoveredRelayStore
-	verifyFailCache   *lru.Cache[string, bool]
-	verifying         map[string]struct{}
-	verifyingMu       sync.Mutex // Protects verifying
-	activeDiscoveries int32
-	updateSubTimer    *time.Timer
-	updateSubMu       sync.Mutex // Protects updateSubTimer
-
-	// Moderation State
-	filtersCompiled []compiledPattern
-	mutesCompiled   []compiledPattern
+	sk, pk, n                      string
+	config                         *config
+	chatKeys                       map[string]chatSession
+	actionsChan                    <-chan UserAction
+	eventsChan                     chan<- DisplayEvent
+	ctx                            context.Context
+	cancel                         context.CancelFunc
+	wg                             sync.WaitGroup
+	relays                         map[string]*managedRelay
+	incoming                       chan relayEvent
+	outgoing                       chan publishJob
+	results                        chan publishResult
+	seenCache                      *lru.Cache[string, bool]
+	userContext                    *lru.Cache[string, userContext]
+	filtersCompiled, mutesCompiled []compiledPattern
 }
 
 func New(actions <-chan UserAction, events chan<- DisplayEvent) (*client, error) {
@@ -61,123 +36,105 @@ func New(actions <-chan UserAction, events chan<- DisplayEvent) (*client, error)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load configuration: %w", err)
 	}
+	return newClient(cfg, actions, events), nil
+}
 
-	if cfg.BlockedUsers == nil {
-		cfg.BlockedUsers = []blockedUser{}
-	}
-
-	seenCache, err := lru.New[string, bool](seenCacheSize)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create seen cache: %w", err)
-	}
-
-	userContextCache, err := lru.New[string, userContext](userContextCacheSize)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create user context cache: %w", err)
-	}
-
-	verifyFailCache, err := lru.New[string, bool](2000)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create verify fail cache: %w", err)
-	}
-
+func newClient(cfg *config, actions <-chan UserAction, events chan<- DisplayEvent) *client {
 	ctx, cancel := context.WithCancel(context.Background())
+	seen, _ := lru.New[string, bool](seenCacheSize)
+	users, _ := lru.New[string, userContext](userContextCacheSize)
+	c := &client{config: cfg, actionsChan: actions, eventsChan: events, ctx: ctx, cancel: cancel,
+		chatKeys: make(map[string]chatSession), relays: make(map[string]*managedRelay),
+		incoming: make(chan relayEvent, 256), outgoing: make(chan publishJob, 8), results: make(chan publishResult, 8),
+		seenCache: seen, userContext: users, n: cfg.Nick}
+	c.rebuildRegexCaches()
+	return c
+}
 
-	client := &client{
-		config:          cfg,
-		actionsChan:     actions,
-		eventsChan:      events,
-		relays:          make(map[string]*managedRelay),
-		seenCache:       seenCache,
-		userContext:     userContextCache,
-		chatKeys:        make(map[string]chatSession),
-		orderBuf:        make(map[string][]orderItem),
-		orderTimers:     make(map[string]*time.Timer),
-		verifying:       make(map[string]struct{}),
-		verifyFailCache: verifyFailCache,
-		ctx:             ctx,
-		cancel:          cancel,
+// Stop is safe concurrently with Run, including while the display is blocked.
+// The caller joins Run before releasing its event channel.
+func (c *client) Stop() { c.cancel() }
+
+func (c *client) emit(event DisplayEvent) {
+	select {
+	case c.eventsChan <- event:
+	case <-c.ctx.Done():
 	}
-
-	if err := client.loadDiscoveredRelayStore(); err != nil {
-		return nil, fmt.Errorf("failed to load relay store: %w", err)
-	}
-
-	client.rebuildRegexCaches()
-
-	if cfg.Nick != "" {
-		client.n = cfg.Nick
-	}
-
-	return client, nil
 }
 
 func (c *client) Run() {
-	// ensure main keypair is loaded
+	defer c.shutdown()
+	if c.ctx.Err() != nil {
+		return
+	}
+	c.sk = c.config.PrivateKey
 	if c.sk == "" {
-		if c.config.PrivateKey != "" {
-			c.sk = c.config.PrivateKey
-			c.pk, _ = nostr.GetPublicKey(c.sk)
-		} else {
-			c.sk = nostr.GeneratePrivateKey()
-			c.pk, _ = nostr.GetPublicKey(c.sk)
-			c.config.PrivateKey = c.sk
-			c.saveConfig()
-		}
-	}
-
-	identitySet := false
-	if c.config.ActiveViewName != "" {
-		c.setActiveView(c.config.ActiveViewName)
-		identitySet = true
-	} else if len(c.config.Views) > 0 {
-		c.setActiveView(c.config.Views[0].Name)
-		identitySet = true
-	}
-
-	if !identitySet {
-		log.Println("No chat/group found on startup, generating initial ephemeral identity.")
 		c.sk = nostr.GeneratePrivateKey()
-		c.pk, _ = nostr.GetPublicKey(c.sk)
-		if c.config.Nick != "" {
-			c.n = c.config.Nick
-		} else {
+		c.config.PrivateKey = c.sk
+		c.saveConfig()
+	}
+	c.pk, _ = nostr.GetPublicKey(c.sk)
+	// Start the transport before the first display write: emit blocks while the
+	// display channel is full, and relay workers must not depend on the UI
+	// draining its queue, or a saturated display leaves the client with no dial,
+	// no subscription and no traffic. updateAllSubscriptions emits its relay
+	// snapshot only after the workers exist.
+	c.wg.Go(c.publishLoop)
+	c.updateAllSubscriptions()
+	if view := c.getActiveView(); view != nil {
+		c.setActiveView(view.Name)
+	} else {
+		if c.n == "" {
 			c.n = npubToTokiPona(c.pk)
 		}
-		c.eventsChan <- DisplayEvent{
-			Type:    "STATUS",
-			Content: fmt.Sprintf("No chats joined. Initial identity: %s (%s...)", c.n, c.pk[:4]),
-		}
+		c.emit(DisplayEvent{Type: "INFO", Content: "No chats joined. Use /join <chat> and /help. Public messages are not encrypted."})
 	}
-
 	c.sendStateUpdate()
-
-	c.wg.Go(func() {
-		c.updateAllSubscriptions()
-		c.discoverRelays(c.config.AnchorRelays, 1)
-	})
-
-	for {
+	for c.ctx.Err() == nil {
 		select {
+		case <-c.ctx.Done():
+			return
 		case action, ok := <-c.actionsChan:
 			if !ok {
-				c.shutdown()
 				return
 			}
 			c.handleAction(action)
-		case <-c.ctx.Done():
-			return
+		case incoming := <-c.incoming:
+			worker := incoming.worker
+			if c.relays[worker.url] != worker {
+				continue
+			}
+			if incoming.event != nil {
+				c.processEvent(incoming.event, worker.url)
+			} else {
+				worker.connected = incoming.connected
+				worker.latency = incoming.latency
+				c.sendRelaysUpdate()
+			}
+		case result := <-c.results:
+			if result.accepted > 0 {
+				c.processEvent(&result.event, "local")
+			}
+			c.emit(DisplayEvent{Type: result.kind, Content: result.message})
 		}
+	}
+}
+
+func (c *client) shutdown() {
+	c.cancel()
+	c.wg.Wait()
+	select {
+	case c.eventsChan <- DisplayEvent{Type: "SHUTDOWN"}:
+	default:
 	}
 }
 
 func (c *client) handleAction(action UserAction) {
 	switch action.Type {
 	case "SEND_MESSAGE":
-		go c.publishMessage(action.Payload)
+		c.publishMessage(action.Payload)
 	case "ACTIVATE_VIEW":
 		c.setActiveView(action.Payload)
-		c.flushAllOrdering()
 		c.updateAllSubscriptions()
 	case "CREATE_GROUP":
 		c.createGroup(action.Payload)
@@ -222,129 +179,54 @@ func (c *client) handleAction(action UserAction) {
 	case "GET_HELP":
 		c.getHelp()
 	case "QUIT":
-		c.shutdown()
+		c.Stop()
 	}
 }
 
-// manageAnchors handles adding/removing/listing anchor relays.
 func (c *client) manageAnchors(payload string) {
 	args := strings.Fields(payload)
-
 	if len(args) == 0 {
-		if len(c.config.AnchorRelays) == 0 {
-			c.eventsChan <- DisplayEvent{Type: "INFO", Content: "No anchor relays set. Use /relay <url> to add one."}
-			return
-		}
-		var builder strings.Builder
-		builder.WriteString("Anchor Relays:\n")
+		var text strings.Builder
+		text.WriteString("Configured relays (no automatic discovery):\n")
 		for i, url := range c.config.AnchorRelays {
-			builder.WriteString(fmt.Sprintf("[%d] %s\n", i+1, url))
+			fmt.Fprintf(&text, "[%d] %s\n", i+1, url)
 		}
-		c.eventsChan <- DisplayEvent{Type: "INFO", Content: builder.String()}
+		text.WriteString("Use /relay <url> to add, /relay <number> to remove. Empty list uses defaults.")
+		c.emit(DisplayEvent{Type: "INFO", Content: text.String()})
 		return
 	}
-
 	if len(args) == 1 {
-		idx, err := strconv.Atoi(args[0])
-		if err == nil {
-			if idx < 1 || idx > len(c.config.AnchorRelays) {
-				c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Invalid index: %d. Use /relay to see the list.", idx)}
+		if index, err := strconv.Atoi(args[0]); err == nil {
+			if index < 1 || index > len(c.config.AnchorRelays) {
+				c.emit(DisplayEvent{Type: "ERROR", Content: "Invalid relay index."})
 				return
 			}
-			removedURL := c.config.AnchorRelays[idx-1]
-			c.config.AnchorRelays = append(c.config.AnchorRelays[:idx-1], c.config.AnchorRelays[idx:]...)
+			c.config.AnchorRelays = append(c.config.AnchorRelays[:index-1], c.config.AnchorRelays[index:]...)
 			c.saveConfig()
-			c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Removed anchor relay: %s", removedURL)}
-			go c.updateAllSubscriptions()
+			c.updateAllSubscriptions()
 			return
 		}
 	}
-
-	var added []string
-	var invalid []string
-	existingAnchors := make(map[string]struct{}, len(c.config.AnchorRelays))
-	for _, anchor := range c.config.AnchorRelays {
-		existingAnchors[anchor] = struct{}{}
+	existing := make(map[string]bool)
+	for _, url := range c.config.AnchorRelays {
+		existing[url] = true
 	}
-
-	for _, rawURL := range args {
-		url, err := normalizeRelayURL(rawURL)
+	for _, raw := range args {
+		url, err := normalizeRelayURL(raw)
 		if err != nil {
-			invalid = append(invalid, rawURL)
+			c.emit(DisplayEvent{Type: "ERROR", Content: err.Error()})
 			continue
 		}
-		if _, exists := existingAnchors[url]; exists {
+		if existing[url] {
 			continue
 		}
-
+		if len(c.config.AnchorRelays) >= maxActiveRelays {
+			c.emit(DisplayEvent{Type: "ERROR", Content: "Relay limit reached (12). Remove an unused relay first."})
+			break
+		}
 		c.config.AnchorRelays = append(c.config.AnchorRelays, url)
-		existingAnchors[url] = struct{}{}
-		added = append(added, url)
+		existing[url] = true
 	}
-
-	if len(invalid) > 0 {
-		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Invalid URL(s) skipped: %s", strings.Join(invalid, ", "))}
-	}
-
-	if len(added) > 0 {
-		c.saveConfig()
-		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Added anchor relay(s): %s", strings.Join(added, ", "))}
-		go func() {
-			c.updateAllSubscriptions()
-			c.discoverRelays(added, 1)
-		}()
-	} else if len(invalid) == 0 {
-		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Specified relay(s) are already in the anchor list."}
-	}
-}
-
-func (c *client) shutdown() {
-	c.cancel()
-	c.orderMu.Lock()
-	for key, t := range c.orderTimers {
-		if t.Stop() {
-			go c.flushOrdered(key)
-		}
-	}
-	c.orderTimers = make(map[string]*time.Timer)
-	c.orderMu.Unlock()
-	c.wg.Wait()
-	select {
-	case c.eventsChan <- DisplayEvent{Type: "SHUTDOWN"}:
-	case <-time.After(200 * time.Millisecond):
-	}
-}
-
-// Helpers
-
-// triggerSubUpdate safely resets a timer to call updateAllSubscriptions.
-func (c *client) triggerSubUpdate() {
-	c.updateSubMu.Lock()
-	defer c.updateSubMu.Unlock()
-
-	if c.updateSubTimer != nil {
-		c.updateSubTimer.Reset(debounceDelay)
-		return
-	}
-
-	c.updateSubTimer = time.AfterFunc(debounceDelay, func() {
-		c.updateAllSubscriptions()
-		_ = c.saveDiscoveredRelayStore()
-
-		c.updateSubMu.Lock()
-		c.updateSubTimer = nil
-		c.updateSubMu.Unlock()
-	})
-}
-
-func (c *client) flushAllOrdering() {
-	c.orderMu.Lock()
-	keys := make([]string, 0, len(c.orderTimers))
-	for k := range c.orderTimers {
-		keys = append(keys, k)
-	}
-	c.orderMu.Unlock()
-	for _, k := range keys {
-		c.flushOrdered(k)
-	}
+	c.saveConfig()
+	c.updateAllSubscriptions()
 }

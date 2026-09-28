@@ -1,0 +1,11 @@
+.gitignore
+georelays_cache.csv
+strchat-tui-linux
+strchat-tui-macos-arm
+strchat-tui-macos-intel
+strchat-tui-android-arm64
+strchat-tui.exe
+strchat-tui
+__pycache__/
+*.pyc
+docs/

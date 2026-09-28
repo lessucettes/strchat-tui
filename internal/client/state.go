@@ -3,6 +3,7 @@ package client
 import (
 	"fmt"
 	"log"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,14 +30,14 @@ outer:
 		if geohash.Validate(name) != nil {
 			normalizedName, err := normalizeAndValidateChatName(name)
 			if err != nil {
-				c.eventsChan <- DisplayEvent{Type: "ERROR", Content: err.Error()}
+				c.emit(DisplayEvent{Type: "ERROR", Content: err.Error()})
 				continue outer
 			}
 			if utf8.RuneCountInString(normalizedName) > maxChatNameLen {
-				c.eventsChan <- DisplayEvent{
+				c.emit(DisplayEvent{
 					Type:    "ERROR",
 					Content: fmt.Sprintf("Chat name '%s' is too long (max %d chars).", normalizedName, maxChatNameLen),
-				}
+				})
 				continue outer
 			}
 			if len(normalizedName) == 0 {
@@ -69,7 +70,7 @@ outer:
 		} else {
 			content = fmt.Sprintf("You are already in all specified chats: %s.", strings.Join(existingChats, ", "))
 		}
-		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: content}
+		c.emit(DisplayEvent{Type: "STATUS", Content: content})
 	}
 }
 
@@ -105,15 +106,15 @@ func (c *client) createGroup(payload string) {
 	}
 
 	if len(notFoundChats) > 0 {
-		c.eventsChan <- DisplayEvent{
+		c.emit(DisplayEvent{
 			Type:    "ERROR",
 			Content: fmt.Sprintf("Cannot create group. The following chats were not found: %s", strings.Join(notFoundChats, ", ")),
-		}
+		})
 		return
 	}
 
 	if len(validMembers) < 2 {
-		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "A group requires at least two unique, existing chats."}
+		c.emit(DisplayEvent{Type: "ERROR", Content: "A group requires at least two unique, existing chats."})
 		return
 	}
 
@@ -123,7 +124,7 @@ func (c *client) createGroup(payload string) {
 
 	for _, view := range c.config.Views {
 		if view.Name == name {
-			c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Group with these chats already exists: '%s'", name)}
+			c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Group with these chats already exists: '%s'", name)})
 			return
 		}
 	}
@@ -198,7 +199,7 @@ func (c *client) deleteView(viewName string) {
 	if viewName == "" {
 		activeView := c.getActiveView()
 		if activeView == nil {
-			c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "Cannot delete: there is no active chat."}
+			c.emit(DisplayEvent{Type: "ERROR", Content: "Cannot delete: there is no active chat."})
 			return
 		}
 		viewName = activeView.Name
@@ -213,16 +214,16 @@ func (c *client) deleteView(viewName string) {
 	}
 
 	if viewToDelete == nil {
-		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Chat or group '%s' not found.", viewName)}
+		c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Chat or group '%s' not found.", viewName)})
 		return
 	}
 
 	if viewToDelete.IsGroup {
 		c.deleteGroup(viewName)
-		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Group '%s' deleted.", viewName)}
+		c.emit(DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Group '%s' deleted.", viewName)})
 	} else {
 		c.leaveChat(viewName)
-		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Left chat '%s'.", viewName)}
+		c.emit(DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Left chat '%s'.", viewName)})
 	}
 }
 
@@ -234,23 +235,21 @@ func (c *client) setNick(nick string) {
 
 	if nick != "" {
 		c.n = nick
-		c.eventsChan <- DisplayEvent{
+		c.emit(DisplayEvent{
 			Type:    "STATUS",
 			Content: fmt.Sprintf("Nick set to: %s", c.n),
-		}
+		})
 		for name, session := range c.chatKeys {
 			session.nick = c.n
-			session.customNick = true
 			c.chatKeys[name] = session
 		}
 	} else {
 		c.n = npubToTokiPona(c.pk)
 		for name, session := range c.chatKeys {
 			session.nick = npubToTokiPona(session.pubKey)
-			session.customNick = false
 			c.chatKeys[name] = session
 		}
-		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: "Nick has been cleared."}
+		c.emit(DisplayEvent{Type: "STATUS", Content: "Nick has been cleared."})
 	}
 
 	c.saveConfig()
@@ -260,18 +259,21 @@ func (c *client) setNick(nick string) {
 func (c *client) setPoW(difficultyStr string) {
 	difficulty, err := strconv.Atoi(strings.TrimSpace(difficultyStr))
 	if err != nil {
-		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Invalid PoW difficulty: '%s'. Must be a number.", difficultyStr)}
+		c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Invalid PoW difficulty: '%s'. Must be a number.", difficultyStr)})
 		return
 	}
 
-	if difficulty < 0 {
-		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "PoW difficulty cannot be negative."}
+	// Reject rather than clamp: silently storing a different target than the one
+	// the user asked for is worse than telling them the target is unreachable.
+	if difficulty < 0 || difficulty > maxPoW {
+		c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf(
+			"PoW difficulty must be between 0 and %d: mining must finish inside the 10-second send deadline.", maxPoW)})
 		return
 	}
 
 	activeView := c.getActiveView()
 	if activeView == nil {
-		c.eventsChan <- DisplayEvent{Type: "ERROR", Content: "Cannot set PoW: no active chat/group."}
+		c.emit(DisplayEvent{Type: "ERROR", Content: "Cannot set PoW: no active chat/group."})
 		return
 	}
 
@@ -286,9 +288,9 @@ func (c *client) setPoW(difficultyStr string) {
 	c.sendStateUpdate()
 
 	if difficulty > 0 {
-		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("PoW difficulty for %s set to %d.", activeView.Name, difficulty)}
+		c.emit(DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("PoW difficulty for %s set to %d.", activeView.Name, difficulty)})
 	} else {
-		c.eventsChan <- DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("PoW disabled for %s.", activeView.Name)}
+		c.emit(DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("PoW disabled for %s.", activeView.Name)})
 	}
 }
 
@@ -296,7 +298,7 @@ func (c *client) setPoW(difficultyStr string) {
 
 func (c *client) listChats() {
 	if len(c.config.Views) == 0 {
-		c.eventsChan <- DisplayEvent{Type: "INFO", Content: "You are not in any chats. Use /join <chat_name> to join one."}
+		c.emit(DisplayEvent{Type: "INFO", Content: "You are not in any chats. Use /join <chat_name> to join one."})
 		return
 	}
 
@@ -309,7 +311,7 @@ func (c *client) listChats() {
 			builder.WriteString(fmt.Sprintf(" - %s\n", view.Name))
 		}
 	}
-	c.eventsChan <- DisplayEvent{Type: "INFO", Content: builder.String()}
+	c.emit(DisplayEvent{Type: "INFO", Content: builder.String()})
 }
 
 func (c *client) getActiveChat() {
@@ -320,7 +322,7 @@ func (c *client) getActiveChat() {
 	} else {
 		content = "There is no active chat/group."
 	}
-	c.eventsChan <- DisplayEvent{Type: "INFO", Content: content}
+	c.emit(DisplayEvent{Type: "INFO", Content: content})
 }
 
 func (c *client) getHelp() {
@@ -340,7 +342,7 @@ func (c *client) getHelp() {
 		"* /unmute [<num>] - Removes a mute by number. Without args, clears all. (Alias: /um)\n" +
 		"* /quit - Exits the application. (Alias: /q)"
 
-	c.eventsChan <- DisplayEvent{Type: "INFO", Content: helpText}
+	c.emit(DisplayEvent{Type: "INFO", Content: helpText})
 }
 
 func (c *client) handleNickCompletion(prefix string) {
@@ -349,7 +351,7 @@ func (c *client) handleNickCompletion(prefix string) {
 
 	activeView := c.getActiveView()
 	if activeView == nil {
-		c.eventsChan <- DisplayEvent{Type: "NICK_COMPLETION_RESULT", Payload: []string{}}
+		c.emit(DisplayEvent{Type: "NICK_COMPLETION_RESULT", Payload: []string{}})
 		return
 	}
 
@@ -377,7 +379,7 @@ func (c *client) handleNickCompletion(prefix string) {
 		entries = entries[:10]
 	}
 
-	c.eventsChan <- DisplayEvent{Type: "NICK_COMPLETION_RESULT", Payload: entries}
+	c.emit(DisplayEvent{Type: "NICK_COMPLETION_RESULT", Payload: entries})
 }
 
 // Core State Primitives
@@ -394,38 +396,34 @@ func (c *client) setActiveView(name string) {
 	}
 
 	if !viewExists {
-		c.eventsChan <- DisplayEvent{
+		c.emit(DisplayEvent{
 			Type:    "ERROR",
 			Content: fmt.Sprintf("Chat or group '%s' not found.", name),
-		}
+		})
 		return
 	}
 
-	if !view.IsGroup {
+	if _, exists := c.chatKeys[name]; !view.IsGroup && !exists {
 		sk := nostr.GeneratePrivateKey()
 		pk, _ := nostr.GetPublicKey(sk)
 
 		nick := c.config.Nick
-		custom := false
 		if nick == "" {
 			nick = npubToTokiPona(pk)
-		} else {
-			custom = true
 		}
 
 		c.chatKeys[name] = chatSession{
-			privKey:    sk,
-			pubKey:     pk,
-			nick:       nick,
-			customNick: custom,
+			privKey: sk,
+			pubKey:  pk,
+			nick:    nick,
 		}
 
 		npub, _ := nip19.EncodePublicKey(pk)
-		c.eventsChan <- DisplayEvent{
+		c.emit(DisplayEvent{
 			Type: "STATUS",
 			Content: fmt.Sprintf("Generated ephemeral identity for chat '%s': %s (%s)",
 				view.Name, npub, nick),
-		}
+		})
 	}
 
 	c.config.ActiveViewName = name
@@ -461,13 +459,16 @@ func (c *client) sendStateUpdate() {
 	}
 
 	state := StateUpdate{
-		Views:           c.config.Views,
+		Views:           slices.Clone(c.config.Views),
 		ActiveViewIndex: activeIdx,
 		Nick:            c.n,
 	}
+	for i := range state.Views {
+		state.Views[i].Children = slices.Clone(state.Views[i].Children)
+	}
 
 	if len(c.config.Views) == 0 || activeIdx == -1 {
-		c.eventsChan <- DisplayEvent{Type: "STATE_UPDATE", Payload: state}
+		c.emit(DisplayEvent{Type: "STATE_UPDATE", Payload: state})
 		return
 	}
 
@@ -484,15 +485,15 @@ func (c *client) sendStateUpdate() {
 		}
 	}
 
-	c.eventsChan <- DisplayEvent{Type: "STATE_UPDATE", Payload: state}
+	c.emit(DisplayEvent{Type: "STATE_UPDATE", Payload: state})
 }
 
 func (c *client) saveConfig() {
 	if err := c.config.save(); err != nil {
 		log.Printf("Error saving config: %v", err)
-		c.eventsChan <- DisplayEvent{
+		c.emit(DisplayEvent{
 			Type:    "ERROR",
 			Content: fmt.Sprintf("Failed to save configuration: %v", err),
-		}
+		})
 	}
 }

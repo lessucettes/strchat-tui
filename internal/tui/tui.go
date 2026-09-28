@@ -1,11 +1,24 @@
+// Package tui renders the strchat client with tview/tcell.
+//
+// The package keeps three concerns apart:
+//
+//   - collection: one goroutine (started and joined by Run) folds client events
+//     into a bounded model; it never touches a widget,
+//   - rendering: runs only on the tview event loop, coalesced by a redraw tick,
+//   - input: tview key handlers that submit actions without ever blocking.
+//
+// Run owns every goroutine and all process-global state it installs, so a
+// failed or stopped UI leaves nothing behind.
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"slices"
-	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
@@ -14,87 +27,560 @@ import (
 	"github.com/lessucettes/strchat-tui/internal/client"
 )
 
-// tui is the main struct that holds all tui components.
+const (
+	// renderInterval caps how often model changes are painted: many incoming
+	// events are coalesced into one redraw, so sustained traffic cannot make
+	// the UI draw once per message.
+	renderInterval = 40 * time.Millisecond
+
+	// wakeKey identifies the internal repaint event posted by the render loop.
+	// The global input capture consumes it; no user-visible binding uses it.
+	wakeKey = tcell.KeyF64
+)
+
+// wakeRune is unused by the wake event, which is identified by its key.
+const wakeRune rune = 0
+
+// tui is the whole TUI: widgets, model and lifecycle.
 type tui struct {
 	app         *tview.Application
 	actionsChan chan<- client.UserAction
+	events      <-chan client.DisplayEvent
 
-	// UI Components
+	// Lifecycle. Run starts and joins the collector, the redraw loop and the
+	// shutdown supervisor.
+	started      atomic.Bool
+	quitOnce     sync.Once
+	quitCh       chan struct{}
+	doneCh       chan struct{}
+	workers      sync.WaitGroup
+	screen       atomic.Pointer[tcell.Screen]
+	screenReady  chan struct{}
+	screenOnce   sync.Once
+	logRedirects logRedirect
 
-	mainFlex            *tview.Flex
-	chatList            *tview.List
-	detailsView         *tview.TextView
-	logs                *tview.TextView
-	maximizedLogsFlex   *tview.Flex
-	output              *tview.TextView
-	maximizedOutputFlex *tview.Flex
-	input               *tview.InputField
-	hints               *tview.TextView
+	// Shared model. Written by the collector goroutine (and by the render pass
+	// for the sync cursors), read by the render pass; guarded by mu.
+	mu              sync.Mutex
+	views           []client.View
+	activeViewIndex int
+	nick            string
+	relays          []client.RelayInfo
+	stateRev        int64
+	relaysRev       int64
+	completion      []string
+	completionRev   int64
+	output          *lineBuffer
+	logs            *lineBuffer
+	outputSynced    int64
+	logsSynced      int64
+	outputFirst     int64
+	logsFirst       int64
+	dropped         int
+	dropNotice      bool
 
-	// UI State
+	// dirty marks model changes that the redraw loop has not painted yet.
+	dirty atomic.Bool
 
-	logsMaximized   bool
-	outputMaximized bool
-	narrowMode      bool
-	theme           *theme
+	// View state. Only touched on the tview event loop.
+	focused              tview.Primitive
+	plan                 layoutPlan
+	planApplied          bool
+	layoutDirty          bool
+	logsMaximized        bool
+	outputMaximized      bool
+	maximizedView        tview.Primitive
+	selectedForGroup     map[string]bool
+	selectionRev         int64
+	chatListRev          int64
+	chatListSelectionRev int64
+	detailsKey           detailsPaneKey
+	detailsKeySet        bool
+	completionApplied    int64
+	completionEntries    []string
+	recentRecipients     []string
+	rrIdx                int
+	lastNickQuery        string
+	inputLabel           string
+	hintsText            string
+	theme                *theme
 
-	// App Data
-
-	views            []client.View
-	relays           []client.RelayInfo
-	selectedForGroup map[string]bool
-	activeViewIndex  int
-	nick             string
-
-	// Input-specific state
-
-	completionEntries []string
-	recentRecipients  []string
-	rrIdx             int
-	lastNickQuery     string
+	// Widgets.
+	mainFlex              *tview.Flex
+	contentGrid           *tview.Grid
+	sidebarFlex           *tview.Flex
+	sidebarFlexHorizontal *tview.Flex
+	bottomFlex            *tview.Flex
+	chatList              *tview.List
+	detailsView           *tview.TextView
+	logsView              *tview.TextView
+	outputView            *tview.TextView
+	input                 *tview.InputField
+	hints                 *tview.TextView
+	maximizedLogsFlex     *tview.Flex
+	maximizedOutputFlex   *tview.Flex
 }
 
-// New creates and initializes the entire TUI application.
+// logRedirect remembers the standard-logger settings that New replaced.
+type logRedirect struct {
+	writer io.Writer
+	flags  int
+	active bool
+}
+
+// New creates the TUI: widgets, key bindings and the responsive root layout.
+//
+// New starts no goroutine and never blocks. It does redirect the standard
+// logger into the bounded log view (restored by Run's cleanup).
 func New(actions chan<- client.UserAction, events <-chan client.DisplayEvent) *tui {
 	t := &tui{
 		app:               tview.NewApplication(),
 		actionsChan:       actions,
-		logsMaximized:     false,
-		outputMaximized:   false,
-		views:             []client.View{},
-		relays:            []client.RelayInfo{},
+		events:            events,
+		quitCh:            make(chan struct{}),
+		doneCh:            make(chan struct{}),
+		screenReady:       make(chan struct{}),
 		selectedForGroup:  make(map[string]bool),
-		activeViewIndex:   0,
 		completionEntries: []string{},
 		recentRecipients:  []string{},
 		rrIdx:             -1,
-		lastNickQuery:     "",
+		output:            newLineBuffer(maxOutputLines, maxOutputBytes),
+		logs:              newLineBuffer(maxLogLines, maxLogBytes),
+		outputSynced:      -1,
+		logsSynced:        -1,
 		theme:             defaultTheme,
 	}
-
 	t.setupViews()
 	t.setupHandlers()
-	t.updateInputLabel()
-	t.app.SetRoot(t.mainFlex, true).SetFocus(t.input)
-	t.updateFocusBorders()
-	t.updateHints()
-	t.updateDetailsView()
+	t.redirectLog()
 
-	go t.listenForEvents(events)
-
+	t.app.SetRoot(t.mainFlex, true)
+	t.setFocus(t.input)
+	t.render()
 	return t
 }
 
-// logWriter is a helper to redirect the standard logger to the logs TextView.
-type logWriter struct {
-	textViewWriter io.Writer
-	getColor       func() tcell.Color
+// Run starts the TUI and blocks until the UI stops. It returns nil for a normal
+// exit and the terminal error when the screen could not be initialised.
+//
+// Run owns the TUI's goroutines: the event collector and the redraw loop are
+// started here and joined here, so a failed Run leaves nothing behind.
+//
+// Integration contract for main:
+//
+//   - the events channel closing stops the UI (the listener exits and the app
+//     stops), so main may close it after client.Run returns,
+//   - after Run returns, call client.Stop and wait for the client to finish;
+//     the UI never waits for the client,
+//   - never close the actions channel while the UI runs: sending on a closed
+//     channel panics, and the UI cannot detect closure of a send-only channel,
+//   - Stop may be called from any goroutine (also before Run) if something
+//     other than the events channel has to take the UI down.
+func (t *tui) Run() error {
+	if !t.started.CompareAndSwap(false, true) {
+		return errors.New("tui: Run called twice")
+	}
+	defer t.shutdown()
+	if t.isQuitRequested() {
+		return nil // Stop was called before Run started: nothing to show.
+	}
+	t.startWorkers()
+	return t.app.Run()
 }
 
-func (lw *logWriter) Write(p []byte) (int, error) {
-	msg := strings.TrimSpace(string(p))
+// Stop asks the UI to shut down, making Run return as soon as the event loop
+// can stop. It is safe to call from any goroutine, before or after Run, and
+// more than once.
+func (t *tui) Stop() { t.requestQuit() }
+
+// requestQuit records the shutdown request. The supervisor performs the actual
+// tview Stop once the screen exists (tview's Stop is a no-op before that).
+func (t *tui) requestQuit() {
+	t.quitOnce.Do(func() { close(t.quitCh) })
+}
+
+// isQuitRequested reports whether shutdown was already requested.
+func (t *tui) isQuitRequested() bool {
+	select {
+	case <-t.quitCh:
+		return true
+	default:
+		return false
+	}
+}
+
+// startWorkers launches the collector, the redraw loop and the supervisor. Each
+// goroutine exits when doneCh closes or its own channel ends; none of them can
+// block on a stopped tview application.
+func (t *tui) startWorkers() {
+	t.workers.Add(3)
+	go t.collectEvents()
+	go t.redrawLoop()
+	go t.supervise()
+}
+
+// shutdown joins the workers and restores process-global state. It runs once,
+// from Run, whatever the exit reason (including a failed app.Run).
+func (t *tui) shutdown() {
+	close(t.doneCh)
+	t.workers.Wait()
+	t.screen.Store(nil)
+	t.restoreLog()
+}
+
+// supervise stops the application loop after a shutdown request. It waits for
+// the first draw, because tview's Stop does nothing before the screen exists,
+// and exits without stopping anything when Run returned for another reason.
+func (t *tui) supervise() {
+	defer t.workers.Done()
+	select {
+	case <-t.quitCh:
+	case <-t.doneCh:
+		return
+	}
+	select {
+	case <-t.screenReady:
+		t.app.Stop()
+	case <-t.doneCh:
+	}
+}
+
+// collectEvents folds client events into the model until the events channel is
+// closed, a "SHUTDOWN" event arrives, or Run shuts the UI down.
+func (t *tui) collectEvents() {
+	defer t.workers.Done()
+	for {
+		select {
+		case <-t.doneCh:
+			return
+		case ev, ok := <-t.events:
+			if !ok {
+				t.requestQuit()
+				return
+			}
+			if ev.Type == "SHUTDOWN" {
+				t.requestQuit()
+				return
+			}
+			t.applyEvent(ev)
+		}
+	}
+}
+
+// redrawLoop coalesces model changes into at most one repaint per
+// renderInterval and wakes the event loop with a non-blocking event post.
+func (t *tui) redrawLoop() {
+	defer t.workers.Done()
+	ticker := time.NewTicker(renderInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-t.doneCh:
+			return
+		case <-ticker.C:
+			if t.dirty.Load() {
+				t.wake()
+			}
+		}
+	}
+}
+
+// wake asks the event loop to draw. tcell's PostEvent never blocks: a full or
+// finalized queue drops the request and the next model change retries.
+func (t *tui) wake() {
+	scr := t.screen.Load()
+	if scr == nil {
+		return
+	}
+	_ = (*scr).PostEvent(tcell.NewEventKey(wakeKey, wakeRune, tcell.ModNone))
+}
+
+// captureScreen remembers the screen (so the redraw loop can wake the event
+// loop without ever touching tview queues, which block forever once the loop
+// stopped) and releases the first-draw signal used by the supervisor.
+func (t *tui) captureScreen(screen tcell.Screen) {
+	t.screen.Store(&screen)
+	t.screenOnce.Do(func() { close(t.screenReady) })
+}
+
+// applyEvent folds one client event into the model. It never touches widgets:
+// rendering happens later, on the event loop.
+func (t *tui) applyEvent(ev client.DisplayEvent) {
+	switch ev.Type {
+	case "NEW_MESSAGE":
+		t.applyNewMessage(ev)
+	case "INFO":
+		t.appendOutput(formatInfo(ev.Content, t.theme.titleColor))
+	case "STATUS", "ERROR":
+		t.applyLog(ev)
+	case "STATE_UPDATE":
+		t.applyStateUpdate(ev)
+	case "RELAYS_UPDATE":
+		t.applyRelaysUpdate(ev)
+	case "NICK_COMPLETION_RESULT":
+		t.applyCompletion(ev)
+	}
+}
+
+// applyNewMessage appends a chat message when it belongs to the active view.
+func (t *tui) applyNewMessage(ev client.DisplayEvent) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if len(t.views) == 0 || t.activeViewIndex < 0 || t.activeViewIndex >= len(t.views) {
+		return
+	}
+	active := t.views[t.activeViewIndex]
+	matches := ev.Chat == active.Name
+	if active.IsGroup {
+		matches = slices.Contains(active.Children, ev.Chat)
+	}
+	if !matches {
+		return
+	}
+
+	style := messageStyle{
+		nickTag:   pubkeyToColor(ev.FullPubKey, t.theme.nickPalette),
+		ownColor:  t.theme.inputTextColor,
+		metaColor: t.theme.logInfoColor,
+	}
+	if t.nick != "" {
+		style.mention = "@" + t.nick
+	}
+	if active.IsGroup {
+		style.label = fmt.Sprintf("%s%s[-] ", colorTag(t.theme.titleColor), sanitizeLineForDisplay(ev.Chat))
+	}
+	t.output.append(formatMessage(ev, style))
+	t.dirty.Store(true)
+}
+
+// applyLog appends a STATUS/ERROR line to the log scrollback.
+func (t *tui) applyLog(ev client.DisplayEvent) {
+	color := t.theme.logWarnColor
+	if ev.Type == "ERROR" {
+		color = t.theme.logErrorColor
+	}
+	t.appendLogLine(formatLogLine(ev.Type, ev.Content, color, time.Now().Format("15:04:05")))
+}
+
+// applyStateUpdate replaces the chat/group state.
+func (t *tui) applyStateUpdate(ev client.DisplayEvent) {
+	state, ok := ev.Payload.(client.StateUpdate)
+	if !ok {
+		t.appendLogLine(formatLogLine("ERROR", "invalid STATE_UPDATE payload", t.theme.logErrorColor, time.Now().Format("15:04:05")))
+		return
+	}
+	t.mu.Lock()
+	t.views = slices.Clone(state.Views)
+	t.activeViewIndex = state.ActiveViewIndex
+	t.nick = state.Nick
+	t.stateRev++
+	t.mu.Unlock()
+	t.dirty.Store(true)
+}
+
+// applyRelaysUpdate replaces the relay status list.
+func (t *tui) applyRelaysUpdate(ev client.DisplayEvent) {
+	relays, ok := ev.Payload.([]client.RelayInfo)
+	if !ok {
+		t.appendLogLine(formatLogLine("ERROR", "invalid RELAYS_UPDATE payload", t.theme.logErrorColor, time.Now().Format("15:04:05")))
+		return
+	}
+	t.mu.Lock()
+	t.relays = slices.Clone(relays)
+	t.relaysRev++
+	t.mu.Unlock()
+	t.dirty.Store(true)
+}
+
+// applyCompletion stores nickname completion candidates for the input field.
+func (t *tui) applyCompletion(ev client.DisplayEvent) {
+	entries, ok := ev.Payload.([]string)
+	if !ok {
+		return
+	}
+	t.mu.Lock()
+	t.completion = slices.Clone(entries)
+	t.completionRev++
+	t.mu.Unlock()
+	t.dirty.Store(true)
+}
+
+// appendOutput adds one rendered line to the bounded message scrollback.
+func (t *tui) appendOutput(line string) {
+	t.mu.Lock()
+	t.output.append(line)
+	t.mu.Unlock()
+	t.dirty.Store(true)
+}
+
+// appendLogLine adds one rendered line to the bounded log scrollback.
+func (t *tui) appendLogLine(line string) {
+	t.mu.Lock()
+	t.logs.append(line)
+	t.mu.Unlock()
+	t.dirty.Store(true)
+}
+
+// lineDelta is the set of lines a scrollback view still has to write.
+type lineDelta struct {
+	rewrite bool     // rebuild the view from lines instead of appending
+	lines   []string // display lines in order
+	upto    int64    // absolute index of the last included line
+	first   int64    // oldest retained model line, independent of scroll position
+}
+
+// modelSnapshot is a consistent copy of the shared model for one render pass.
+type modelSnapshot struct {
+	views         []client.View
+	activeIndex   int
+	nick          string
+	relays        []client.RelayInfo
+	stateRev      int64
+	relaysRev     int64
+	completion    []string
+	completionRev int64
+	dropped       int
+	dropNotice    bool
+	output        lineDelta
+	logs          lineDelta
+}
+
+// snapshot copies the shared model under the lock. View and relay lists are
+// client-bounded; scrollback arrives as deltas.
+func (t *tui) snapshot() modelSnapshot {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return modelSnapshot{
+		views:         slices.Clone(t.views),
+		activeIndex:   t.activeViewIndex,
+		nick:          t.nick,
+		relays:        slices.Clone(t.relays),
+		stateRev:      t.stateRev,
+		relaysRev:     t.relaysRev,
+		completion:    slices.Clone(t.completion),
+		completionRev: t.completionRev,
+		dropped:       t.dropped,
+		dropNotice:    t.dropNotice,
+		output:        t.lineDeltaLocked(t.output, t.outputSynced, t.outputFirst),
+		logs:          t.lineDeltaLocked(t.logs, t.logsSynced, t.logsFirst),
+	}
+}
+
+// lineDeltaLocked returns the lines after the sync cursor. When the cursor fell
+// out of the buffer the whole retained tail is returned for a rewrite.
+func (t *tui) lineDeltaLocked(buf *lineBuffer, synced, first int64) lineDelta {
+	if lines, ok := buf.unsynced(synced + 1); ok && first == buf.firstIndex() {
+		return lineDelta{lines: lines, upto: buf.lastIndex(), first: first}
+	}
+	return lineDelta{rewrite: true, lines: buf.snapshot(), upto: buf.lastIndex(), first: buf.firstIndex()}
+}
+
+// setOutputSynced records that the message view wrote everything up to upto.
+func (t *tui) setOutputSynced(upto, first int64) {
+	t.mu.Lock()
+	t.outputSynced = upto
+	t.outputFirst = first
+	t.mu.Unlock()
+}
+
+// setLogsSynced records that the log view wrote everything up to upto.
+func (t *tui) setLogsSynced(upto, first int64) {
+	t.mu.Lock()
+	t.logsSynced = upto
+	t.logsFirst = first
+	t.mu.Unlock()
+}
+
+// submit hands an action to the client without ever blocking the UI thread. It
+// reports false when the client's queue is full so the caller can surface the
+// backpressure to the user.
+func (t *tui) submit(action client.UserAction) bool {
+	select {
+	case t.actionsChan <- action:
+		t.clearBackpressure()
+		return true
+	default:
+		t.noteBackpressure(action.Type)
+		return false
+	}
+}
+
+// noteBackpressure records a dropped action. The first drop of a burst is
+// logged once; the hint line carries the running state.
+func (t *tui) noteBackpressure(actionType string) {
+	t.mu.Lock()
+	first := !t.dropNotice
+	t.dropped++
+	t.dropNotice = true
+	t.mu.Unlock()
+	if first {
+		t.appendLogLine(formatLogLine("WARN",
+			fmt.Sprintf("client queue full: dropped %q (client is not keeping up)", sanitizeLineForDisplay(actionType)),
+			t.theme.logWarnColor, time.Now().Format("15:04:05")))
+	}
+	t.updateHints()
+}
+
+// clearBackpressure resets the drop state after a successful submission.
+func (t *tui) clearBackpressure() {
+	t.mu.Lock()
+	dropped, hadNotice := t.dropped, t.dropNotice
+	t.dropped, t.dropNotice = 0, false
+	t.mu.Unlock()
+	if !hadNotice {
+		return
+	}
+	if dropped > 0 {
+		t.appendLogLine(formatLogLine("STATUS",
+			fmt.Sprintf("client queue recovered: %d input(s) were dropped", dropped),
+			t.theme.logInfoColor, time.Now().Format("15:04:05")))
+	}
+	t.updateHints()
+}
+
+// redirectLog captures standard-library log output into the bounded log view.
+func (t *tui) redirectLog() {
+	t.logRedirects = logRedirect{writer: log.Writer(), flags: log.Flags(), active: true}
+	log.SetFlags(0)
+	log.SetOutput(logSink{t: t})
+}
+
+// restoreLog puts the process logger back the way New found it.
+func (t *tui) restoreLog() {
+	if !t.logRedirects.active {
+		return
+	}
+	log.SetOutput(t.logRedirects.writer)
+	log.SetFlags(t.logRedirects.flags)
+	t.logRedirects.active = false
+}
+
+// logSink routes logger output into the model. Writes come from arbitrary
+// goroutines, so they never touch widgets and never block.
+type logSink struct{ t *tui }
+
+func (s logSink) Write(p []byte) (int, error) {
 	ts := time.Now().Format("15:04:05")
-	return fmt.Fprintf(lw.textViewWriter, "\n[%s][%s] %s[-]", lw.getColor(), ts, msg)
+	for _, line := range splitLogLines(string(p)) {
+		s.t.appendLogLine(formatAutoLogLine(ts, line, s.t.theme.logInfoColor))
+	}
+	return len(p), nil
+}
+
+// setupViews creates the widgets and the responsive root layout.
+func (t *tui) setupViews() {
+	t.applyTheme()
+	t.initViews()
+	t.initLayout()
+}
+
+// applyTheme sets the global tview styles from the current theme.
+func (t *tui) applyTheme() {
+	tview.Styles.PrimitiveBackgroundColor = t.theme.backgroundColor
+	tview.Styles.PrimaryTextColor = t.theme.textColor
+	tview.Styles.BorderColor = t.theme.borderColor
+	tview.Styles.TitleColor = t.theme.titleColor
 }
 
 // Widget titles.
@@ -112,51 +598,28 @@ const (
 	titleInputShort    = "Alt+I"
 )
 
-// setupViews creates and configures all the visual primitives of the TUI.
-func (t *tui) setupViews() {
-	t.applyTheme()
-	t.initViews()
-	t.initLayout()
-}
-
-// applyTheme sets the global styles for the application based on the current theme.
-func (t *tui) applyTheme() {
-	tview.Styles.PrimitiveBackgroundColor = t.theme.backgroundColor
-	tview.Styles.PrimaryTextColor = t.theme.textColor
-	tview.Styles.BorderColor = t.theme.borderColor
-	tview.Styles.TitleColor = t.theme.titleColor
-}
-
-// initViews initializes all the individual widgets for the TUI.
+// initViews builds every widget. Scrollback views keep a bounded buffer
+// (SetMaxLines) and follow the tail until the user scrolls.
 func (t *tui) initViews() {
-	t.logs = tview.NewTextView().
+	t.logsView = tview.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true).
-		SetChangedFunc(func() { t.app.Draw() })
-	t.logs.SetBorder(true).SetTitle(titleLogs).SetTitleAlign(tview.AlignLeft)
-	customWriter := &logWriter{
-		textViewWriter: tview.ANSIWriter(t.logs),
-		getColor:       func() tcell.Color { return t.theme.logInfoColor },
-	}
-	log.SetOutput(customWriter)
-	log.SetFlags(0)
+		SetMaxLines(maxLogLines)
+	t.logsView.SetBorder(true).SetTitle(titleLogs).SetTitleAlign(tview.AlignLeft)
+	t.logsView.ScrollToEnd()
 
-	t.chatList = tview.NewList().
-		ShowSecondaryText(false).
-		SetSelectedBackgroundColor(t.theme.borderColor)
+	t.chatList = tview.NewList().ShowSecondaryText(false).SetSelectedBackgroundColor(t.theme.borderColor)
 	t.chatList.SetBorder(true).SetTitle(titleChats).SetTitleAlign(tview.AlignLeft)
 
-	t.detailsView = tview.NewTextView().
-		SetDynamicColors(true).
-		SetScrollable(true).
-		SetChangedFunc(func() { t.app.Draw() })
+	t.detailsView = tview.NewTextView().SetDynamicColors(true).SetScrollable(true)
 	t.detailsView.SetBorder(true).SetTitle(titleInfo).SetTitleAlign(tview.AlignLeft)
 
-	t.output = tview.NewTextView().
+	t.outputView = tview.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true).
-		SetChangedFunc(func() { t.app.Draw() })
-	t.output.SetBorder(true).SetTitle(titleMessages).SetTitleAlign(tview.AlignLeft)
+		SetMaxLines(maxOutputLines)
+	t.outputView.SetBorder(true).SetTitle(titleMessages).SetTitleAlign(tview.AlignLeft)
+	t.outputView.ScrollToEnd()
 
 	t.input = tview.NewInputField().
 		SetLabelStyle(tcell.StyleDefault.Foreground(t.theme.titleColor)).
@@ -164,295 +627,47 @@ func (t *tui) initViews() {
 		SetFieldTextColor(t.theme.inputTextColor)
 	t.input.SetBorder(true).SetTitle(titleInput).SetTitleAlign(tview.AlignLeft)
 	t.input.SetAutocompleteFunc(t.handleAutocomplete)
-	t.input.SetAcceptanceFunc(func(textToCheck string, lastChar rune) bool {
-		return graphemeLen(textToCheck) <= client.MaxMsgLen
-	})
-	t.input.SetChangedFunc(func(text string) {
-		nick, complete := extractNickPrefix(text)
-		if complete {
-			t.lastNickQuery = ""
-			return
-		}
-		if !complete && strings.Contains(text, "#") && t.lastNickQuery == "" {
-			return
-		}
-		if nick != "" && nick != t.lastNickQuery {
-			t.lastNickQuery = nick
-			t.actionsChan <- client.UserAction{
-				Type:    "REQUEST_NICK_COMPLETION",
-				Payload: nick,
-			}
-		}
+	t.input.SetAcceptanceFunc(func(text string, _ rune) bool {
+		return graphemeLen(text) <= client.MaxMsgLen
 	})
 
-	t.hints = tview.NewTextView().
-		SetDynamicColors(true).
-		SetTextAlign(tview.AlignLeft)
+	t.hints = tview.NewTextView().SetDynamicColors(true).SetTextAlign(tview.AlignLeft)
 }
 
-// initLayout composes the widgets into the final layout and sets up responsiveness.
+// initLayout composes the containers and installs the size-adaptive hook.
 func (t *tui) initLayout() {
-	sidebarFlex := tview.NewFlex().
+	t.sidebarFlex = tview.NewFlex().
 		SetDirection(tview.FlexRow).
 		AddItem(t.chatList, 0, 1, true).
 		AddItem(t.detailsView, 0, 1, false)
 
-	sidebarFlexHorizontal := tview.NewFlex().
+	t.sidebarFlexHorizontal = tview.NewFlex().
 		SetDirection(tview.FlexColumn).
 		AddItem(t.chatList, 0, 1, true).
 		AddItem(t.detailsView, 0, 1, false)
 
-	contentGrid := tview.NewGrid().SetBorders(false)
+	t.contentGrid = tview.NewGrid().SetBorders(false)
+	t.bottomFlex = tview.NewFlex().SetDirection(tview.FlexRow)
 
-	const narrowWidth = 100
-	t.app.SetBeforeDrawFunc(func(screen tcell.Screen) bool {
-		w, _ := screen.Size()
-		contentGrid.Clear()
-
-		if w < narrowWidth {
-			if !t.narrowMode {
-				t.narrowMode = true
-				t.logs.SetTitle(titleLogsShort)
-				t.output.SetTitle(titleMessagesShort)
-				t.chatList.SetTitle(titleChatsShort)
-				t.detailsView.SetTitle(titleInfoShort)
-				t.input.SetTitle(titleInputShort)
-				t.input.SetLabel("> ")
-			}
-			contentGrid.SetRows(0, 5)
-			contentGrid.SetColumns(0)
-			contentGrid.AddItem(t.output, 0, 0, 1, 1, 0, 0, false)
-			contentGrid.AddItem(sidebarFlexHorizontal, 1, 0, 1, 1, 0, 0, false)
-		} else {
-			if t.narrowMode {
-				t.narrowMode = false
-				t.logs.SetTitle(titleLogs)
-				t.output.SetTitle(titleMessages)
-				t.chatList.SetTitle(titleChats)
-				t.detailsView.SetTitle(titleInfo)
-				t.input.SetTitle(titleInput)
-				t.updateInputLabel()
-			}
-			contentGrid.SetRows(0)
-			contentGrid.SetColumns(0, 30)
-			contentGrid.AddItem(t.output, 0, 0, 1, 1, 0, 0, false)
-			contentGrid.AddItem(sidebarFlex, 0, 1, 1, 1, 0, 0, false)
-		}
-		return false
-	})
-
-	bottomFlex := tview.NewFlex().
-		SetDirection(tview.FlexRow).
-		AddItem(t.input, 0, 1, true).
-		AddItem(t.hints, 1, 0, false)
-
-	t.mainFlex = tview.NewFlex().
-		SetDirection(tview.FlexRow).
-		AddItem(t.logs, 3, 0, false).
-		AddItem(contentGrid, 0, 1, false).
-		AddItem(bottomFlex, 4, 0, true)
+	t.mainFlex = tview.NewFlex().SetDirection(tview.FlexRow)
 
 	t.maximizedLogsFlex = tview.NewFlex().
 		SetDirection(tview.FlexRow).
-		AddItem(t.logs, 0, 1, true).
+		AddItem(t.logsView, 0, 1, true).
 		AddItem(t.hints, 1, 0, false)
 
 	t.maximizedOutputFlex = tview.NewFlex().
 		SetDirection(tview.FlexRow).
-		AddItem(t.output, 0, 1, true).
+		AddItem(t.outputView, 0, 1, true).
 		AddItem(t.hints, 1, 0, false)
-}
 
-// handleAutocomplete provides completion entries for the input field.
-func (t *tui) handleAutocomplete(currentText string) []string {
-	trimmed := strings.TrimSpace(currentText)
-
-	if strings.HasPrefix(trimmed, "/block ") ||
-		strings.HasPrefix(trimmed, "/unblock ") ||
-		strings.HasPrefix(trimmed, "/b ") ||
-		strings.HasPrefix(trimmed, "/ub ") {
-		parts := strings.SplitN(currentText, " ", 2)
-		if len(parts) < 2 {
-			return nil
-		}
-		cmd := parts[0] + " "
-
-		if len(t.completionEntries) == 0 {
-			return nil
-		}
-		out := make([]string, 0, len(t.completionEntries))
-		for _, e := range t.completionEntries {
-			out = append(out, cmd+e)
-		}
-		return out
-	}
-
-	nick, complete := extractNickPrefix(currentText)
-	if complete {
-		t.completionEntries = nil
-		return nil
-	}
-	if nick == "" {
-		return nil
-	}
-
-	if len(t.completionEntries) == 0 {
-		return nil
-	}
-
-	return append([]string(nil), t.completionEntries...)
-}
-
-// listenForEvents is the main event loop that processes events from the client.
-func (t *tui) listenForEvents(events <-chan client.DisplayEvent) {
-	for event := range events {
-		if event.Type == "SHUTDOWN" {
-			break
-		}
-
-		t.app.QueueUpdateDraw(func() {
-			switch event.Type {
-			case "NEW_MESSAGE":
-				t.handleNewMessage(event)
-			case "INFO":
-				t.handleInfoMessage(event)
-			case "STATUS", "ERROR":
-				t.handleLogMessage(event)
-			case "STATE_UPDATE":
-				t.handleStateUpdate(event)
-			case "RELAYS_UPDATE":
-				t.handleRelaysUpdate(event)
-			case "NICK_COMPLETION_RESULT":
-				t.handleNickCompletion(event)
-			}
-		})
-	}
-	t.app.Stop()
-}
-
-// handleNewMessage processes and displays a new chat message.
-func (t *tui) handleNewMessage(event client.DisplayEvent) {
-	if len(t.views) == 0 || t.activeViewIndex < 0 || t.activeViewIndex >= len(t.views) {
-		return
-	}
-
-	activeView := t.views[t.activeViewIndex]
-	showMessage := false
-	if activeView.IsGroup {
-		if slices.Contains(activeView.Children, event.Chat) {
-			showMessage = true
-		}
-	} else {
-		if event.Chat == activeView.Name {
-			showMessage = true
-		}
-	}
-	if showMessage {
-		nickColorTag := pubkeyToColor(event.FullPubKey, t.theme.nickPalette)
-
-		ownColorTag := fmt.Sprintf("[%s]", t.theme.inputTextColor)
-		ownNickTag := fmt.Sprintf("[%s::b]", t.theme.inputTextColor)
-
-		mention := "@" + t.nick
-		content := event.Content
-		if t.nick != "" && strings.Contains(content, mention) {
-			content = strings.ReplaceAll(
-				content,
-				mention,
-				fmt.Sprintf("[%s::b]%s[-::-]", t.theme.inputTextColor, mention),
-			)
-		}
-
-		label := ""
-		activeView := t.views[t.activeViewIndex]
-		if activeView.IsGroup {
-			label = fmt.Sprintf("[%s]%s[-] ", t.theme.titleColor, event.Chat)
-		}
-
-		if event.IsOwnMessage {
-			fmt.Fprintf(
-				t.output,
-				"\n%s%s%s[-::-]#%s> %s%s[-] [%s][%s %s][-]",
-				label,
-				ownNickTag, event.Nick, event.ShortPubKey,
-				ownColorTag, content,
-				t.theme.logInfoColor, event.ID, event.Timestamp,
-			)
-		} else {
-			fmt.Fprintf(
-				t.output,
-				"\n%s%s%s[-::-]#%s> %s [%s][%s %s][-]",
-				label,
-				nickColorTag, event.Nick, event.ShortPubKey,
-				content,
-				t.theme.logInfoColor, event.ID, event.Timestamp,
-			)
-		}
-	}
-	if !t.outputMaximized {
-		t.output.ScrollToEnd()
-	}
-}
-
-// handleInfoMessage displays a generic informational message in the output view.
-func (t *tui) handleInfoMessage(event client.DisplayEvent) {
-	content := tview.Escape(strings.TrimSpace(event.Content))
-	fmt.Fprintf(t.output, "\n[%s]-- %s[-]", t.theme.titleColor, content)
-	if !t.outputMaximized {
-		t.output.ScrollToEnd()
-	}
-}
-
-// handleLogMessage displays a status or error message in the logs view.
-func (t *tui) handleLogMessage(event client.DisplayEvent) {
-	color := t.theme.logWarnColor
-	if event.Type == "ERROR" {
-		color = t.theme.logErrorColor
-	}
-	fmt.Fprintf(t.logs, "\n[%s][%s] %s: %s[-]", color, time.Now().Format("15:04:05"), event.Type, event.Content)
-	if !t.logsMaximized {
-		t.logs.ScrollToEnd()
-	}
-}
-
-// handleStateUpdate updates the TUI's state based on data from the client.
-func (t *tui) handleStateUpdate(event client.DisplayEvent) {
-	state, ok := event.Payload.(client.StateUpdate)
-	if !ok {
-		fmt.Fprintf(t.logs, "\n[%s]ERROR: Invalid STATE_UPDATE payload[-]", t.theme.logErrorColor)
-		return
-	}
-	t.views = state.Views
-	t.activeViewIndex = state.ActiveViewIndex
-	t.nick = state.Nick
-	t.updateChatList()
-	t.updateDetailsView()
-	t.updateInputLabel()
-}
-
-// handleRelaysUpdate refreshes the list of relays.
-func (t *tui) handleRelaysUpdate(event client.DisplayEvent) {
-	relays, ok := event.Payload.([]client.RelayInfo)
-	if !ok {
-		fmt.Fprintf(t.logs, "\n[%s]ERROR: Invalid RELAYS_UPDATE payload[-]", t.theme.logErrorColor)
-		return
-	}
-	t.relays = relays
-	t.updateDetailsView()
-}
-
-// handleNickCompletion provides completion entries to the input field.
-func (t *tui) handleNickCompletion(event client.DisplayEvent) {
-	entries, ok := event.Payload.([]string)
-	if !ok {
-		return
-	}
-	//	if len(entries) == 0 && len(t.completionEntries) > 0 { return }
-	t.completionEntries = entries
-	t.input.Autocomplete()
-}
-
-// Run starts the TUI application.
-func (t *tui) Run() error {
-	return t.app.Run()
+	// BeforeDraw is the only per-draw hook tview offers. It runs while tview
+	// holds its own lock, so it may mutate widgets but must not call
+	// application methods (SetRoot/SetFocus/QueueUpdate would deadlock).
+	t.app.SetBeforeDrawFunc(func(screen tcell.Screen) bool {
+		t.captureScreen(screen)
+		t.applyLayout(screen)
+		t.render()
+		return false
+	})
 }

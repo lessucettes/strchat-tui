@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"math/bits"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -74,41 +73,11 @@ func isPoWValid(event *nostr.Event, minDifficulty int) bool {
 	return actualDifficulty >= claimedDifficulty
 }
 
-var powHintRe = regexp.MustCompile(`(?i)pow[^0-9]{0,10}(\d+)`)
-
-func parsePowHint(s string) (int, bool) {
-	m := powHintRe.FindStringSubmatch(s)
-	if len(m) < 2 {
-		return 0, false
-	}
-	n, err := strconv.Atoi(m[1])
-	if err != nil || n <= 0 {
-		return 0, false
-	}
-	return n, true
-}
-
 func safeSuffix(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
 	return s[len(s)-n:]
-}
-
-func sameStringSet(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	m := make(map[string]struct{}, len(a))
-	for _, s := range a {
-		m[s] = struct{}{}
-	}
-	for _, s := range b {
-		if _, ok := m[s]; !ok {
-			return false
-		}
-	}
-	return true
 }
 
 func truncateString(s string, maxClusters int) string {
@@ -164,34 +133,25 @@ func sanitizeString(s string) string {
 
 func normalizeRelayURL(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
-	raw = strings.TrimRight(raw, "/,.;")
-
 	if !strings.Contains(raw, "://") {
 		raw = "wss://" + raw
 	}
-
 	u, err := url.Parse(raw)
 	if err != nil {
-		return "", fmt.Errorf("invalid URL: %w", err)
+		return "", fmt.Errorf("invalid relay URL")
 	}
-
-	scheme := strings.ToLower(u.Scheme)
-	if scheme != "wss" {
-		return "", fmt.Errorf("only wss:// relays are allowed (got %s)", scheme)
+	u.Scheme = strings.ToLower(u.Scheme)
+	if u.Scheme != "wss" && u.Scheme != "ws" {
+		return "", fmt.Errorf("relay URL must use ws:// or wss://")
 	}
-
-	host := strings.ToLower(strings.Trim(u.Host, "/."))
-
-	if host == "" {
-		if u.Path != "" && !strings.Contains(u.Path, "/") {
-			host = strings.ToLower(strings.Trim(u.Path, "/."))
-		}
-		if host == "" {
-			return "", fmt.Errorf("missing host in URL: %q", raw)
-		}
+	if u.Hostname() == "" || u.User != nil || u.Fragment != "" {
+		return "", fmt.Errorf("relay URL requires a host and no credentials or fragment")
 	}
-
-	return fmt.Sprintf("wss://%s", host), nil
+	u.Host = strings.ToLower(u.Host)
+	if u.Path == "/" {
+		u.Path = ""
+	}
+	return u.String(), nil
 }
 
 func groupName(validMembers []string) string {
