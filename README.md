@@ -67,6 +67,7 @@ Useful commands:
 | `/set <name1> <name2>...` | Combine existing chats in a local group |
 | `/list`, `/del [name]` | List or leave chats |
 | `/nick [name]` | Set or clear a nickname |
+| `/theme [name\|number]`, `/t` | List themes or switch colors immediately for this session |
 | `/relay [url...]` | List or add explicit relays |
 | `/relay <number>` | Remove a configured relay |
 | `/pow <0..16>` | Set per-chat proof-of-work; default 0, above the cap is rejected |
@@ -77,6 +78,25 @@ Useful commands:
 Use `@nick#suffix` completion to reply to a known participant; replies from local
 combined views go to that participant's chat. This is still a **public** message,
 not a DM.
+
+In the input field, `Ctrl+P` recalls older messages and commands; `Ctrl+N`
+moves forward and restores your unfinished draft after the newest entry.
+The last 100 non-empty submitted lines are kept in memory for this run only,
+including send attempts that failed; history is never written to disk.
+
+### Themes
+
+`/theme` lists the available themes and marks the current selection:
+
+1. `default` — the original green-on-black theme (startup default).
+2. `monochrome` — high-contrast black and white.
+3. `blue-gray` — cool blue accents on a dark gray background.
+4. `red-gold` — red borders and gold accents on a dark warm background.
+
+Use `/theme blue-gray`, `/theme red-gold`, or a number such as `/t 4`.
+Colors change without restarting, including retained messages and logs; input,
+history, focus and chat selection are preserved. The choice is session-local
+and does not modify your configuration file.
 
 ## Predictable networking
 

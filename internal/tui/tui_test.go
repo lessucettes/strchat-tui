@@ -657,21 +657,6 @@ func TestAutocompleteKeepsBlockCompletionBehavior(t *testing.T) {
 	}
 }
 
-func TestRecentRecipientHistory(t *testing.T) {
-	s := newSimTUI(t, 120, 40)
-	s.onLoop(func() { s.ui.rememberRecipient("alice") })
-	s.onLoop(func() { s.ui.rememberRecipient("bob") })
-	s.onLoop(func() { s.ui.rememberRecipient("alice") })
-	if got := onLoopValue(s, func() string { return strings.Join(s.ui.recentRecipients, ",") }); got != "alice,bob" {
-		t.Fatalf("recentRecipients = %q, want alice,bob", got)
-	}
-	s.onLoop(func() { s.ui.setFocus(s.ui.input) })
-	s.key(tcell.KeyCtrlP, 0, tcell.ModNone)
-	waitFor(t, 2*time.Second, func() bool {
-		return s.matches(func() bool { return s.ui.input.GetText() == "@alice " })
-	})
-}
-
 func TestErrorsSurfaceInLogView(t *testing.T) {
 	s := newSimTUI(t, 120, 40)
 	s.events <- client.DisplayEvent{Type: "ERROR", Content: "boom [x]"}

@@ -347,7 +347,7 @@ func (t *tui) writeLines(view *tview.TextView, delta lineDelta) {
 		return
 	}
 	if delta.rewrite {
-		view.SetText("\n" + strings.Join(delta.lines, "\n"))
+		view.SetText(t.colorScrollback("\n" + strings.Join(delta.lines, "\n")))
 		return
 	}
 	var b strings.Builder
@@ -355,7 +355,14 @@ func (t *tui) writeLines(view *tview.TextView, delta lineDelta) {
 		b.WriteString("\n")
 		b.WriteString(line)
 	}
-	fmt.Fprint(view, b.String())
+	fmt.Fprint(view, t.colorScrollback(b.String()))
+}
+
+func (t *tui) colorScrollback(text string) string {
+	if t.theme == defaultTheme {
+		return text // Keep the default-theme hot path allocation-free.
+	}
+	return t.themeColors.Replace(text)
 }
 
 // renderChatList rebuilds the chat list only when client state or the local
@@ -502,8 +509,8 @@ func (t *tui) renderInputLabel(s modelSnapshot) {
 
 // updateFocusBorders highlights the focused widget's border.
 func (t *tui) updateFocusBorders() {
-	unfocused := tview.Styles.BorderColor
-	focused := tview.Styles.TitleColor
+	unfocused := t.theme.borderColor
+	focused := t.theme.titleColor
 	for _, p := range []tview.Primitive{t.logsView, t.chatList, t.detailsView, t.outputView, t.input} {
 		if box, ok := p.(interface{ SetBorderColor(tcell.Color) *tview.Box }); ok {
 			color := unfocused

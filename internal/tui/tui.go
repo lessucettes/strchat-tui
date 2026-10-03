@@ -17,6 +17,7 @@ import (
 	"io"
 	"log"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -98,12 +99,14 @@ type tui struct {
 	detailsKeySet        bool
 	completionApplied    int64
 	completionEntries    []string
-	recentRecipients     []string
-	rrIdx                int
+	inputHistory         []string
+	historyOffset        int
+	inputDraft           string
 	lastNickQuery        string
 	inputLabel           string
 	hintsText            string
 	theme                *theme
+	themeColors          *strings.Replacer
 
 	// Widgets.
 	mainFlex              *tview.Flex
@@ -142,8 +145,6 @@ func New(actions chan<- client.UserAction, events <-chan client.DisplayEvent) *t
 		screenReady:       make(chan struct{}),
 		selectedForGroup:  make(map[string]bool),
 		completionEntries: []string{},
-		recentRecipients:  []string{},
-		rrIdx:             -1,
 		output:            newLineBuffer(maxOutputLines, maxOutputBytes),
 		logs:              newLineBuffer(maxLogLines, maxLogBytes),
 		outputSynced:      -1,
@@ -310,7 +311,7 @@ func (t *tui) applyEvent(ev client.DisplayEvent) {
 	case "NEW_MESSAGE":
 		t.applyNewMessage(ev)
 	case "INFO":
-		t.appendOutput(formatInfo(ev.Content, t.theme.titleColor))
+		t.appendOutput(formatInfo(ev.Content, defaultTheme.titleColor))
 	case "STATUS", "ERROR":
 		t.applyLog(ev)
 	case "STATE_UPDATE":
@@ -340,15 +341,15 @@ func (t *tui) applyNewMessage(ev client.DisplayEvent) {
 	}
 
 	style := messageStyle{
-		nickTag:   pubkeyToColor(ev.FullPubKey, t.theme.nickPalette),
-		ownColor:  t.theme.inputTextColor,
-		metaColor: t.theme.logInfoColor,
+		nickTag:   pubkeyToColor(ev.FullPubKey, defaultTheme.nickPalette),
+		ownColor:  defaultTheme.inputTextColor,
+		metaColor: defaultTheme.logInfoColor,
 	}
 	if t.nick != "" {
 		style.mention = "@" + t.nick
 	}
 	if active.IsGroup {
-		style.label = fmt.Sprintf("%s%s[-] ", colorTag(t.theme.titleColor), sanitizeLineForDisplay(ev.Chat))
+		style.label = fmt.Sprintf("%s%s[-] ", colorTag(defaultTheme.titleColor), sanitizeLineForDisplay(ev.Chat))
 	}
 	t.output.append(formatMessage(ev, style))
 	t.dirty.Store(true)
@@ -356,9 +357,9 @@ func (t *tui) applyNewMessage(ev client.DisplayEvent) {
 
 // applyLog appends a STATUS/ERROR line to the log scrollback.
 func (t *tui) applyLog(ev client.DisplayEvent) {
-	color := t.theme.logWarnColor
+	color := defaultTheme.logWarnColor
 	if ev.Type == "ERROR" {
-		color = t.theme.logErrorColor
+		color = defaultTheme.logErrorColor
 	}
 	t.appendLogLine(formatLogLine(ev.Type, ev.Content, color, time.Now().Format("15:04:05")))
 }
@@ -367,7 +368,7 @@ func (t *tui) applyLog(ev client.DisplayEvent) {
 func (t *tui) applyStateUpdate(ev client.DisplayEvent) {
 	state, ok := ev.Payload.(client.StateUpdate)
 	if !ok {
-		t.appendLogLine(formatLogLine("ERROR", "invalid STATE_UPDATE payload", t.theme.logErrorColor, time.Now().Format("15:04:05")))
+		t.appendLogLine(formatLogLine("ERROR", "invalid STATE_UPDATE payload", defaultTheme.logErrorColor, time.Now().Format("15:04:05")))
 		return
 	}
 	t.mu.Lock()
@@ -383,7 +384,7 @@ func (t *tui) applyStateUpdate(ev client.DisplayEvent) {
 func (t *tui) applyRelaysUpdate(ev client.DisplayEvent) {
 	relays, ok := ev.Payload.([]client.RelayInfo)
 	if !ok {
-		t.appendLogLine(formatLogLine("ERROR", "invalid RELAYS_UPDATE payload", t.theme.logErrorColor, time.Now().Format("15:04:05")))
+		t.appendLogLine(formatLogLine("ERROR", "invalid RELAYS_UPDATE payload", defaultTheme.logErrorColor, time.Now().Format("15:04:05")))
 		return
 	}
 	t.mu.Lock()
@@ -517,7 +518,7 @@ func (t *tui) noteBackpressure(actionType string) {
 	if first {
 		t.appendLogLine(formatLogLine("WARN",
 			fmt.Sprintf("client queue full: dropped %q (client is not keeping up)", sanitizeLineForDisplay(actionType)),
-			t.theme.logWarnColor, time.Now().Format("15:04:05")))
+			defaultTheme.logWarnColor, time.Now().Format("15:04:05")))
 	}
 	t.updateHints()
 }
@@ -534,7 +535,7 @@ func (t *tui) clearBackpressure() {
 	if dropped > 0 {
 		t.appendLogLine(formatLogLine("STATUS",
 			fmt.Sprintf("client queue recovered: %d input(s) were dropped", dropped),
-			t.theme.logInfoColor, time.Now().Format("15:04:05")))
+			defaultTheme.logInfoColor, time.Now().Format("15:04:05")))
 	}
 	t.updateHints()
 }
@@ -563,24 +564,16 @@ type logSink struct{ t *tui }
 func (s logSink) Write(p []byte) (int, error) {
 	ts := time.Now().Format("15:04:05")
 	for _, line := range splitLogLines(string(p)) {
-		s.t.appendLogLine(formatAutoLogLine(ts, line, s.t.theme.logInfoColor))
+		s.t.appendLogLine(formatAutoLogLine(ts, line, defaultTheme.logInfoColor))
 	}
 	return len(p), nil
 }
 
 // setupViews creates the widgets and the responsive root layout.
 func (t *tui) setupViews() {
-	t.applyTheme()
 	t.initViews()
 	t.initLayout()
-}
-
-// applyTheme sets the global tview styles from the current theme.
-func (t *tui) applyTheme() {
-	tview.Styles.PrimitiveBackgroundColor = t.theme.backgroundColor
-	tview.Styles.PrimaryTextColor = t.theme.textColor
-	tview.Styles.BorderColor = t.theme.borderColor
-	tview.Styles.TitleColor = t.theme.titleColor
+	t.applyTheme()
 }
 
 // Widget titles.

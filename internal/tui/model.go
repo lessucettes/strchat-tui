@@ -29,8 +29,10 @@ const (
 	maxPayloadRunes = 64 * 1024
 )
 
-// lineBuffer is a bounded FIFO of pre-rendered display lines. Lines are
-// addressed by an absolute index that never decreases, which lets a view
+// lineBuffer is a bounded FIFO of display lines in canonical default-theme
+// markup. The event loop maps colors when writing widgets, so themes can change
+// without modifying model content or sharing mutable styles with collectors.
+// Lines are addressed by an absolute index that never decreases, which lets a view
 // append only the lines it has not written yet.
 //
 // lineBuffer is not safe for concurrent use: callers hold the owning tui lock.

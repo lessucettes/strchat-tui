@@ -9,6 +9,8 @@ import (
 	"github.com/lessucettes/strchat-tui/internal/client"
 )
 
+const maxInputHistory = 100
+
 // setupHandlers wires all key handling. Handlers run on the tview event loop;
 // they never block (see submit) and never call QueueUpdate (which would block
 // against the loop they are already running on).
@@ -22,6 +24,7 @@ func (t *tui) setupHandlers() {
 		if text == "" {
 			return
 		}
+		t.rememberInput(text)
 		if strings.HasPrefix(text, "/") {
 			t.handleCommand(text)
 			t.input.SetText("")
@@ -30,11 +33,8 @@ func (t *tui) setupHandlers() {
 		if t.submit(client.UserAction{Type: "SEND_MESSAGE", Payload: text}) {
 			t.input.SetText("")
 		}
-		// Backpressure keeps the text in the field, so nothing the user typed
-		// is lost. The recipient history is local and updated either way.
-		if nick, complete := extractNickPrefix(text); complete {
-			t.rememberRecipient(strings.TrimPrefix(nick, "@"))
-		}
+		// Backpressure keeps the text in the field. History records the input
+		// attempt, not a claim that the message was delivered.
 	})
 
 	// Nickname completion requests are best-effort: a dropped request only
@@ -54,24 +54,32 @@ func (t *tui) setupHandlers() {
 		}
 	})
 
-	// Recent-recipient history with Ctrl+P/N.
+	// Input history is session-local; returning past the newest entry restores
+	// the draft saved when browsing began. Neither end wraps around.
 	t.input.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
-		if ev.Key() == tcell.KeyCtrlP || ev.Key() == tcell.KeyCtrlN {
-			if len(t.recentRecipients) == 0 {
-				return ev
+		switch ev.Key() {
+		case tcell.KeyCtrlP:
+			if t.historyOffset == len(t.inputHistory) {
+				return nil
 			}
-			if ev.Key() == tcell.KeyCtrlP {
-				t.rrIdx = (t.rrIdx + 1) % len(t.recentRecipients)
-			} else if t.rrIdx <= 0 {
-				t.rrIdx = len(t.recentRecipients) - 1
-			} else {
-				t.rrIdx--
+			if t.historyOffset == 0 {
+				t.inputDraft = t.input.GetText()
 			}
-			t.input.SetText("@" + t.recentRecipients[t.rrIdx] + " ")
-			return nil
+			t.historyOffset++
+		case tcell.KeyCtrlN:
+			if t.historyOffset == 0 {
+				return nil
+			}
+			t.historyOffset--
+		default:
+			return ev
 		}
-		t.rrIdx = -1
-		return ev
+		if t.historyOffset == 0 {
+			t.input.SetText(t.inputDraft)
+		} else {
+			t.input.SetText(t.inputHistory[len(t.inputHistory)-t.historyOffset])
+		}
+		return nil
 	})
 
 	t.app.SetInputCapture(t.handleKey)
@@ -291,6 +299,8 @@ func (t *tui) handleCommand(text string) {
 		t.submit(client.UserAction{Type: "MANAGE_ANCHORS", Payload: payload})
 	case "/help", "/h":
 		t.submit(client.UserAction{Type: "GET_HELP"})
+	case "/theme", "/t":
+		t.handleTheme(payload)
 	}
 }
 
@@ -328,20 +338,15 @@ func (t *tui) handleAutocomplete(currentText string) []string {
 	return append([]string(nil), t.completionEntries...)
 }
 
-// rememberRecipient moves a nick to the front of the recent-recipient history,
-// trimming duplicates and keeping the list bounded.
-func (t *tui) rememberRecipient(nick string) {
-	if nick == "" {
-		return
+// rememberInput retains submitted messages and commands on the event loop only.
+// It never writes history to disk.
+func (t *tui) rememberInput(text string) {
+	if len(t.inputHistory) == maxInputHistory {
+		copy(t.inputHistory, t.inputHistory[1:])
+		t.inputHistory[len(t.inputHistory)-1] = text
+	} else {
+		t.inputHistory = append(t.inputHistory, text)
 	}
-	for i, n := range t.recentRecipients {
-		if n == nick {
-			t.recentRecipients = append(t.recentRecipients[:i], t.recentRecipients[i+1:]...)
-			break
-		}
-	}
-	t.recentRecipients = append([]string{nick}, t.recentRecipients...)
-	if len(t.recentRecipients) > 20 {
-		t.recentRecipients = t.recentRecipients[:20]
-	}
+	t.historyOffset = 0
+	t.inputDraft = ""
 }

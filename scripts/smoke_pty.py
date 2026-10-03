@@ -237,6 +237,10 @@ def main():
             term.send("/help\r")
             if not term.wait_for(args.help_expect, args.timeout, "help_rendered"):
                 raise AssertionError("/help output not rendered")
+            for name in ("blue-gray", "red-gold", "monochrome", "default"):
+                term.send("/theme %s\r" % name)
+                if not term.wait_for("Theme: " + name, args.timeout, "theme_" + name):
+                    raise AssertionError("theme switch not rendered: " + name)
             term.send("/join %s\r" % args.chat)
             # Asking the client which chat is active proves the join reached the
             # client; the answer lands in the message pane, which every layout
@@ -260,7 +264,18 @@ def main():
                 if term.process.poll() is not None:
                     raise AssertionError("client exited while sending to a dead relay")
                 term.steps.append({"step": "no_phantom_send_success", "ok": True})
-            term.send("/quit\r")
+            term.send("history draft marker")
+            if not term.wait_for("history draft marker", args.timeout, "history_draft_typed"):
+                raise AssertionError("history draft not rendered")
+            term.send("\x10")  # Ctrl+P: recall the last attempted message.
+            term.pump(0.2)
+            if not term.wait_for("hello from a real terminal", args.timeout, "history_previous"):
+                raise AssertionError("Ctrl+P did not recall the full input")
+            term.send("\x0e")  # Ctrl+N: restore the draft, without sending it.
+            term.pump(0.2)
+            if not term.wait_for("history draft marker", args.timeout, "history_draft_restored"):
+                raise AssertionError("Ctrl+N did not restore the draft")
+            term.send("\x15/quit\r")  # Ctrl+U clears the restored draft.
             code = term.finish(args.timeout)
             result["exit_code"] = code
             if code != 0:
