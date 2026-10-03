@@ -92,18 +92,19 @@ var themes = []struct {
 	name  string
 	style *theme
 }{
-	{"default", defaultTheme},
+	{client.DefaultTheme, defaultTheme},
 	{"monochrome", monochromeTheme},
 	{"blue-gray", blueGrayTheme},
 	{"red-gold", redGoldTheme},
 }
 
-// handleTheme is local to the event loop: no client action or config write.
+// handleTheme lists locally but delegates saves to the config owner. The UI
+// switches on THEME_UPDATE only after a successful save, never on a failed send.
 func (t *tui) handleTheme(arg string) {
 	arg = strings.TrimSpace(arg)
 	if arg == "" {
 		var b strings.Builder
-		b.WriteString("Themes (session only):\n")
+		b.WriteString("Themes:\n")
 		for i, entry := range themes {
 			fmt.Fprintf(&b, "%d. %s", i+1, entry.name)
 			if entry.style == t.theme {
@@ -117,13 +118,29 @@ func (t *tui) handleTheme(arg string) {
 	}
 	for i, entry := range themes {
 		if arg == entry.name || arg == strconv.Itoa(i+1) {
-			t.theme = entry.style
-			t.applyTheme()
-			t.applyEvent(client.DisplayEvent{Type: "INFO", Content: "Theme: " + entry.name})
+			t.submit(client.UserAction{Type: "SET_THEME", Payload: entry.name})
 			return
 		}
 	}
 	t.applyEvent(client.DisplayEvent{Type: "ERROR", Content: "Unknown theme: " + arg + ". Use /theme to list themes."})
+}
+
+// restoreTheme runs only on the event loop, for startup and successful saves.
+// Unknown names fall back safely without writing back to the configuration.
+func (t *tui) restoreTheme(name string) bool {
+	selected := defaultTheme
+	for _, entry := range themes {
+		if name == entry.name {
+			selected = entry.style
+			break
+		}
+	}
+	if t.theme == selected {
+		return false
+	}
+	t.theme = selected
+	t.applyTheme()
+	return true
 }
 
 // applyTheme updates existing widgets on the event loop, not tview's global

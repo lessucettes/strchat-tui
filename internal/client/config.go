@@ -35,6 +35,7 @@ type filter struct {
 type config struct {
 	PrivateKey     string        `json:"private_key"`
 	Nick           string        `json:"nick,omitempty"`
+	Theme          string        `json:"theme,omitempty"`
 	Views          []View        `json:"views"`
 	ActiveViewName string        `json:"active_view_name"`
 	AnchorRelays   []string      `json:"anchor_relays,omitempty"`
@@ -89,6 +90,10 @@ func loadConfigFrom(path string) (*config, error) {
 	}
 	if err := conf.validate(); err != nil {
 		return nil, err
+	}
+	// Missing (legacy) or unrecognized theme names must not prevent startup.
+	if !validTheme(conf.Theme) {
+		conf.Theme = DefaultTheme
 	}
 
 	return conf, nil
@@ -194,6 +199,7 @@ func createDefaultConfig(path string) (*config, error) {
 	sk := nostr.GeneratePrivateKey()
 	conf := &config{
 		PrivateKey:     sk,
+		Theme:          DefaultTheme,
 		Views:          []View{},
 		ActiveViewName: "",
 		AnchorRelays:   []string{},

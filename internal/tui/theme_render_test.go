@@ -20,7 +20,7 @@ func TestThemeRecolorsRetainedScrollback(t *testing.T) {
 	s.ui.applyEvent(client.DisplayEvent{Type: "ERROR", Content: "retained error"})
 	s.draw()
 	for _, name := range []string{"blue-gray", "monochrome", "red-gold", "default"} {
-		s.onLoop(func() { s.ui.handleCommand("/theme " + name) })
+		s.ui.applyEvent(client.DisplayEvent{Type: "THEME_UPDATE", Content: name})
 		s.draw()
 		s.onLoop(func() {
 			want := colorTag(s.ui.theme.titleColor) + "-- retained information"
@@ -54,8 +54,10 @@ func TestThemeRecolorsRetainedScrollback(t *testing.T) {
 }
 
 func TestThemeInvalidSelectionAndLocalState(t *testing.T) {
-	ui := newIdleTUI(t, 0) // /theme must work even with no client consumer.
+	ui := newIdleTUI(t, 8)
 	ui.handleCommand("/theme blue-gray")
+	ui.applyEvent(client.DisplayEvent{Type: "THEME_UPDATE", Content: "blue-gray"})
+	ui.render()
 	selected := ui.theme
 	for _, arg := range []string{"0", "5", "-1", "missing", "red-gold extra", "[red]"} {
 		ui.handleCommand("/theme " + arg)
@@ -69,6 +71,8 @@ func TestThemeInvalidSelectionAndLocalState(t *testing.T) {
 	ui.input.SetText("draft")
 	ui.rememberInput("previous")
 	ui.handleCommand("/theme monochrome")
+	ui.applyEvent(client.DisplayEvent{Type: "THEME_UPDATE", Content: "monochrome"})
+	ui.render()
 	if ui.input.GetText() != "draft" || len(ui.inputHistory) != 1 || ui.inputHistory[0] != "previous" {
 		t.Fatal("switching themes reset input or history")
 	}
@@ -92,7 +96,7 @@ func TestThemePreservesScrollSelectionAndHiddenPanes(t *testing.T) {
 		s.ui.chatList.SetCurrentItem(1)
 		s.ui.selectedForGroup["lobby"] = true
 		s.ui.outputView.ScrollTo(10, 0)
-		s.ui.handleCommand("/theme red-gold")
+		s.ui.applyEvent(client.DisplayEvent{Type: "THEME_UPDATE", Content: "red-gold"})
 	})
 	s.draw()
 	s.onLoop(func() {
@@ -102,7 +106,7 @@ func TestThemePreservesScrollSelectionAndHiddenPanes(t *testing.T) {
 		}
 	})
 	s.resize(58, 10) // Logs and chat list are hidden.
-	s.onLoop(func() { s.ui.handleCommand("/theme blue-gray") })
+	s.ui.applyEvent(client.DisplayEvent{Type: "THEME_UPDATE", Content: "blue-gray"})
 	s.draw()
 	s.resize(120, 40)
 	s.draw()
@@ -139,7 +143,7 @@ func TestThemeSwitchDuringEventAndLogCollection(t *testing.T) {
 		}
 	}()
 	for i := 0; i < 20; i++ {
-		s.onLoop(func() { s.ui.handleCommand("/theme " + themes[i%len(themes)].name) })
+		s.ui.applyEvent(client.DisplayEvent{Type: "THEME_UPDATE", Content: themes[i%len(themes)].name})
 		s.draw()
 	}
 	<-done

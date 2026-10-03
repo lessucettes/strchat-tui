@@ -6,6 +6,8 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
+
+	"github.com/lessucettes/strchat-tui/internal/client"
 )
 
 func TestThemeCommandChangesExistingWidgets(t *testing.T) {
@@ -31,6 +33,17 @@ func TestThemeCommandChangesExistingWidgets(t *testing.T) {
 			s.ui.input.SetText(tc.command)
 			s.ui.input.InputHandler()(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone), nil)
 		})
+		select {
+		case action := <-s.actions:
+			if action.Type != "SET_THEME" || action.Payload != tc.name {
+				t.Fatalf("%s submitted %+v", tc.command, action)
+			}
+		default:
+			t.Fatal("theme command did not request persistence")
+		}
+		// Model the owner's successful-save response, not a local-only switch.
+		s.ui.applyEvent(client.DisplayEvent{Type: "THEME_UPDATE", Content: tc.name})
+		s.ui.applyEvent(client.DisplayEvent{Type: "INFO", Content: "Theme: " + tc.name})
 		s.draw()
 		if !strings.Contains(s.text(), "Theme: "+tc.name) {
 			t.Fatalf("%s did not confirm the selected theme", tc.command)
@@ -57,6 +70,6 @@ func TestThemeCommandChangesExistingWidgets(t *testing.T) {
 		t.Fatal("theme switch mutated process-global tview defaults")
 	}
 	if len(s.actions) != 0 {
-		t.Fatal("local theme command was sent to the network client")
+		t.Fatal("unexpected extra client actions")
 	}
 }

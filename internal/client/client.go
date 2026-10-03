@@ -90,6 +90,7 @@ func (c *client) Run() {
 		c.emit(DisplayEvent{Type: "INFO", Content: "No chats joined. Use /join <chat> and /help. Public messages are not encrypted."})
 	}
 	c.sendStateUpdate()
+	c.emit(DisplayEvent{Type: "THEME_UPDATE", Content: c.config.Theme})
 	for c.ctx.Err() == nil {
 		select {
 		case <-c.ctx.Done():
@@ -152,6 +153,8 @@ func (c *client) handleAction(action UserAction) {
 		c.setPoW(action.Payload)
 	case "SET_NICK":
 		c.setNick(action.Payload)
+	case "SET_THEME":
+		c.setTheme(action.Payload)
 	case "LIST_CHATS":
 		c.listChats()
 	case "GET_ACTIVE_CHAT":

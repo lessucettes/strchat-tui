@@ -66,6 +66,7 @@ type tui struct {
 	views           []client.View
 	activeViewIndex int
 	nick            string
+	themeName       string
 	relays          []client.RelayInfo
 	stateRev        int64
 	relaysRev       int64
@@ -320,6 +321,11 @@ func (t *tui) applyEvent(ev client.DisplayEvent) {
 		t.applyRelaysUpdate(ev)
 	case "NICK_COMPLETION_RESULT":
 		t.applyCompletion(ev)
+	case "THEME_UPDATE":
+		t.mu.Lock()
+		t.themeName = ev.Content
+		t.mu.Unlock()
+		t.dirty.Store(true)
 	}
 }
 
@@ -436,6 +442,7 @@ type modelSnapshot struct {
 	views         []client.View
 	activeIndex   int
 	nick          string
+	themeName     string
 	relays        []client.RelayInfo
 	stateRev      int64
 	relaysRev     int64
@@ -456,6 +463,7 @@ func (t *tui) snapshot() modelSnapshot {
 		views:         slices.Clone(t.views),
 		activeIndex:   t.activeViewIndex,
 		nick:          t.nick,
+		themeName:     t.themeName,
 		relays:        slices.Clone(t.relays),
 		stateRev:      t.stateRev,
 		relaysRev:     t.relaysRev,

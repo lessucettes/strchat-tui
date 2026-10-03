@@ -322,6 +322,9 @@ func (t *tui) render() {
 	// their wakeup even if they arrive while these widgets are being painted.
 	t.dirty.Store(false)
 	s := t.snapshot()
+	if t.restoreTheme(s.themeName) {
+		s = t.snapshot() // Theme changes invalidate both scrollback cursors.
+	}
 	if t.visible(t.outputView) {
 		t.writeLines(t.outputView, s.output)
 		t.setOutputSynced(s.output.upto, s.output.first)

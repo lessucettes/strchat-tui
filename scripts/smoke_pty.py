@@ -237,7 +237,7 @@ def main():
             term.send("/help\r")
             if not term.wait_for(args.help_expect, args.timeout, "help_rendered"):
                 raise AssertionError("/help output not rendered")
-            for name in ("blue-gray", "red-gold", "monochrome", "default"):
+            for name in ("default", "monochrome", "blue-gray", "red-gold"):
                 term.send("/theme %s\r" % name)
                 if not term.wait_for("Theme: " + name, args.timeout, "theme_" + name):
                     raise AssertionError("theme switch not rendered: " + name)
@@ -280,6 +280,32 @@ def main():
             result["exit_code"] = code
             if code != 0:
                 raise AssertionError(f"exit code {code!r} after /quit")
+            saved = json.loads((config_dir / "config.json").read_text())
+            if saved.get("theme") != "red-gold":
+                raise AssertionError("selected theme was not persisted")
+            term.steps.append({"step": "theme_saved", "ok": True})
+
+            # Restart the actual binary against the same isolated config. Query
+            # until the asynchronous startup snapshot has reached the UI.
+            restarted = Terminal(binary, args.cols, args.rows, home)
+            try:
+                if not restarted.wait_for("Alt+I", args.timeout, "restart_ready"):
+                    raise AssertionError("restarted UI never became ready")
+                deadline = time.monotonic() + args.timeout
+                while time.monotonic() < deadline:
+                    restarted.send("/theme\r")
+                    restarted.pump(0.2)
+                    if "red-gold (current)" in restarted.screen.text():
+                        break
+                else:
+                    raise AssertionError("saved theme was not restored on restart")
+                term.steps.append({"step": "theme_restored_after_restart", "ok": True})
+                restarted.send("/quit\r")
+                result["restart_exit_code"] = restarted.finish(args.timeout)
+                if result["restart_exit_code"] != 0:
+                    raise AssertionError("restarted client did not quit cleanly")
+            finally:
+                restarted.close()
         except AssertionError as exc:
             result["error"] = str(exc)
             result["screen"] = term.screen.text()

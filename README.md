@@ -67,7 +67,7 @@ Useful commands:
 | `/set <name1> <name2>...` | Combine existing chats in a local group |
 | `/list`, `/del [name]` | List or leave chats |
 | `/nick [name]` | Set or clear a nickname |
-| `/theme [name\|number]`, `/t` | List themes or switch colors immediately for this session |
+| `/theme [name\|number]`, `/t` | List themes or switch and save colors |
 | `/relay [url...]` | List or add explicit relays |
 | `/relay <number>` | Remove a configured relay |
 | `/pow <0..16>` | Set per-chat proof-of-work; default 0, above the cap is rejected |
@@ -88,15 +88,17 @@ including send attempts that failed; history is never written to disk.
 
 `/theme` lists the available themes and marks the current selection:
 
-1. `default` — the original green-on-black theme (startup default).
+1. `default` — the original green-on-black theme (used when no theme is saved).
 2. `monochrome` — high-contrast black and white.
 3. `blue-gray` — cool blue accents on a dark gray background.
 4. `red-gold` — red borders and gold accents on a dark warm background.
 
 Use `/theme blue-gray`, `/theme red-gold`, or a number such as `/t 4`.
 Colors change without restarting, including retained messages and logs; input,
-history, focus and chat selection are preserved. The choice is session-local
-and does not modify your configuration file.
+history, focus and chat selection are preserved. The selected name is saved in
+the `theme` field of `config.json` and restored at the next launch. Old configs
+without this field (or with an unknown theme name) use `default`. If saving
+fails, an error is shown and the previous theme remains active.
 
 ## Predictable networking
 
