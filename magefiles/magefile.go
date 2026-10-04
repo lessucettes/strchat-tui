@@ -78,7 +78,7 @@ func MacARM() error {
 
 // Build for Android/arm64 (runs on Android and Termux)
 func Android() error {
-	return build("android", "arm64", binBase+"-android-arm64")
+	return build("android", "arm64", binBase)
 }
 
 // Build for macOS
