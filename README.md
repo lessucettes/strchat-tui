@@ -147,25 +147,39 @@ go test ./...
 go test -race ./...
 go vet ./...
 go test ./internal/client ./internal/tui -run '^$' -bench . -benchmem
-python3 scripts/smoke_pty.py ./strchat-tui   # real terminal, no public relay
 ```
 
-The Mage targets remain available and cover the released set
-(`go run github.com/magefile/mage linux`, `macos`, `windows`, `android`, or
-`all`). Cross-compilation requires no C compiler:
+### Build release binaries with Mage
+
+Mage v1.15.0 is pinned in `go.mod`; no separate Mage installation is needed.
+From the repository root, list targets or build the full release set with the
+default target (`all`):
 
 ```sh
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build ./cmd/strchat-tui
-CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build ./cmd/strchat-tui
-CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build ./cmd/strchat-tui
+go run github.com/magefile/mage -l
+go run github.com/magefile/mage
 ```
+
+The default target builds all five binaries into the repository root:
+`strchat-tui-linux`, `strchat-tui-android-arm64`, `strchat-tui-macos-arm`,
+`strchat-tui-macos-intel`, and `strchat-tui.exe`. To build selected targets,
+append one of these case-sensitive Mage target names:
+
+```sh
+go run github.com/magefile/mage linux
+go run github.com/magefile/mage android
+go run github.com/magefile/mage windows
+go run github.com/magefile/mage macOS
+```
+
+`macOS` builds both macOS architectures. Mage sets `CGO_ENABLED=0` for
+cross-compilation, so no C compiler is required.
 
 Measured behaviour of this client is reported, not assumed: a 1000-message burst
 costs **2 screen draws instead of 2007**, startup is ~15 ms to the first frame on
 the development host, and a ten-minute soak over real sockets holds goroutines,
-file descriptors and heap flat. The benchmark, spray and soak harnesses behind
-those numbers are in `internal/client/*_test.go`, `internal/tui/bench_test.go`
-and `scripts/`.
+file descriptors and heap flat. Rendering benchmarks and relay soak tests are
+in `internal/tui/bench_test.go` and `internal/client/*_test.go`.
 
 ## License
 

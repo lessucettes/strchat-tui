@@ -9,3 +9,4 @@ strchat-tui
 __pycache__/
 *.pyc
 docs/
+scripts/
