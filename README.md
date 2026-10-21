@@ -144,26 +144,22 @@ On small terminals where Info is normally hidden, **Alt+N** temporarily opens
 the same pane in place of the feed. **Alt+I** restores the feed and input; the
 draft, subscriptions and retained messages are unchanged.
 
-### Mute messages by content
+### Filter and mute
 
-`/mute` hides incoming messages whose content matches an enabled mute rule.
-Wrap a [Go regular expression](https://pkg.go.dev/regexp/syntax) in `/.../`;
-without these delimiters, the rule is a literal substring, not a regexp.
-For example, hide any message containing a Latin letter, including accented
-letters such as `é` and `ñ`:
+- `/filter <pattern>` keeps only messages matching at least one enabled filter.
+  With no enabled filters, all messages pass this check.
+- `/mute <pattern>` hides messages matching any enabled mute rule, even if they
+  also match a filter. **Filter selects what to include; mute selects what to exclude.**
 
-```text
-/mute /\p{Latin}/
-```
+Both match message content using a case-sensitive literal substring or a
+[Go regular expression](https://pkg.go.dev/regexp/syntax) wrapped in `/.../`.
+For example, `/filter bitcoin` keeps messages containing `bitcoin`, while
+`/mute /spam|scam/` hides messages containing `spam` or `scam`.
 
-The regexp matches anywhere in the message, so mixed Cyrillic/Latin text and
-URLs containing Latin letters are hidden too. It hides the entire message,
-not just the matching characters or one line of a multiline message. To match
-only ASCII Latin letters, use `/mute /[A-Za-z]/` instead.
-
-Use `/mute` to list rules and their numbers, `/mute <number>` to toggle a rule,
-`/unmute <number>` to remove it, or `/unmute` to clear all rules. Rules are saved
-in the configuration and affect newly received messages, not retained scrollback.
+Use `/filter` or `/mute` without arguments to list rules, or with a rule number
+to toggle it. `/unfilter <number>` and `/unmute <number>` remove a rule; omit
+the number to clear the corresponding list. Rules are saved in the configuration
+and affect newly received messages, not retained scrollback.
 
 ### Themes
 
