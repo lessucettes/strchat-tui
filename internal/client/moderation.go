@@ -15,10 +15,13 @@ func (c *client) blockUser(payload string) {
 	for _, pk := range c.userContext.Keys() {
 		if ctx, ok := c.userContext.Get(pk); ok {
 			userIdentifier := fmt.Sprintf("@%s#%s", ctx.nick, ctx.shortPubKey)
-			if strings.HasPrefix(userIdentifier, payload) {
+			if payload != "" && (strings.HasPrefix(userIdentifier, payload) || payload == fmt.Sprintf("@%s#%s", ctx.nick, pk)) {
+				if pkToBlock != "" {
+					c.emit(DisplayEvent{Type: "ERROR", Content: "Ambiguous user. Use nickname completion to select a full public key."})
+					return
+				}
 				pkToBlock = pk
 				nickToBlock = fmt.Sprintf("%s#%s", ctx.nick, ctx.shortPubKey)
-				break
 			}
 		}
 	}
@@ -53,9 +56,16 @@ func (c *client) unblockUser(payload string) {
 	} else {
 		cleanPayload := strings.TrimPrefix(payload, "@")
 		for i, blockedUser := range c.config.BlockedUsers {
-			if strings.HasPrefix(blockedUser.Nick, cleanPayload) || strings.HasPrefix(blockedUser.PubKey, payload) {
+			nick := blockedUser.Nick
+			if suffix := strings.LastIndexByte(nick, '#'); suffix >= 0 {
+				nick = nick[:suffix]
+			}
+			if cleanPayload != "" && (strings.HasPrefix(blockedUser.Nick, cleanPayload) || strings.HasPrefix(blockedUser.PubKey, payload) || cleanPayload == nick+"#"+blockedUser.PubKey) {
+				if idxToRemove != -1 {
+					c.emit(DisplayEvent{Type: "ERROR", Content: "Ambiguous blocked user. Use a number from /block or the full public key."})
+					return
+				}
 				idxToRemove = i
-				break
 			}
 		}
 	}

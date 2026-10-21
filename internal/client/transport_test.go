@@ -997,10 +997,15 @@ func TestRemovedWorkerStatusEventsCannotResurrectOrAffectCurrentWorker(t *testin
 		url:     ts.url,
 		cancel:  func() { staleCancelled.Store(true) },
 		chats:   []string{"lobby"},
-		updates: make(chan []string, 1),
+		updates: make(chan relaySubscription, 1),
 		publish: make(chan relayPublish, 1),
 	}
-	h := startRelayHarness(t, relayTestConfig(t, ts.url), func(c *client) { c.relays[ts.url] = stale })
+	// Removing the last explicit anchor enables the public defaults. Keep a
+	// second, inert loopback anchor so this test never contacts public relays.
+	h := startRelayHarness(t, relayTestConfig(t, ts.url, "ws://127.0.0.1:1"), func(c *client) {
+		seedRelaySelection(c, []string{"lobby"})
+		c.relays[ts.url] = stale
+	})
 
 	// Positive control: while the worker is current, its status is honoured
 	// (including the reported latency) and never dials by itself.

@@ -110,6 +110,11 @@ func (c *config) validate() error {
 	if err := validatePrivateKey(c.PrivateKey); err != nil {
 		return err
 	}
+	for i, relay := range c.AnchorRelays {
+		if _, err := normalizeRelayURL(relay); err != nil {
+			return fmt.Errorf("config: invalid relay URL at index %d: %w", i+1, err)
+		}
+	}
 	for _, view := range c.Views {
 		if view.PoW < 0 || view.PoW > maxConfigPoW {
 			return fmt.Errorf("config: view %q has pow %d outside the supported range 0..%d",

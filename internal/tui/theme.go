@@ -122,6 +122,7 @@ func (t *tui) handleTheme(arg string) {
 			return
 		}
 	}
+	t.bell()
 	t.applyEvent(client.DisplayEvent{Type: "ERROR", Content: "Unknown theme: " + arg + ". Use /theme to list themes."})
 }
 

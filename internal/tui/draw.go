@@ -8,6 +8,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
+	"github.com/rivo/uniseg"
 
 	"github.com/lessucettes/strchat-tui/internal/client"
 )
@@ -17,14 +18,15 @@ import (
 const (
 	narrowWidth = 100 // below this the sidebar moves below the messages
 	tinyWidth   = 60  // below this only messages and input remain
-	tinyHeight  = 12
+	tinyHeight  = 15
 
-	tinyOutputMinHeight = 5 // below this even the message view is hidden
+	tinyOutputMinHeight = 6 // below this even the message view is hidden
 	tinyHintsMinHeight  = 8 // below this the hint line is hidden
 
-	logsHeight        = 3 // top log pane in the split layouts
-	narrowSidebarRows = 5 // chat list + details strip in narrow layouts
-	bottomHeight      = 4 // input (3 rows) + hints (1 row)
+	logsHeight         = 3 // top log pane in the split layouts
+	narrowSidebarRows  = 5 // chat list + details strip in narrow layouts
+	bottomHeight       = 4 // input (3 rows) + hints (1 row)
+	maxInputLabelWidth = 24
 )
 
 // layoutMode names the size class of the current terminal.
@@ -231,6 +233,8 @@ func (t *tui) setFocus(p tview.Primitive) {
 func (t *tui) focusIfVisible(p tview.Primitive) {
 	if t.visible(p) {
 		t.setFocus(p)
+	} else {
+		t.bell()
 	}
 }
 
@@ -501,7 +505,40 @@ func (t *tui) renderCompletion(s modelSnapshot) {
 func (t *tui) renderInputLabel(s modelSnapshot) {
 	label := "> "
 	if t.plan.mode != modeTiny && s.nick != "" {
-		label = s.nick + " > "
+		maxWidth := maxInputLabelWidth
+		if screen := t.screen.Load(); screen != nil {
+			width, _ := (*screen).Size()
+			if available := (width - 4) / 3; available < maxWidth {
+				maxWidth = available
+			}
+		}
+		nick := strings.Map(func(r rune) rune {
+			switch r {
+			case '\n', '\r', '	':
+				return ' '
+			default:
+				return r
+			}
+		}, sanitizeRunes(s.nick))
+		maxNickWidth := maxWidth - len(" > ")
+		if uniseg.StringWidth(nick) > maxNickWidth {
+			maxNickWidth-- // Reserve one cell for the truncation marker.
+			var clipped strings.Builder
+			g := uniseg.NewGraphemes(nick)
+			width := 0
+			for g.Next() {
+				if width+g.Width() > maxNickWidth {
+					break
+				}
+				clipped.WriteString(g.Str())
+				width += g.Width()
+			}
+			clipped.WriteRune('…')
+			nick = clipped.String()
+		}
+		if nick != "" {
+			label = sanitizeLineForDisplay(nick) + " > "
+		}
 	}
 	if label == t.inputLabel {
 		return
@@ -567,30 +604,31 @@ func backpressureNotice(dropped int, active bool) string {
 // only advertises what is reachable at that size.
 func hintsText(s hintsState) string {
 	var text string
+	quit := fmt.Sprintf("%sCtrl+D[-]: Quit", s.highlight)
 	switch {
 	case s.maximized != maximizeNone:
-		text = fmt.Sprintf("[%[1]s]`[-]: Restore | [%[1]s]↑/↓[-]: Scroll | [%[1]s]Ctrl+C[-]: Quit", s.highlight)
+		text = fmt.Sprintf("%s | %s`[-]: Restore | %s↑/↓[-]: Scroll", quit, s.highlight, s.highlight)
 	case s.mode == modeTiny:
-		text = fmt.Sprintf("[%[1]s]Tab[-]: Focus | [%[1]s]/help[-]: Commands | [%[1]s]Ctrl+C[-]: Quit", s.highlight)
+		text = fmt.Sprintf("%s | %sTab[-]: Focus | %s/help[-]: Commands", quit, s.highlight, s.highlight)
 	default:
-		base := fmt.Sprintf("[%[1]s]Alt+...[-]: Focus | [%[1]s]Ctrl+C[-]: Quit", s.highlight)
+		base := fmt.Sprintf("%sAlt+...[-]: Focus", s.highlight)
 		switch s.area {
 		case focusInput:
-			text = fmt.Sprintf("[%[1]s]Enter[-]: Send | [%[1]s]Ctrl+P/N[-]: History | [%[1]s]Tab/Shift+Tab[-]: Cycle Focus | %s", s.highlight, base)
+			text = fmt.Sprintf("%s | %sEnter[-]: Send | %sCtrl+P/N[-]: History | %sTab/Shift+Tab[-]: Cycle Focus | %s", quit, s.highlight, s.highlight, s.highlight, base)
 		case focusMessages:
-			text = fmt.Sprintf("[%[1]s]`[-]: Maximize | [%[1]s]↑/↓[-]: Scroll | [%[1]s]Tab/Shift+Tab[-]: Cycle Focus | %s", s.highlight, base)
+			text = fmt.Sprintf("%s | %s`[-]: Maximize | %s↑/↓[-]: Scroll | %sTab/Shift+Tab[-]: Cycle Focus | %s", quit, s.highlight, s.highlight, s.highlight, base)
 		case focusInfo:
-			text = fmt.Sprintf("[%[1]s]↑/↓[-]: Scroll | [%[1]s]Tab/Shift+Tab[-]: Cycle Focus | %s", s.highlight, base)
+			text = fmt.Sprintf("%s | %s↑/↓[-]: Scroll | %sTab/Shift+Tab[-]: Cycle Focus | %s", quit, s.highlight, s.highlight, base)
 		case focusChats:
-			text = fmt.Sprintf("[%[1]s]Space[-]: Select | [%[1]s]Enter[-]: Activate | [%[1]s]Del[-]: Delete | [%[1]s]Tab/Shift+Tab[-]: Cycle Focus | %s", s.highlight, base)
+			text = fmt.Sprintf("%s | %sSpace[-]: Select | %sEnter[-]: Activate | %sDel[-]: Delete | %sTab/Shift+Tab[-]: Cycle Focus | %s", quit, s.highlight, s.highlight, s.highlight, s.highlight, base)
 		case focusLogs:
-			text = fmt.Sprintf("[%[1]s]`[-]: Maximize | [%[1]s]Tab/Shift+Tab[-]: Cycle Focus | %s", s.highlight, base)
+			text = fmt.Sprintf("%s | %s`[-]: Maximize | %sTab/Shift+Tab[-]: Cycle Focus | %s", quit, s.highlight, s.highlight, base)
 		default:
-			text = base
+			text = quit + " | " + base
 		}
 	}
 	if s.notice != "" {
-		text += fmt.Sprintf(" | [%s]%s[-]", s.warn, s.notice)
+		text += fmt.Sprintf(" | %s%s[-]", s.warn, s.notice)
 	}
 	return text
 }

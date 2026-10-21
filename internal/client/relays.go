@@ -15,21 +15,32 @@ import (
 )
 
 const (
-	maxActiveRelays = 12
-	connectTimeout  = 5 * time.Second
-	maxFrameBytes   = 64 << 10
+	// Safety ceiling for a whole active group, not a per-chat target.
+	maxActiveRelays         = 256
+	maxConcurrentRelayDials = 4
+	relayRetryCacheSize     = 4096
+	connectTimeout          = 5 * time.Second
+	maxFrameBytes           = 64 << 10
 )
+
+type relaySubscription struct {
+	chats []string
+	since nostr.Timestamp
+}
 
 // The client loop owns these handles; the worker owns its socket and subscription.
 type managedRelay struct {
-	url       string
-	cancel    context.CancelFunc
-	done      chan struct{}
-	chats     []string
-	updates   chan []string
-	publish   chan relayPublish
-	connected bool
-	latency   time.Duration
+	url         string
+	cancel      context.CancelFunc
+	done        chan struct{}
+	chats       []string
+	updates     chan relaySubscription
+	publish     chan relayPublish
+	connected   bool
+	latency     time.Duration
+	connectedAt time.Time
+	retry       relayRetry      // immutable retry snapshot passed to the worker
+	startSince  nostr.Timestamp // immutable initial subscription watermark
 }
 
 type relayPublish struct {
@@ -43,6 +54,7 @@ type relayEvent struct {
 	event     *nostr.Event
 	connected bool
 	latency   time.Duration
+	retry     relayRetry
 }
 
 func (c *client) getRelayPoolForChat(chat string) []string {
@@ -50,9 +62,12 @@ func (c *client) getRelayPoolForChat(chat string) []string {
 	if geohash.Validate(chat) == nil {
 		// Nearest relays of both bundled catalogs (BitChat iOS and upstream
 		// georelays), because the two variants target different nearest sets.
-		if closest, err := closestRelays(chat, defaultRelayCount); err == nil {
-			urls = append(urls, closest...)
+		lists, ok := c.geoPlans[chat]
+		if !ok {
+			lists, _ = rankedGeoRelays(chat, 2*defaultRelayCount)
+			c.geoPlans[chat] = lists
 		}
+		urls = append(urls, primaryGeoRelays(lists)...)
 	}
 	if len(urls) == 0 {
 		urls = defaultEphChatRelays
@@ -67,28 +82,6 @@ func (c *client) getRelayPoolForChat(chat string) []string {
 		}
 	}
 	return result
-}
-
-func (c *client) updateAllSubscriptions() {
-	var chats []string
-	if view := c.getActiveView(); view != nil {
-		if view.IsGroup {
-			chats = slices.Clone(view.Children)
-		} else {
-			chats = []string{view.Name}
-		}
-	}
-	slices.Sort(chats)
-	desired := make(map[string][]string)
-	for _, chat := range chats {
-		for _, url := range c.getRelayPoolForChat(chat) {
-			if _, exists := desired[url]; !exists && len(desired) >= maxActiveRelays {
-				continue
-			}
-			desired[url] = append(desired[url], chat)
-		}
-	}
-	c.updateRelaySubscriptions(desired)
 }
 
 func (c *client) updateRelaySubscriptions(desired map[string][]string) {
@@ -128,10 +121,12 @@ func (c *client) updateRelaySubscriptions(desired map[string][]string) {
 			case <-worker.updates:
 			default:
 			}
-			worker.updates <- chats
+			worker.updates <- c.subscriptionForRelay(url, chats)
 		} else if len(c.relays) < maxActiveRelays {
 			ctx, cancel := context.WithCancel(c.ctx)
-			worker := &managedRelay{url: url, cancel: cancel, done: make(chan struct{}), chats: chats, updates: make(chan []string, 1), publish: make(chan relayPublish, 1)}
+			worker := &managedRelay{url: url, cancel: cancel, done: make(chan struct{}), chats: chats, updates: make(chan relaySubscription, 1), publish: make(chan relayPublish, 1)}
+			worker.retry, _ = c.relayRetries.Peek(url)
+			worker.startSince = c.subscriptionForRelay(url, chats).since
 			c.relays[url] = worker
 			c.wg.Go(func() { defer close(worker.done); c.runRelay(ctx, worker, chats) })
 		}
@@ -165,44 +160,87 @@ func (c *client) relayStatus(ctx context.Context, worker *managedRelay, connecte
 	}
 }
 
+// Bound both stalled handshakes and fast refusals. Waiting and dialing are
+// cancelable; a connected socket does not retain a dial permit.
+func (c *client) dialRelay(ctx context.Context, url string) (*websocket.Conn, time.Duration, error) {
+	select {
+	case c.dialSlots <- struct{}{}:
+	case <-ctx.Done():
+		return nil, 0, ctx.Err()
+	}
+	defer func() { <-c.dialSlots }()
+	select {
+	case c.dialPace <- struct{}{}:
+	case <-ctx.Done():
+		return nil, 0, ctx.Err()
+	}
+	timer := time.NewTimer(max(0, time.Until(c.nextDial)))
+	select {
+	case <-timer.C:
+		c.nextDial = time.Now().Add(c.relayTiming.dialGap)
+		<-c.dialPace
+	case <-ctx.Done():
+		timer.Stop()
+		<-c.dialPace
+		return nil, 0, ctx.Err()
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, connectTimeout)
+	defer cancel()
+	start := time.Now()
+	conn, _, err := websocket.Dial(dialCtx, url, nil)
+	return conn, time.Since(start), err
+}
+
 // Retry forever while selected. Neither an initial failure nor CLOSED permanently
 // blacklists a relay. Backoff resets only after a stable connection, not a handshake.
 func (c *client) runRelay(ctx context.Context, worker *managedRelay, chats []string) {
-	delay := 500 * time.Millisecond
-	since := nostr.Now()
+	delay := max(c.relayTiming.minimum, worker.retry.delay)
+	since := worker.startSince
+	if since == 0 {
+		since = nostr.Now()
+	}
+	if worker.retry.since > 0 && slices.Equal(worker.retry.chats, chats) {
+		since = min(since, max(worker.retry.since, nostr.Now()-30))
+	}
 	for ctx.Err() == nil {
-		start := time.Now()
-		dialCtx, cancel := context.WithTimeout(ctx, connectTimeout)
-		conn, _, err := websocket.Dial(dialCtx, worker.url, nil)
-		cancel()
+		conn, latency, err := c.dialRelay(ctx, worker.url)
 		if err == nil {
 			conn.SetReadLimit(maxFrameBytes)
-			c.relayStatus(ctx, worker, true, time.Since(start))
-			chats = c.serveRelay(ctx, worker, conn, chats, since)
+			connectedAt := time.Now()
+			chats = c.serveRelay(ctx, worker, conn, chats, since, latency)
 			conn.CloseNow()
-			c.relayStatus(ctx, worker, false, 0)
-			if time.Since(start) > time.Minute {
-				delay = 500 * time.Millisecond
+			if time.Since(connectedAt) >= c.relayTiming.stable {
+				delay = c.relayTiming.minimum
 			}
+		}
+		if ctx.Err() != nil {
+			return
 		}
 		// Only a small overlap is requested; ephemeral relays need not retain it.
 		since = max(since, nostr.Now()-30)
-		timer := time.NewTimer(delay/2 + time.Duration(rand.Int64N(int64(delay/2)+1)))
+		pause := delay/2 + time.Duration(rand.Int64N(int64(delay/2)+1))
+		delay = min(delay*2, c.relayTiming.maximum)
+		retry := relayRetry{until: time.Now().Add(pause), delay: delay, since: since, chats: slices.Clone(chats)}
+		select {
+		case c.incoming <- relayEvent{worker: worker, retry: retry}:
+		case <-ctx.Done():
+			return
+		}
+		timer := time.NewTimer(time.Until(retry.until))
 	wait:
 		for {
 			select {
 			case <-ctx.Done():
 				timer.Stop()
 				return
-			case chats = <-worker.updates:
-				since = nostr.Now()
+			case update := <-worker.updates:
+				chats, since = update.chats, update.since
 			case request := <-worker.publish:
 				request.result <- errors.New("relay is reconnecting")
 			case <-timer.C:
 				break wait
 			}
 		}
-		delay = min(delay*2, 30*time.Second)
 	}
 }
 
@@ -217,6 +255,8 @@ func writeFrame(ctx context.Context, conn *websocket.Conn, frame any) error {
 }
 
 func subscribe(ctx context.Context, conn *websocket.Conn, chats []string, since nostr.Timestamp) error {
+	// Admission or owner backpressure may have aged the snapshot before use.
+	since = max(since, nostr.Now()-30)
 	frame := []any{"REQ", "chat"}
 	for _, filter := range chatFilters(chats, since) {
 		frame = append(frame, filter)
@@ -226,9 +266,10 @@ func subscribe(ctx context.Context, conn *websocket.Conn, chats []string, since 
 
 // One reader, one bounded queue, no goroutine per frame. The websocket library
 // handles control frames while Read is active; Ping has a bounded pong deadline.
-func (c *client) serveRelay(ctx context.Context, worker *managedRelay, conn *websocket.Conn, chats []string, since nostr.Timestamp) []string {
+func (c *client) serveRelay(ctx context.Context, worker *managedRelay, conn *websocket.Conn, chats []string, since nostr.Timestamp, latency time.Duration) []string {
 	ctx, cancel := context.WithCancel(ctx)
-	frames := make(chan []byte, 16)
+	// Keep aggregate buffering small when a group uses many relay sockets.
+	frames := make(chan []byte, 4)
 	readerDone := make(chan struct{})
 	go func() {
 		defer close(readerDone)
@@ -259,6 +300,7 @@ func (c *client) serveRelay(ctx context.Context, worker *managedRelay, conn *web
 	if subscribe(ctx, conn, chats, since) != nil {
 		return chats
 	}
+	c.relayStatus(ctx, worker, true, latency)
 	ping := time.NewTicker(30 * time.Second)
 	defer ping.Stop()
 	for {
@@ -276,8 +318,8 @@ func (c *client) serveRelay(ctx context.Context, worker *managedRelay, conn *web
 			if err != nil {
 				return chats
 			}
-		case chats = <-worker.updates:
-			since = nostr.Now()
+		case update := <-worker.updates:
+			chats, since = update.chats, update.since
 			if subscribe(ctx, conn, chats, since) != nil {
 				return chats
 			}

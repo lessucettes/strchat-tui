@@ -147,7 +147,7 @@ func sanitizeRunes(s string) string {
 			b.WriteRune(' ')
 		case r < 0x20 || r == 0x7f: // C0 controls, DEL, ESC
 		case r >= 0x80 && r <= 0x9f: // C1 controls
-		case r >= 0x200b && r <= 0x200f: // zero-width and bidi marks
+		case r == 0x200b || r == 0x200e || r == 0x200f: // zero-width space and bidi marks
 		case r >= 0x202a && r <= 0x202e: // bidi embedding/override
 		case r >= 0x2060 && r <= 0x2064: // word joiner and invisible operators
 		case r >= 0x2066 && r <= 0x2069: // bidi isolates

@@ -106,6 +106,7 @@ type tui struct {
 	lastNickQuery        string
 	inputLabel           string
 	hintsText            string
+	lastBell             time.Time
 	theme                *theme
 	themeColors          *strings.Replacer
 
@@ -511,6 +512,9 @@ func (t *tui) submit(action client.UserAction) bool {
 		return true
 	default:
 		t.noteBackpressure(action.Type)
+		if action.Type != "REQUEST_NICK_COMPLETION" && action.Type != "QUIT" {
+			t.bell()
+		}
 		return false
 	}
 }
@@ -627,9 +631,14 @@ func (t *tui) initViews() {
 		SetFieldBackgroundColor(t.theme.inputBgColor).
 		SetFieldTextColor(t.theme.inputTextColor)
 	t.input.SetBorder(true).SetTitle(titleInput).SetTitleAlign(tview.AlignLeft)
+	t.input.SetAutocompleteUseTags(false)
 	t.input.SetAutocompleteFunc(t.handleAutocomplete)
 	t.input.SetAcceptanceFunc(func(text string, _ rune) bool {
-		return graphemeLen(text) <= client.MaxMsgLen
+		if graphemeLen(text) > client.MaxMsgLen {
+			t.bell()
+			return false
+		}
+		return true
 	})
 
 	t.hints = tview.NewTextView().SetDynamicColors(true).SetTextAlign(tview.AlignLeft)

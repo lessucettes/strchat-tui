@@ -22,11 +22,15 @@ func extractNickPrefix(s string) (nick string, complete bool) {
 			continue
 		}
 
-		if hashIdx+5 <= len(rs) {
-			tagRunes := rs[hashIdx+1 : hashIdx+5]
+		// Normal completions use four characters; collisions use the full key.
+		for _, tagLen := range []int{4, 64} {
+			end := hashIdx + 1 + tagLen
+			if end > len(rs) || (end < len(rs) && rs[end] != ' ') {
+				continue
+			}
+			tagRunes := rs[hashIdx+1 : end]
 			ok := true
-			for j := range 4 {
-				c := tagRunes[j]
+			for _, c := range tagRunes {
 				if !((c >= '0' && c <= '9') ||
 					(c >= 'A' && c <= 'Z') ||
 					(c >= 'a' && c <= 'z')) {
@@ -35,8 +39,8 @@ func extractNickPrefix(s string) (nick string, complete bool) {
 				}
 			}
 
-			if ok && (hashIdx+5 == len(rs) || rs[hashIdx+5] == ' ') {
-				return string(rs[:hashIdx+5]), true
+			if ok {
+				return string(rs[:end]), true
 			}
 		}
 	}

@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -18,6 +19,11 @@ import (
 // The 64 KiB wire cap also bounds JSON decoding and signature verification input.
 func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 	if ev == nil || len(ev.ID) != 64 || len(ev.PubKey) != 64 || len(ev.Sig) != 128 || len(ev.Content) > maxContentBytes || len(ev.Tags) > 128 || !utf8.ValidString(ev.Content) {
+		return
+	}
+	// NIP-01 keys are lowercase hex. Alternate spellings must not split a
+	// participant's identity or bypass the block list's canonical key lookup.
+	if strings.Trim(ev.PubKey, "0123456789abcdef") != "" {
 		return
 	}
 	if c.seenCache.Contains(ev.ID) {
@@ -125,12 +131,29 @@ func (c *client) publishMessage(message string) {
 	chat := view.Name
 	var target, matched string
 	if strings.HasPrefix(message, "@") {
+		ambiguous := false
 		for _, pk := range c.userContext.Keys() {
 			user, _ := c.userContext.Peek(pk)
-			prefix := fmt.Sprintf("@%s#%s", user.nick, user.shortPubKey)
-			if strings.HasPrefix(message, prefix) && (len(message) == len(prefix) || message[len(prefix)] == ' ') && len(prefix) > len(matched) {
-				target, chat, matched = pk, user.chat, prefix
+			if (!view.IsGroup && view.Name != user.chat) || (view.IsGroup && !slices.Contains(view.Children, user.chat)) {
+				continue
 			}
+			// Completion expands a colliding short identifier to the full key.
+			for _, suffix := range []string{user.shortPubKey, pk} {
+				prefix := fmt.Sprintf("@%s#%s", user.nick, suffix)
+				if !strings.HasPrefix(message, prefix) || (len(message) > len(prefix) && message[len(prefix)] != ' ') {
+					continue
+				}
+				if len(prefix) > len(matched) {
+					target, chat, matched = pk, user.chat, prefix
+					ambiguous = false
+				} else if len(prefix) == len(matched) && target != pk {
+					ambiguous = true
+				}
+			}
+		}
+		if ambiguous {
+			c.emit(DisplayEvent{Type: "ERROR", Content: "Ambiguous recipient. Use nickname completion to select a full public key."})
+			return
 		}
 		if target == "" {
 			c.emit(DisplayEvent{Type: "ERROR", Content: "Unknown recipient. Use nickname completion."})
@@ -229,13 +252,23 @@ func executePublish(ctx context.Context, job publishJob) publishResult {
 	result.event = event
 	// Dispatch in parallel via existing relay workers; a slow relay does not delay
 	// sending to a healthy one and creates no additional publishing goroutines.
-	answers := make([]chan error, 0, len(job.relays))
+	type relayAnswer struct {
+		result <-chan error
+		done   <-chan struct{}
+	}
+	answers := make([]relayAnswer, 0, len(job.relays))
 	for _, worker := range job.relays {
+		select {
+		case <-worker.done:
+			continue
+		default:
+		}
 		answer := make(chan error, 1)
 		request := relayPublish{ctx: ctx, event: event, result: answer}
 		select {
 		case worker.publish <- request:
-			answers = append(answers, answer)
+			answers = append(answers, relayAnswer{result: answer, done: worker.done})
+		case <-worker.done:
 		default: // Worker already has pending work; count as unacknowledged.
 		}
 	}
@@ -243,14 +276,18 @@ func executePublish(ctx context.Context, job publishJob) publishResult {
 	for _, answer := range answers {
 		var err error
 		select {
-		case err = <-answer:
+		case err = <-answer.result:
+		case <-answer.done:
+			err = errors.New("relay worker stopped before acknowledgement")
 		case <-ctx.Done():
-			// An earlier slow relay must not hide an answer already received
-			// from a healthy peer when the deadline becomes ready as well.
+			err = ctx.Err()
+		}
+		if err != nil {
+			// A ready deadline or retired worker must not hide an acknowledgement
+			// already received from that relay.
 			select {
-			case err = <-answer:
+			case err = <-answer.result:
 			default:
-				err = ctx.Err()
 			}
 		}
 		if err == nil {

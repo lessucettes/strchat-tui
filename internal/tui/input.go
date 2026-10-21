@@ -3,6 +3,7 @@ package tui
 import (
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 
@@ -10,6 +11,19 @@ import (
 )
 
 const maxInputHistory = 100
+
+// bell is event-loop-only feedback for rejected input, not relay/network errors.
+// A held key or a paste at the length limit must not produce a stream of BELs.
+func (t *tui) bell() {
+	now := time.Now()
+	if now.Sub(t.lastBell) < 500*time.Millisecond {
+		return
+	}
+	if screen := t.screen.Load(); screen != nil {
+		t.lastBell = now
+		_ = (*screen).Beep()
+	}
+}
 
 // setupHandlers wires all key handling. Handlers run on the tview event loop;
 // they never block (see submit) and never call QueueUpdate (which would block
@@ -60,6 +74,7 @@ func (t *tui) setupHandlers() {
 		switch ev.Key() {
 		case tcell.KeyCtrlP:
 			if t.historyOffset == len(t.inputHistory) {
+				t.bell()
 				return nil
 			}
 			if t.historyOffset == 0 {
@@ -68,6 +83,7 @@ func (t *tui) setupHandlers() {
 			t.historyOffset++
 		case tcell.KeyCtrlN:
 			if t.historyOffset == 0 {
+				t.bell()
 				return nil
 			}
 			t.historyOffset--
@@ -93,6 +109,16 @@ func (t *tui) setupHandlers() {
 func (t *tui) handleKey(event *tcell.EventKey) *tcell.EventKey {
 	if event.Key() == wakeKey {
 		return nil // internal repaint request; the following draw does the work
+	}
+	// Handle shutdown before pane dispatch, including empty lists and maximized
+	// views. Consume Ctrl+C too: otherwise tview's default handler still quits.
+	switch event.Key() {
+	case tcell.KeyCtrlD:
+		t.quit()
+		return nil
+	case tcell.KeyCtrlC:
+		t.bell()
+		return nil
 	}
 	t.syncFocus()
 
@@ -132,8 +158,11 @@ func (t *tui) handleKey(event *tcell.EventKey) *tcell.EventKey {
 		t.setMaximized(maximizeMessages)
 		return nil
 	}
-	if event.Key() == tcell.KeyCtrlC {
-		t.quit()
+	if t.focused != t.input && event.Key() == tcell.KeyRune {
+		if strings.ContainsRune("gGhjkl", event.Rune()) {
+			return event // Keep tview's native TextView scrolling shortcuts.
+		}
+		t.bell() // Text belongs in the input field, not a read-only pane.
 		return nil
 	}
 	// Fall back to our own focus target when the layout hid tview's.
@@ -154,14 +183,17 @@ func (t *tui) quit() {
 func (t *tui) handleMaximizedViewKeys(event *tcell.EventKey) *tcell.EventKey {
 	switch event.Key() {
 	case tcell.KeyRune:
+		if strings.ContainsRune("gGhjkl", event.Rune()) {
+			return event
+		}
 		if event.Rune() == '`' {
 			t.setMaximized(maximizeNone)
+		} else {
+			t.bell()
 		}
 		return nil
-	case tcell.KeyCtrlC:
-		t.quit()
-		return nil
 	case tcell.KeyTab, tcell.KeyBacktab:
+		t.bell() // Restore the pane before trying to switch focus.
 		return nil
 	case tcell.KeyUp, tcell.KeyDown, tcell.KeyPgUp, tcell.KeyPgDn, tcell.KeyHome, tcell.KeyEnd:
 		return event
@@ -181,6 +213,10 @@ func (t *tui) handleChatListKeys(event *tcell.EventKey) *tcell.EventKey {
 	s := t.snapshot()
 	count := t.chatList.GetItemCount()
 	if count == 0 || len(s.views) == 0 {
+		if event.Key() == tcell.KeyEnter || event.Key() == tcell.KeyDelete || event.Key() == tcell.KeyRune {
+			t.bell()
+			return nil
+		}
 		return event
 	}
 	cur := t.chatList.GetCurrentItem()
@@ -199,6 +235,8 @@ func (t *tui) handleChatListKeys(event *tcell.EventKey) *tcell.EventKey {
 			}
 			t.selectionRev++
 			t.renderChatList(t.snapshot())
+		} else {
+			t.bell()
 		}
 		return nil
 	case tcell.KeyEnter:
@@ -232,12 +270,7 @@ func (t *tui) handleChatListKeys(event *tcell.EventKey) *tcell.EventKey {
 // handleCommand parses and dispatches slash commands. The command set and
 // aliases are unchanged from before the hardening.
 func (t *tui) handleCommand(text string) {
-	parts := strings.SplitN(text, " ", 2)
-	command := parts[0]
-	payload := ""
-	if len(parts) > 1 {
-		payload = parts[1]
-	}
+	command, payload := splitCommand(text)
 	switch command {
 	case "/quit", "/q":
 		t.submit(client.UserAction{Type: "QUIT"})
@@ -245,6 +278,9 @@ func (t *tui) handleCommand(text string) {
 	case "/join", "/j":
 		if payload != "" {
 			t.submit(client.UserAction{Type: "JOIN_CHATS", Payload: payload})
+		} else {
+			t.bell()
+			t.applyEvent(client.DisplayEvent{Type: "ERROR", Content: "Usage: /join <chat> [chat...]"})
 		}
 	case "/pow", "/p":
 		if payload == "" {
@@ -301,28 +337,39 @@ func (t *tui) handleCommand(text string) {
 		t.submit(client.UserAction{Type: "GET_HELP"})
 	case "/theme", "/t":
 		t.handleTheme(payload)
+	default:
+		t.bell()
+		t.applyEvent(client.DisplayEvent{Type: "ERROR", Content: "Unknown command: " + command + ". Use /help to list commands."})
 	}
+}
+
+// splitCommand separates a slash command from its arguments using any
+// whitespace, matching the input's outer TrimSpace before dispatch.
+func splitCommand(text string) (command, payload string) {
+	text = strings.TrimSpace(text)
+	fields := strings.Fields(text)
+	if len(fields) == 0 {
+		return "", ""
+	}
+	command = fields[0]
+	payload = strings.TrimSpace(text[len(command):])
+	return command, payload
 }
 
 // handleAutocomplete provides completion entries for the input field.
 func (t *tui) handleAutocomplete(currentText string) []string {
-	trimmed := strings.TrimSpace(currentText)
-
-	if strings.HasPrefix(trimmed, "/block ") ||
-		strings.HasPrefix(trimmed, "/unblock ") ||
-		strings.HasPrefix(trimmed, "/b ") ||
-		strings.HasPrefix(trimmed, "/ub ") {
-		parts := strings.SplitN(currentText, " ", 2)
-		if len(parts) < 2 {
+	command, payload := splitCommand(currentText)
+	switch command {
+	case "/block", "/unblock", "/b", "/ub":
+		if payload == "" {
 			return nil
 		}
-		cmd := parts[0] + " "
 		if len(t.completionEntries) == 0 {
 			return nil
 		}
 		out := make([]string, 0, len(t.completionEntries))
 		for _, e := range t.completionEntries {
-			out = append(out, cmd+e)
+			out = append(out, command+" "+e)
 		}
 		return out
 	}

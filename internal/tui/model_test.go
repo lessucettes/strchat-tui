@@ -109,6 +109,8 @@ func TestSanitizeForDisplayStripsControlAndFormatRunes(t *testing.T) {
 		{"c1", "a\u0085b", "ab"},
 		{"bidi override", "pay\u202epal", "paypal"},
 		{"zero width", "a\u200bb", "ab"},
+		{"zero width joiner preserved", "👩\u200d💻", "👩\u200d💻"},
+		{"zero width non-joiner preserved", "می\u200cروم", "می\u200cروم"},
 		{"isolate", "a\u2066b\u2069", "ab"},
 		{"bom", "a\ufeffb", "ab"},
 		{"soft hyphen", "a\u00adb", "ab"},

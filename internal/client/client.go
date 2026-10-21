@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/nbd-wtf/go-nostr"
@@ -23,6 +24,14 @@ type client struct {
 	cancel                         context.CancelFunc
 	wg                             sync.WaitGroup
 	relays                         map[string]*managedRelay
+	dialSlots, dialPace            chan struct{}
+	nextDial                       time.Time // protected by dialPace
+	relayTiming                    relayTiming
+	relayRetries                   *lru.Cache[string, relayRetry]
+	geoPlans                       map[string][][]string
+	nextRelayRetry                 time.Time
+	lastRelayNotice                string
+	lastRelayNoticeView            string
 	incoming                       chan relayEvent
 	outgoing                       chan publishJob
 	results                        chan publishResult
@@ -43,8 +52,11 @@ func newClient(cfg *config, actions <-chan UserAction, events chan<- DisplayEven
 	ctx, cancel := context.WithCancel(context.Background())
 	seen, _ := lru.New[string, bool](seenCacheSize)
 	users, _ := lru.New[string, userContext](userContextCacheSize)
+	retries, _ := lru.New[string, relayRetry](relayRetryCacheSize)
 	c := &client{config: cfg, actionsChan: actions, eventsChan: events, ctx: ctx, cancel: cancel,
 		chatKeys: make(map[string]chatSession), relays: make(map[string]*managedRelay),
+		dialSlots: make(chan struct{}, maxConcurrentRelayDials), dialPace: make(chan struct{}, 1),
+		relayTiming: defaultRelayTiming, relayRetries: retries, geoPlans: make(map[string][][]string),
 		incoming: make(chan relayEvent, 256), outgoing: make(chan publishJob, 8), results: make(chan publishResult, 8),
 		seenCache: seen, userContext: users, n: cfg.Nick}
 	c.rebuildRegexCaches()
@@ -91,10 +103,21 @@ func (c *client) Run() {
 	}
 	c.sendStateUpdate()
 	c.emit(DisplayEvent{Type: "THEME_UPDATE", Content: c.config.Theme})
+	retryTimer := time.NewTimer(time.Hour)
+	defer retryTimer.Stop()
 	for c.ctx.Err() == nil {
+		var retryC <-chan time.Time
+		if c.nextRelayRetry.IsZero() {
+			retryTimer.Stop()
+		} else {
+			retryTimer.Reset(max(0, time.Until(c.nextRelayRetry)))
+			retryC = retryTimer.C
+		}
 		select {
 		case <-c.ctx.Done():
 			return
+		case <-retryC:
+			c.updateAllSubscriptions()
 		case action, ok := <-c.actionsChan:
 			if !ok {
 				return
@@ -110,7 +133,17 @@ func (c *client) Run() {
 			} else {
 				worker.connected = incoming.connected
 				worker.latency = incoming.latency
-				c.sendRelaysUpdate()
+				if incoming.connected {
+					worker.connectedAt = time.Now()
+				}
+				if incoming.retry.delay > 0 {
+					c.relayRetries.Add(worker.url, incoming.retry)
+				}
+				if incoming.connected || incoming.retry.delay > 0 {
+					c.updateAllSubscriptions()
+				} else {
+					c.sendRelaysUpdate()
+				}
 			}
 		case result := <-c.results:
 			if result.accepted > 0 {
@@ -215,6 +248,10 @@ func (c *client) manageAnchors(payload string) {
 		existing[url] = true
 	}
 	for _, raw := range args {
+		if _, err := strconv.Atoi(raw); err == nil {
+			c.emit(DisplayEvent{Type: "ERROR", Content: "Remove one relay at a time with /relay <number>; use URLs when adding relays."})
+			continue
+		}
 		url, err := normalizeRelayURL(raw)
 		if err != nil {
 			c.emit(DisplayEvent{Type: "ERROR", Content: err.Error()})
@@ -224,7 +261,7 @@ func (c *client) manageAnchors(payload string) {
 			continue
 		}
 		if len(c.config.AnchorRelays) >= maxActiveRelays {
-			c.emit(DisplayEvent{Type: "ERROR", Content: "Relay limit reached (12). Remove an unused relay first."})
+			c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Relay safety limit reached (%d). Remove an unused relay first.", maxActiveRelays)})
 			break
 		}
 		c.config.AnchorRelays = append(c.config.AnchorRelays, url)

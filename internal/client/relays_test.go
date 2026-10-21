@@ -68,7 +68,7 @@ func TestRelayURLPreservesTransportAndPath(t *testing.T) {
 }
 
 func TestShutdownWithBlockedDisplay(t *testing.T) {
-	c, _ := testClient(t)
+	c := transportClient(t, relayTestConfig(t, "ws://127.0.0.1:1"))
 	c.eventsChan = make(chan DisplayEvent)
 	c.actionsChan = make(chan UserAction)
 	done := make(chan struct{})

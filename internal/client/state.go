@@ -169,14 +169,8 @@ func (c *client) leaveChat(chatName string) {
 	}
 
 	c.config.Views = finalViews
-	if c.config.ActiveViewName == chatName {
-		c.config.ActiveViewName = ""
-	}
-	c.saveConfig()
-	c.sendStateUpdate()
-	c.updateAllSubscriptions()
-
 	delete(c.chatKeys, chatName)
+	c.activateRemainingView()
 }
 
 func (c *client) deleteGroup(groupName string) {
@@ -187,11 +181,19 @@ func (c *client) deleteGroup(groupName string) {
 		}
 	}
 	c.config.Views = newViews
-	if c.config.ActiveViewName == groupName {
+	c.activateRemainingView()
+}
+
+// A fallback chat needs the same session identity and persisted selection as an
+// explicit view switch. Merely sending a snapshot would select it without a key.
+func (c *client) activateRemainingView() {
+	if view := c.getActiveView(); view != nil {
+		c.setActiveView(view.Name)
+	} else {
 		c.config.ActiveViewName = ""
+		c.saveConfig()
+		c.sendStateUpdate()
 	}
-	c.saveConfig()
-	c.sendStateUpdate()
 	c.updateAllSubscriptions()
 }
 
@@ -341,7 +343,7 @@ func (c *client) getHelp() {
 		"* /unfilter [<num>] - Removes a filter by number. Without args, clears all. (Alias: /uf)\n" +
 		"* /mute [word|regex|<num>] - Adds a mute. Without args, lists mutes. With number, toggles off/on. (Alias: /m)\n" +
 		"* /unmute [<num>] - Removes a mute by number. Without args, clears all. (Alias: /um)\n" +
-		"* /quit - Exits the application. (Alias: /q)"
+		"* /quit - Exits the application. (Alias: /q; shortcut: Ctrl+D)"
 
 	c.emit(DisplayEvent{Type: "INFO", Content: helpText})
 }
@@ -365,13 +367,22 @@ func (c *client) handleNickCompletion(prefix string) {
 		relevantChats[activeView.Name] = struct{}{}
 	}
 
+	byIdentifier := make(map[string][]string)
 	for _, key := range c.userContext.Keys() {
 		if value, ok := c.userContext.Get(key); ok {
 			if _, isActiveChat := relevantChats[value.chat]; isActiveChat {
 				if strings.HasPrefix(value.nick, prefix) {
-					entries = append(entries, fmt.Sprintf("@%s#%s ", value.nick, value.shortPubKey))
+					identifier := fmt.Sprintf("@%s#%s ", value.nick, value.shortPubKey)
+					byIdentifier[identifier] = append(byIdentifier[identifier], fmt.Sprintf("@%s#%s ", value.nick, key))
 				}
 			}
+		}
+	}
+	for identifier, full := range byIdentifier {
+		if len(full) == 1 {
+			entries = append(entries, identifier)
+		} else {
+			entries = append(entries, full...)
 		}
 	}
 

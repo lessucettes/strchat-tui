@@ -150,11 +150,29 @@ func haversine(lat1, lon1, lat2, lon2 float64) float64 {
 // shrinking the relay set; both bundled files are pinned by tests, so this is a
 // build-time problem rather than a runtime one.
 func closestRelays(geohashStr string, perCatalog int) ([]string, error) {
+	lists, err := rankedGeoRelays(geohashStr, perCatalog)
+	if err != nil {
+		return nil, err
+	}
+	return mergeClosest(lists, 2*perCatalog), nil
+}
+
+func primaryGeoRelays(lists [][]string) []string {
+	primary := make([][]string, len(lists))
+	for i, list := range lists {
+		primary[i] = list[:min(defaultRelayCount, len(list))]
+	}
+	return mergeClosest(primary, 2*defaultRelayCount)
+}
+
+// Keep catalog boundaries: reserve addresses cannot replace a different
+// BitChat variant's primary rendezvous set.
+func rankedGeoRelays(geohashStr string, perCatalog int) ([][]string, error) {
 	if err := validateGeohash(geohashStr); err != nil {
 		return nil, err
 	}
 	if perCatalog <= 0 {
-		return []string{}, nil
+		return [][]string{}, nil
 	}
 
 	ranked := make([][]string, 0, len(bundledCatalogs))
@@ -163,19 +181,14 @@ func closestRelays(geohashStr string, perCatalog int) ([]string, error) {
 		return nil, err
 	}
 	for _, entries := range allEntries {
-		nearest, err := selectClosestHosts(entries, geohashStr, perCatalog)
+		nearest, err := selectClosestRelays(entries, geohashStr, perCatalog)
 		if err != nil {
 			return nil, err
 		}
 		ranked = append(ranked, nearest)
 	}
 
-	hosts := mergeClosest(ranked, 2*perCatalog)
-	urls := make([]string, len(hosts))
-	for i, host := range hosts {
-		urls[i] = "wss://" + host
-	}
-	return urls, nil
+	return ranked, nil
 }
 
 // mergeClosest merges per-catalog ranked host lists into one preference order.

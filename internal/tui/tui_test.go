@@ -657,6 +657,51 @@ func TestAutocompleteKeepsBlockCompletionBehavior(t *testing.T) {
 	}
 }
 
+func TestAutocompleteAndDispatchUseCommandWhitespace(t *testing.T) {
+	ui := newIdleTUI(t, 1)
+	ui.completionEntries = []string{"bob"}
+	for _, tc := range []struct {
+		input string
+		want  string
+	}{{" /block b", "/block bob"}, {"/block\tb", "/block bob"}, {"/b\tb", "/b bob"}} {
+		got := ui.handleAutocomplete(tc.input)
+		if len(got) != 1 || got[0] != tc.want {
+			t.Errorf("autocomplete(%q) = %v, want [%q]", tc.input, got, tc.want)
+		}
+	}
+
+	actions := make(chan client.UserAction, 1)
+	ui.actionsChan = actions
+	ui.handleCommand("/block\tbob")
+	select {
+	case action := <-actions:
+		if action.Type != "BLOCK_USER" || action.Payload != "bob" {
+			t.Fatalf("command action = %+v, want BLOCK_USER bob", action)
+		}
+	default:
+		t.Fatal("tab-separated command was not dispatched")
+	}
+}
+
+func TestAutocompleteTreatsNicknameMarkupAsLiteral(t *testing.T) {
+	s := newSimTUI(t, 80, 24)
+	s.onLoop(func() {
+		s.ui.completionEntries = []string{"[red]alicepeername"}
+		s.ui.input.SetText("/block r")
+		s.ui.input.Autocomplete()
+		s.ui.app.ForceDraw()
+	})
+	if screen := s.text(); !strings.Contains(screen, "/block [red]") {
+		t.Fatalf("completion nickname markup was interpreted:\n%s", screen)
+	}
+	s.onLoop(func() {
+		s.ui.input.InputHandler()(tcell.NewEventKey(tcell.KeyTab, 0, tcell.ModNone), func(tview.Primitive) {})
+	})
+	if got := onLoopValue(s, func() string { return s.ui.input.GetText() }); got != "/block [red]alicepeername" {
+		t.Fatalf("selected completion = %q, want literal nickname", got)
+	}
+}
+
 func TestErrorsSurfaceInLogView(t *testing.T) {
 	s := newSimTUI(t, 120, 40)
 	s.events <- client.DisplayEvent{Type: "ERROR", Content: "boom [x]"}
