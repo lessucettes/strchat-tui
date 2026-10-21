@@ -4,13 +4,13 @@ A keyboard-driven terminal client for **public Nostr chats**. Join geographic
 or named channels, combine chats in local groups, and connect directly or
 through SOCKS5/Tor.
 
+Compatible with **BitChat** public geohash chats and **Nymchat** named chats
+when clients use the same channel and share a relay.
+
 **Messages are public and unencrypted.** Do not send secrets. Ephemeral events
 are not a guarantee that a relay or another participant will delete a message.
 
 ![strchat-tui switching rooms and themes](assets/demo.gif)
-
-Local demo: `lobby`, `coffee`, and `devchat` with all four themes. Messages come
-from a loopback-only demo relay, not public chats.
 
 ## Installation
 
