@@ -156,15 +156,18 @@ Both match message content using a case-sensitive literal substring or a
 For example, `/filter bitcoin` keeps messages containing `bitcoin`, while
 `/mute /spam|scam/` hides messages containing `spam` or `scam`.
 
-To hide messages containing any Latin letter, including `é` and `ñ`:
+The same regexp has opposite effects. With no other rules, used separately:
 
-```text
-/mute /\p{Latin}/
-```
+| Command | Effect |
+|---|---|
+| `/filter /\p{Latin}/` | Show only messages containing a Latin letter, including `é` and `ñ`. |
+| `/mute /\p{Latin}/` | Hide every message containing a Latin letter. |
 
-This also hides mixed-script messages and URLs containing Latin letters.
-Use `/mute /[A-Za-z]/` to match only ASCII Latin letters. Matching a mute rule
-hides the entire message, not just the matching characters or one line.
+For example, `Привет` is hidden by this filter but passes this mute; `hello`
+and `Привет, world` pass the filter but are hidden by the mute. URLs containing
+Latin letters match too. `/mute /[A-Za-z]/` matches only ASCII Latin letters,
+unlike `\p{Latin}`. A mute hides the entire message, not just the matching
+characters or one line.
 
 Use `/filter` or `/mute` without arguments to list rules, or with a rule number
 to toggle it. `/unfilter <number>` and `/unmute <number>` remove a rule; omit
