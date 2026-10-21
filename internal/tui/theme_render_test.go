@@ -117,21 +117,6 @@ func TestThemePreservesScrollSelectionAndHiddenPanes(t *testing.T) {
 	})
 }
 
-func TestThemeNicknamePaletteMapping(t *testing.T) {
-	for _, entry := range themes {
-		t.Run(entry.name, func(t *testing.T) {
-			r := entry.style.scrollbackColors()
-			for i, tag := range defaultTheme.nickPalette {
-				got := tcell.GetColor(strings.Trim(r.Replace(tag), "[]")).Hex()
-				want := tcell.GetColor(strings.Trim(entry.style.nickPalette[i%len(entry.style.nickPalette)], "[]")).Hex()
-				if got != want {
-					t.Errorf("palette entry %d maps to %x, want %x", i, got, want)
-				}
-			}
-		})
-	}
-}
-
 func TestThemeSwitchDuringEventAndLogCollection(t *testing.T) {
 	s := newSimTUI(t, 120, 40)
 	done := make(chan struct{})

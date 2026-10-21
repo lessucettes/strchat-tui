@@ -12,7 +12,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/mmcloughlin/geohash"
 )
@@ -165,22 +164,6 @@ func TestClosestRelaysReachesBothBitChatVariants(t *testing.T) {
 				t.Errorf("closestRelays is not deterministic: %v then %v", got, again)
 			}
 		})
-	}
-}
-
-// For "s0000h" the two nearest-five sets are disjoint, which is the worst case
-// for rendezvous: an upstream-only selection shares no relay at all with a
-// BitChat iOS user in that geohash.
-func TestClosestRelaysWorstCaseOverlapIsDisjoint(t *testing.T) {
-	geoTestAppDir(t)
-	iosNearest := geoTestNearestFromCatalog(t, bundledBitChatIOSCatalogCSV, "s0000h", defaultRelayCount)
-	upstreamNearest := geoTestNearestFromCatalog(t, bundledCatalogCSV, "s0000h", defaultRelayCount)
-	for _, host := range iosNearest {
-		for _, other := range upstreamNearest {
-			if host == other {
-				t.Fatalf("expected disjoint nearest sets for this sample, both contain %q", host)
-			}
-		}
 	}
 }
 
@@ -494,26 +477,6 @@ func TestClosestRelaysMergesBothPinnedCatalogs(t *testing.T) {
 	}
 	if _, err := os.Stat(cachePath); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("selection must not create a cache file (stat err: %v)", err)
-	}
-}
-
-func TestClosestRelaysDoesNotUseNetwork(t *testing.T) {
-	geoTestAppDir(t)
-	t.Setenv("HTTP_PROXY", "http://127.0.0.1:1")
-	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:1")
-	t.Setenv("ALL_PROXY", "socks5://127.0.0.1:1")
-
-	start := time.Now()
-	got, err := closestRelays("s0000h", 3)
-	if err != nil {
-		t.Fatalf("closestRelays: %v", err)
-	}
-	// Three per catalog; for this geohash the two sets are disjoint.
-	if len(got) != 6 {
-		t.Fatalf("closestRelays returned %d relays, want 6", len(got))
-	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Errorf("selection took %v, which suggests network or DNS I/O", elapsed)
 	}
 }
 

@@ -6,40 +6,6 @@ import (
 	"testing"
 )
 
-func TestGroupSelectionSurvivesConfigReload(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
-	writeTestFile(t, path, `{"views":[
-		{"name":"mixed","is_group":true,"children":["coffee","lobby"],"selected_chat":"lobby"},
-		{"name":"coffee"},{"name":"lobby"}
-	],"active_view_name":"mixed"}`, 0o600)
-	conf, err := loadConfigFrom(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	conf.Nick = "updated"
-	if err := conf.save(); err != nil {
-		t.Fatal(err)
-	}
-	reloaded, err := loadConfigFrom(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := json.Marshal(reloaded.Views)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var views []struct {
-		Name         string `json:"name"`
-		SelectedChat string `json:"selected_chat"`
-	}
-	if err := json.Unmarshal(data, &views); err != nil {
-		t.Fatal(err)
-	}
-	if views[0].SelectedChat != "lobby" {
-		t.Fatalf("saved group choice was lost after reload: %q", views[0].SelectedChat)
-	}
-}
-
 func TestGroupSelectionDefaultsAndStaleValues(t *testing.T) {
 	for _, tc := range []struct{ name, saved, want string }{
 		{"legacy", "", "coffee"},

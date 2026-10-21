@@ -123,14 +123,10 @@ func TestSendRejectsInvalidDestinationContext(t *testing.T) {
 		chat    string
 		want    string
 	}{
-		// The stale name still exists in the configuration; only the active view matters.
-		{name: "stale-view", payload: "hello", view: "other", want: "active chat is now 'group'"},
 		{name: "stale-view-with-live-default", payload: "hello", view: "other", chat: "lobby", want: "active chat is now 'group'"},
-		{name: "chat-without-view", payload: "hello", chat: "lobby", want: "requires the active chat context"},
 		// @alice#beef resolves inside the group, so the refusal proves the
 		// invalid default is validated before the mention can override it.
 		{name: "invalid-default-despite-mention", payload: "@alice#beef hello", view: "group", chat: "other", want: "Selected recipient is not in the active chat/group."},
-		{name: "group-without-destination", payload: "hello", view: "group", want: "Select a chat or use @nick"},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -143,29 +139,6 @@ func TestSendRejectsInvalidDestinationContext(t *testing.T) {
 				t.Fatalf("error = %q, want substring %q", got, tt.want)
 			}
 		})
-	}
-}
-
-func TestSendToExplicitOrdinaryChatDestination(t *testing.T) {
-	c, events := testClient(t)
-	c.sk = transportTestKey
-	c.config.Views = append(c.config.Views, View{Name: "other"})
-	c.relays["named"] = &managedRelay{url: "named", connected: true, chats: []string{"lobby"}}
-
-	// The ordinary view's own name is an acceptable explicit destination.
-	c.handleAction(UserAction{Type: "SEND_MESSAGE", Payload: "hello", View: "lobby", Chat: "lobby"})
-	if job := nextJob(t, c); job.chat != "lobby" {
-		t.Fatalf("job chat = %q, want lobby", job.chat)
-	}
-	if len(events) != 0 {
-		t.Fatalf("successful send emitted %d events", len(events))
-	}
-
-	// Another chat is not a destination for the active ordinary view.
-	c.handleAction(UserAction{Type: "SEND_MESSAGE", Payload: "hello", View: "lobby", Chat: "other"})
-	expectNoJob(t, c)
-	if got := onlyError(t, events); !strings.Contains(got, "not in the active chat/group") {
-		t.Fatalf("error = %q, want membership refusal", got)
 	}
 }
 

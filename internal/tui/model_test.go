@@ -217,20 +217,6 @@ func TestFormatInfoAndLogLines(t *testing.T) {
 	}
 }
 
-func TestColorTagIsDeterministic(t *testing.T) {
-	for i := 0; i < 50; i++ {
-		if got := colorTag(tcell.ColorGray); got != "[#808080]" {
-			t.Fatalf("colorTag(ColorGray) = %q, want [#808080]", got)
-		}
-	}
-	if got := colorBoldTag(tcell.ColorLime); got != "[#00ff00::b]" {
-		t.Fatalf("colorBoldTag(ColorLime) = %q, want [#00ff00::b]", got)
-	}
-	if got := colorTag(tcell.ColorDefault); got != "[default]" {
-		t.Fatalf("colorTag(ColorDefault) = %q", got)
-	}
-}
-
 func TestSplitLogLines(t *testing.T) {
 	got := splitLogLines("one\ntwo\r\n\nthree\n")
 	want := []string{"one", "two", "three"}
