@@ -36,17 +36,26 @@ func versionLine() string {
 func main() {
 	versionFlag := flag.Bool("version", false, "Print the version and exit")
 	vFlag := flag.Bool("v", false, "Print the version and exit (shorthand)")
+	socksFlag := flag.String("socks", "", "SOCKS5 proxy for all relays, with remote DNS (e.g. 127.0.0.1:9050)")
 	flag.Parse()
+	if flag.NArg() != 0 {
+		log.Fatal("Positional arguments are not supported; use --help for command-line options")
+	}
 
 	if *versionFlag || *vFlag {
 		fmt.Println(versionLine())
 		os.Exit(0)
 	}
+	flag.Visit(func(option *flag.Flag) {
+		if option.Name == "socks" && *socksFlag == "" {
+			log.Fatal("SOCKS5 proxy address cannot be empty; omit --socks to use the default transport")
+		}
+	})
 
 	actionsChan := make(chan client.UserAction, 32)
 	eventsChan := make(chan client.DisplayEvent, 256)
 
-	nostrClient, err := client.New(actionsChan, eventsChan)
+	nostrClient, err := client.NewWithOptions(actionsChan, eventsChan, client.Options{SOCKSProxy: *socksFlag})
 	if err != nil {
 		log.Fatalf("Failed to create nostr client: %v", err)
 	}

@@ -113,24 +113,34 @@ type publishResult struct {
 	kind, message string
 }
 
-// Resolve chat, key, nickname, PoW and relay targets on the owner loop. Changing
-// views while mining or publishing cannot change an already queued message.
-func (c *client) publishMessage(message string) {
-	if strings.TrimSpace(message) == "" {
-		return
-	}
-	if !utf8.ValidString(message) || len(message) > maxContentBytes || uniseg.GraphemeClusterCount(message) > MaxMsgLen {
-		c.emit(DisplayEvent{Type: "ERROR", Content: "Message exceeds 2000 characters or 16 KiB."})
-		return
-	}
+// resolveMessageTarget is the single destination resolver shared by sends and
+// previews. It validates the captured context against the current active view,
+// applies the explicit group destination, and then lets a leading @nick
+// override it. It only reads state, so a preview has no side effects.
+func (c *client) resolveMessageTarget(text, viewName, defaultChat string) (*View, string, string, error) {
 	view := c.getActiveView()
 	if view == nil {
-		c.emit(DisplayEvent{Type: "ERROR", Content: "No active chat."})
-		return
+		return nil, "", "", errors.New("No active chat.")
 	}
-	chat := view.Name
-	var target, matched string
-	if strings.HasPrefix(message, "@") {
+	// A captured view that no longer matches fails closed even if the stale name
+	// still exists in the configuration.
+	if viewName != "" && viewName != view.Name {
+		return nil, "", "", fmt.Errorf("Message was composed for '%s' but the active chat is now '%s'. Retry from the active chat.", viewName, view.Name)
+	}
+	chat, target, matched := view.Name, "", ""
+	if defaultChat != "" {
+		// An explicit destination only makes sense for the view it came from,
+		// and it is validated before any @ override so a stale choice cannot be
+		// silently replaced.
+		if viewName == "" {
+			return nil, "", "", errors.New("A default recipient requires the active chat context.")
+		}
+		if (!view.IsGroup && defaultChat != view.Name) || (view.IsGroup && !slices.Contains(view.Children, defaultChat)) {
+			return nil, "", "", errors.New("Selected recipient is not in the active chat/group.")
+		}
+		chat = defaultChat
+	}
+	if strings.HasPrefix(text, "@") {
 		ambiguous := false
 		for _, pk := range c.userContext.Keys() {
 			user, _ := c.userContext.Peek(pk)
@@ -140,7 +150,7 @@ func (c *client) publishMessage(message string) {
 			// Completion expands a colliding short identifier to the full key.
 			for _, suffix := range []string{user.shortPubKey, pk} {
 				prefix := fmt.Sprintf("@%s#%s", user.nick, suffix)
-				if !strings.HasPrefix(message, prefix) || (len(message) > len(prefix) && message[len(prefix)] != ' ') {
+				if !strings.HasPrefix(text, prefix) || (len(text) > len(prefix) && text[len(prefix)] != ' ') {
 					continue
 				}
 				if len(prefix) > len(matched) {
@@ -152,20 +162,57 @@ func (c *client) publishMessage(message string) {
 			}
 		}
 		if ambiguous {
-			c.emit(DisplayEvent{Type: "ERROR", Content: "Ambiguous recipient. Use nickname completion to select a full public key."})
-			return
+			return nil, "", "", errors.New("Ambiguous recipient. Use nickname completion to select a full public key.")
 		}
 		if target == "" {
-			c.emit(DisplayEvent{Type: "ERROR", Content: "Unknown recipient. Use nickname completion."})
-			return
+			return nil, "", "", errors.New("Unknown recipient. Use nickname completion.")
 		}
 	}
-	if view.IsGroup && target == "" {
-		c.emit(DisplayEvent{Type: "ERROR", Content: "Select a chat or use @nick to reply from a local group."})
-		return
+	if view.IsGroup && target == "" && defaultChat == "" {
+		return nil, "", "", errors.New("Select a chat or use @nick to reply from a local group.")
 	}
 	if (!view.IsGroup && view.Name != chat) || (view.IsGroup && !slices.Contains(view.Children, chat)) {
-		c.emit(DisplayEvent{Type: "ERROR", Content: "Recipient is not in the active chat/group."})
+		return nil, "", "", errors.New("Recipient is not in the active chat/group.")
+	}
+	return view, chat, target, nil
+}
+
+// previewMessageTarget reports what a send would do without queueing anything.
+func (c *client) previewMessageTarget(text, viewName, defaultChat string) {
+	result := MessageTarget{Text: text, View: viewName, DefaultChat: defaultChat}
+	_, chat, _, err := c.resolveMessageTarget(text, viewName, defaultChat)
+	if err != nil {
+		result.Error = err.Error()
+	} else {
+		result.Chat = chat
+	}
+	c.emit(DisplayEvent{Type: "MESSAGE_TARGET", Payload: result})
+}
+
+// Resolve chat, key, nickname, PoW and relay targets on the owner loop. Changing
+// views while mining or publishing cannot change an already queued message.
+func (c *client) publishMessage(message string) {
+	c.publishMessageInView(message, "", "", "")
+}
+
+// publishMessageInView publishes a message composed in viewName, optionally
+// defaulting to defaultChat inside a group. Empty context means "use whatever
+// is active now", which is what direct callers rely on.
+func (c *client) publishMessageInView(message, viewName, defaultChat, expectedChat string) {
+	if strings.TrimSpace(message) == "" {
+		return
+	}
+	if !utf8.ValidString(message) || len(message) > maxContentBytes || uniseg.GraphemeClusterCount(message) > MaxMsgLen {
+		c.emit(DisplayEvent{Type: "ERROR", Content: "Message exceeds 2000 characters or 16 KiB."})
+		return
+	}
+	view, chat, target, err := c.resolveMessageTarget(message, viewName, defaultChat)
+	if err != nil {
+		c.emit(DisplayEvent{Type: "ERROR", Content: err.Error()})
+		return
+	}
+	if expectedChat != "" && chat != expectedChat {
+		c.emit(DisplayEvent{Type: "ERROR", Content: "Message destination changed since the preview. Check the destination and retry."})
 		return
 	}
 	job := publishJob{key: c.sk, chat: chat, difficulty: c.effectivePoWForChat(chat)}

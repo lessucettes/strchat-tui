@@ -40,6 +40,7 @@ type lineBuffer struct {
 	maxLines int
 	maxBytes int
 	lines    []string
+	chats    []string // trusted group source labels, never parsed from message text
 	bytes    int
 	head     int   // index in lines of the oldest retained line
 	count    int   // number of retained lines
@@ -54,6 +55,7 @@ func newLineBuffer(maxLines, maxBytes int) *lineBuffer {
 		maxLines: maxLines,
 		maxBytes: maxBytes,
 		lines:    make([]string, maxLines),
+		chats:    make([]string, maxLines),
 	}
 }
 
@@ -65,6 +67,7 @@ func (b *lineBuffer) append(line string) {
 	}
 	idx := (b.head + b.count) % b.maxLines
 	b.lines[idx] = line
+	b.chats[idx] = ""
 	b.count++
 	b.bytes += len(line)
 }
@@ -72,6 +75,7 @@ func (b *lineBuffer) append(line string) {
 func (b *lineBuffer) dropOldest() {
 	b.bytes -= len(b.lines[b.head])
 	b.lines[b.head] = ""
+	b.chats[b.head] = ""
 	b.head = (b.head + 1) % b.maxLines
 	b.count--
 	b.first++
@@ -79,6 +83,20 @@ func (b *lineBuffer) dropOldest() {
 
 // firstIndex returns the absolute index of the oldest retained line.
 func (b *lineBuffer) firstIndex() int64 { return b.first }
+
+func (b *lineBuffer) appendChat(line, chat string) {
+	b.append(line)
+	b.chats[(b.head+b.count-1)%b.maxLines] = chat
+}
+
+func (b *lineBuffer) chatSources(from int64) []string {
+	skip := int(max(from, b.first) - b.first)
+	chats := make([]string, 0, max(0, b.count-skip))
+	for i := skip; i < b.count; i++ {
+		chats = append(chats, b.chats[(b.head+i)%b.maxLines])
+	}
+	return chats
+}
 
 // lastIndex returns the absolute index of the newest retained line, or -1.
 func (b *lineBuffer) lastIndex() int64 { return b.first + int64(b.count) - 1 }

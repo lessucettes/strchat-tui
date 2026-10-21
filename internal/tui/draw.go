@@ -98,6 +98,11 @@ func (t *tui) applyLayout(screen tcell.Screen) {
 	if t.planApplied && plan == t.plan && !t.layoutDirty {
 		return
 	}
+	if plan.mode != modeTiny {
+		t.infoTemporary = false
+	} else if t.focused == t.detailsView {
+		t.infoTemporary = true
+	}
 	t.plan, t.planApplied, t.layoutDirty = plan, true, false
 	t.rebuildLayout(plan)
 }
@@ -109,18 +114,20 @@ func (t *tui) rebuildLayout(plan layoutPlan) {
 	case modeFull:
 		t.contentGrid.SetRows(0)
 		t.contentGrid.SetColumns(0, 30)
-		t.contentGrid.AddItem(t.outputView, 0, 0, 1, 1, 0, 0, false)
+		t.contentGrid.AddItem(t.outputPane, 0, 0, 1, 1, 0, 0, false)
 		t.contentGrid.AddItem(t.sidebarFlex, 0, 1, 1, 1, 0, 0, false)
 	case modeNarrow:
 		t.contentGrid.SetRows(0, narrowSidebarRows)
 		t.contentGrid.SetColumns(0)
-		t.contentGrid.AddItem(t.outputView, 0, 0, 1, 1, 0, 0, false)
+		t.contentGrid.AddItem(t.outputPane, 0, 0, 1, 1, 0, 0, false)
 		t.contentGrid.AddItem(t.sidebarFlexHorizontal, 1, 0, 1, 1, 0, 0, false)
 	case modeTiny:
 		t.contentGrid.SetRows(0)
 		t.contentGrid.SetColumns(0)
-		if plan.output {
-			t.contentGrid.AddItem(t.outputView, 0, 0, 1, 1, 0, 0, false)
+		if t.infoTemporary {
+			t.contentGrid.AddItem(t.detailsView, 0, 0, 1, 1, 0, 0, false)
+		} else if plan.output {
+			t.contentGrid.AddItem(t.outputPane, 0, 0, 1, 1, 0, 0, false)
 		}
 	}
 
@@ -176,10 +183,12 @@ func (t *tui) visible(p tview.Primitive) bool {
 	case t.input:
 		return true
 	case t.outputView:
-		return t.plan.output
+		return t.plan.output && !t.infoTemporary
 	case t.logsView:
 		return t.plan.logs
-	case t.chatList, t.detailsView:
+	case t.detailsView:
+		return t.plan.mode != modeTiny || t.infoTemporary
+	case t.chatList:
 		return t.plan.mode != modeTiny
 	}
 	return false
@@ -222,6 +231,10 @@ func (t *tui) focusAreaOf(p tview.Primitive) focusArea {
 func (t *tui) setFocus(p tview.Primitive) {
 	if p == nil {
 		return
+	}
+	if t.infoTemporary && p != t.detailsView {
+		t.infoTemporary = false
+		t.rebuildLayout(t.plan)
 	}
 	t.focused = p
 	t.app.SetFocus(p)
@@ -329,7 +342,14 @@ func (t *tui) render() {
 	if t.restoreTheme(s.themeName) {
 		s = t.snapshot() // Theme changes invalidate both scrollback cursors.
 	}
+	view := activeView(s)
+	t.outputPane.enabled = view != nil && view.IsGroup
+	t.outputPane.focus = t.conversationChat(s)
+	t.outputPane.accent = t.theme.titleColor
+	t.outputPane.muted = t.theme.logInfoColor
+	t.outputPane.background = t.theme.backgroundColor
 	if t.visible(t.outputView) {
+		t.outputPane.sync(s.output)
 		t.writeLines(t.outputView, s.output)
 		t.setOutputSynced(s.output.upto, s.output.first)
 	}
@@ -339,6 +359,7 @@ func (t *tui) render() {
 	}
 	t.renderChatList(s)
 	t.renderDetails(s)
+	t.renderConversationTitles(s)
 	t.renderCompletion(s)
 	t.renderInputLabel(s)
 	t.updateFocusBorders()
@@ -435,6 +456,7 @@ type detailsPaneKey struct {
 	stateRev  int64
 	relaysRev int64
 	index     int
+	chat      string
 }
 
 // updateDetailsView refreshes the info pane from the current model. It is the
@@ -448,7 +470,7 @@ func (t *tui) renderDetails(s modelSnapshot) {
 	if index >= len(s.views) || index < 0 {
 		index = -1
 	}
-	key := detailsPaneKey{stateRev: s.stateRev, relaysRev: s.relaysRev, index: index}
+	key := detailsPaneKey{stateRev: s.stateRev, relaysRev: s.relaysRev, index: index, chat: t.conversationChat(s)}
 	if key == t.detailsKey && t.detailsKeySet {
 		return
 	}
@@ -461,10 +483,14 @@ func (t *tui) renderDetails(s modelSnapshot) {
 	}
 	selected := s.views[index]
 	if selected.IsGroup {
+		t.infoReveal = true
 		var b strings.Builder
-		b.WriteString(fmt.Sprintf("%sChats of %s:[-]\n", colorTag(t.theme.logWarnColor), sanitizeLineForDisplay(selected.Name)))
 		for _, child := range selected.Children {
-			b.WriteString(fmt.Sprintf(" - %s\n", sanitizeLineForDisplay(child)))
+			if index == s.activeIndex && child == t.conversationChat(s) {
+				fmt.Fprintf(&b, " %s▶ %s[-::-]\n", colorBoldTag(t.theme.titleColor), sanitizeLineForDisplay(child))
+			} else {
+				fmt.Fprintf(&b, " - %s\n", sanitizeLineForDisplay(child))
+			}
 		}
 		fmt.Fprint(t.detailsView, b.String())
 		return
@@ -567,13 +593,18 @@ func (t *tui) updateHints() { t.renderHints(t.snapshot()) }
 
 // renderHints writes the context-sensitive hint line.
 func (t *tui) renderHints(s modelSnapshot) {
+	view := activeView(s)
+	group := view != nil && view.IsGroup
 	text := hintsText(hintsState{
-		highlight: colorTag(t.theme.titleColor),
-		warn:      colorTag(t.theme.logWarnColor),
-		mode:      t.plan.mode,
-		maximized: t.maximizeModeOf(),
-		area:      t.focusAreaOf(t.focused),
-		notice:    backpressureNotice(s.dropped, s.dropNotice),
+		highlight:     colorTag(t.theme.titleColor),
+		warn:          colorTag(t.theme.logWarnColor),
+		mode:          t.plan.mode,
+		maximized:     t.maximizeModeOf(),
+		area:          t.focusAreaOf(t.focused),
+		group:         group,
+		chooseChat:    group && t.chatList.GetCurrentItem() == s.activeIndex,
+		infoTemporary: t.infoTemporary,
+		notice:        backpressureNotice(s.dropped, s.dropNotice),
 	})
 	if text == t.hintsText {
 		return
@@ -584,12 +615,15 @@ func (t *tui) renderHints(s modelSnapshot) {
 
 // hintsState carries the inputs of the hint line so the text is easy to test.
 type hintsState struct {
-	highlight string
-	warn      string
-	mode      layoutMode
-	maximized maximizeMode
-	area      focusArea
-	notice    string
+	highlight     string
+	warn          string
+	mode          layoutMode
+	maximized     maximizeMode
+	area          focusArea
+	group         bool
+	chooseChat    bool
+	infoTemporary bool
+	notice        string
 }
 
 // backpressureNotice describes dropped input for the hint line.
@@ -609,7 +643,16 @@ func hintsText(s hintsState) string {
 	case s.maximized != maximizeNone:
 		text = fmt.Sprintf("%s | %s`[-]: Restore | %s↑/↓[-]: Scroll", quit, s.highlight, s.highlight)
 	case s.mode == modeTiny:
-		text = fmt.Sprintf("%s | %sTab[-]: Focus | %s/help[-]: Commands", quit, s.highlight, s.highlight)
+		switch {
+		case s.area == focusInfo && s.chooseChat:
+			text = fmt.Sprintf("%s | %s↑/↓[-]: Chat | %sAlt+I[-]: Input | %sTab[-] | %s/help[-]", quit, s.highlight, s.highlight, s.highlight, s.highlight)
+		case s.infoTemporary:
+			text = fmt.Sprintf("%s | %s↑/↓[-]: Scroll | %sAlt+I[-]: Input | %sTab[-] | %s/help[-]", quit, s.highlight, s.highlight, s.highlight, s.highlight)
+		case s.group && s.area == focusInput:
+			text = fmt.Sprintf("%s | %sAlt+N[-]: Info | %sTab[-]: Focus | %s/help[-]: Commands", quit, s.highlight, s.highlight, s.highlight)
+		default:
+			text = fmt.Sprintf("%s | %sTab[-]: Focus | %s/help[-]: Commands", quit, s.highlight, s.highlight)
+		}
 	default:
 		base := fmt.Sprintf("%sAlt+...[-]: Focus", s.highlight)
 		switch s.area {
@@ -618,7 +661,11 @@ func hintsText(s hintsState) string {
 		case focusMessages:
 			text = fmt.Sprintf("%s | %s`[-]: Maximize | %s↑/↓[-]: Scroll | %sTab/Shift+Tab[-]: Cycle Focus | %s", quit, s.highlight, s.highlight, s.highlight, base)
 		case focusInfo:
-			text = fmt.Sprintf("%s | %s↑/↓[-]: Scroll | %sTab/Shift+Tab[-]: Cycle Focus | %s", quit, s.highlight, s.highlight, base)
+			navigation := "Scroll"
+			if s.chooseChat {
+				navigation = "Chat"
+			}
+			text = fmt.Sprintf("%s | %s↑/↓[-]: %s | %sTab/Shift+Tab[-]: Cycle Focus | %s", quit, s.highlight, navigation, s.highlight, base)
 		case focusChats:
 			text = fmt.Sprintf("%s | %sSpace[-]: Select | %sEnter[-]: Activate | %sDel[-]: Delete | %sTab/Shift+Tab[-]: Cycle Focus | %s", quit, s.highlight, s.highlight, s.highlight, s.highlight, base)
 		case focusLogs:

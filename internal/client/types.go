@@ -38,9 +38,26 @@ var defaultEphChatRelays = []string{
 }
 
 // UserAction represents an action initiated by the user from the TUI.
+// View is the active view name captured when the action was created; Chat is an
+// explicit default destination inside a group. Both are optional and empty for
+// callers that act on the live active view only.
 type UserAction struct {
-	Type    string
-	Payload string
+	Type         string
+	Payload      string
+	View         string
+	Chat         string
+	ExpectedChat string // optional destination displayed by the composer
+}
+
+// MessageTarget is the resolved destination of a composed message. It echoes
+// the inputs unchanged so a preview can be discarded when the composer moved
+// on, and carries either the chat a send would publish to or the refusal.
+type MessageTarget struct {
+	Text        string
+	View        string
+	DefaultChat string
+	Chat        string
+	Error       string
 }
 
 // RelayInfo holds status information about a single relay connection.

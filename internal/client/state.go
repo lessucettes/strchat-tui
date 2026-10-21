@@ -138,6 +138,25 @@ func (c *client) createGroup(payload string) {
 	c.updateAllSubscriptions()
 }
 
+func (c *client) selectGroupChat(group, chat string) {
+	for i := range c.config.Views {
+		view := &c.config.Views[i]
+		if !view.IsGroup || view.Name != group || !slices.Contains(view.Children, chat) {
+			continue
+		}
+		if view.SelectedChat == chat {
+			return
+		}
+		view.SelectedChat = chat
+		if err := c.config.save(); err != nil {
+			c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Failed to save group chat selection; it will only be remembered for this session: %v", err)})
+		}
+		c.sendStateUpdate()
+		return
+	}
+	c.emit(DisplayEvent{Type: "ERROR", Content: "Cannot select conversation: the group or member no longer exists."})
+}
+
 func (c *client) leaveChat(chatName string) {
 	var newViews []View
 	for _, view := range c.config.Views {

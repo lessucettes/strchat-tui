@@ -44,7 +44,32 @@ func (t *tui) setupHandlers() {
 			t.input.SetText("")
 			return
 		}
-		if t.submit(client.UserAction{Type: "SEND_MESSAGE", Payload: text}) {
+		s := t.snapshot()
+		action := client.UserAction{Type: "SEND_MESSAGE", Payload: text}
+		if view := activeView(s); view != nil {
+			action.View = view.Name
+			if view.IsGroup {
+				action.Chat = t.conversationChat(s)
+				if strings.HasPrefix(text, "@") {
+					result, ready := t.currentMessageTarget(s)
+					if !ready || result.Error != "" {
+						t.bell()
+						if ready && result.Error != "" {
+							t.applyLog(client.DisplayEvent{Type: "ERROR", Content: result.Error})
+						}
+						t.renderConversationTitles(s)
+						return
+					}
+					action.ExpectedChat = result.Chat
+				} else if action.Chat == "" {
+					t.bell()
+					return
+				} else {
+					action.ExpectedChat = action.Chat
+				}
+			}
+		}
+		if t.submit(action) {
 			t.input.SetText("")
 		}
 		// Backpressure keeps the text in the field. History records the input
@@ -54,6 +79,7 @@ func (t *tui) setupHandlers() {
 	// Nickname completion requests are best-effort: a dropped request only
 	// means the completion menu does not refresh for this keystroke.
 	t.input.SetChangedFunc(func(text string) {
+		t.dirty.Store(true) // The destination title depends on the current draft.
 		nick, complete := extractNickPrefix(text)
 		if complete {
 			t.lastNickQuery = ""
@@ -138,19 +164,26 @@ func (t *tui) handleKey(event *tcell.EventKey) *tcell.EventKey {
 		case 'c':
 			t.focusIfVisible(t.chatList)
 		case 'o':
+			if t.infoTemporary {
+				t.setFocus(t.input)
+			}
 			t.focusIfVisible(t.outputView)
 		case 'i':
 			t.focusIfVisible(t.input)
 		case 'l':
 			t.focusIfVisible(t.logsView)
 		case 'n':
-			t.focusIfVisible(t.detailsView)
+			t.openInfo()
 		}
 		return nil
 	}
 	switch {
 	case t.focused == t.chatList:
 		return t.handleChatListKeys(event)
+	case t.focused == t.detailsView:
+		if t.handleInfoKeys(event) == nil {
+			return nil
+		}
 	case t.canMaximize() && t.focused == t.logsView && event.Key() == tcell.KeyRune && event.Rune() == '`':
 		t.setMaximized(maximizeLogs)
 		return nil

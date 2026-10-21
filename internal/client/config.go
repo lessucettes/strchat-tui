@@ -8,16 +8,18 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/nbd-wtf/go-nostr"
 )
 
 type View struct {
-	Name     string   `json:"name"`
-	IsGroup  bool     `json:"is_group"`
-	Children []string `json:"children"`
-	PoW      int      `json:"pow,omitempty"`
+	Name         string   `json:"name"`
+	IsGroup      bool     `json:"is_group"`
+	Children     []string `json:"children"`
+	PoW          int      `json:"pow,omitempty"`
+	SelectedChat string   `json:"selected_chat,omitempty"`
 }
 
 type blockedUser struct {
@@ -95,8 +97,20 @@ func loadConfigFrom(path string) (*config, error) {
 	if !validTheme(conf.Theme) {
 		conf.Theme = DefaultTheme
 	}
+	conf.normalizeGroupSelections()
 
 	return conf, nil
+}
+
+func (c *config) normalizeGroupSelections() {
+	for i := range c.Views {
+		view := &c.Views[i]
+		if !view.IsGroup || len(view.Children) == 0 {
+			view.SelectedChat = ""
+		} else if !slices.Contains(view.Children, view.SelectedChat) {
+			view.SelectedChat = view.Children[0]
+		}
+	}
 }
 
 // maxConfigPoW is the largest Proof-of-Work difficulty accepted in a stored
@@ -159,6 +173,7 @@ func (c *config) save() error {
 	if err := c.validate(); err != nil {
 		return err
 	}
+	c.normalizeGroupSelections()
 
 	dir := filepath.Dir(c.path)
 	if err := os.MkdirAll(dir, privateDirMode()); err != nil {

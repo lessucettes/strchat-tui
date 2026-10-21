@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 type client struct {
 	sk, pk, n                      string
 	config                         *config
+	relayHTTPClient                *http.Client
 	chatKeys                       map[string]chatSession
 	actionsChan                    <-chan UserAction
 	eventsChan                     chan<- DisplayEvent
@@ -41,11 +43,21 @@ type client struct {
 }
 
 func New(actions <-chan UserAction, events chan<- DisplayEvent) (*client, error) {
+	return NewWithOptions(actions, events, Options{})
+}
+
+func NewWithOptions(actions <-chan UserAction, events chan<- DisplayEvent, options Options) (*client, error) {
+	httpClient, err := newRelayHTTPClient(options.SOCKSProxy)
+	if err != nil {
+		return nil, err
+	}
 	cfg, err := loadConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load configuration: %w", err)
 	}
-	return newClient(cfg, actions, events), nil
+	c := newClient(cfg, actions, events)
+	c.relayHTTPClient = httpClient
+	return c, nil
 }
 
 func newClient(cfg *config, actions <-chan UserAction, events chan<- DisplayEvent) *client {
@@ -157,6 +169,9 @@ func (c *client) Run() {
 func (c *client) shutdown() {
 	c.cancel()
 	c.wg.Wait()
+	if c.relayHTTPClient != nil {
+		c.relayHTTPClient.CloseIdleConnections()
+	}
 	select {
 	case c.eventsChan <- DisplayEvent{Type: "SHUTDOWN"}:
 	default:
@@ -166,7 +181,11 @@ func (c *client) shutdown() {
 func (c *client) handleAction(action UserAction) {
 	switch action.Type {
 	case "SEND_MESSAGE":
-		c.publishMessage(action.Payload)
+		c.publishMessageInView(action.Payload, action.View, action.Chat, action.ExpectedChat)
+	case "RESOLVE_MESSAGE_TARGET":
+		c.previewMessageTarget(action.Payload, action.View, action.Chat)
+	case "SELECT_GROUP_CHAT":
+		c.selectGroupChat(action.View, action.Chat)
 	case "ACTIVATE_VIEW":
 		c.setActiveView(action.Payload)
 		c.updateAllSubscriptions()

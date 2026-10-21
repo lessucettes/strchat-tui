@@ -18,7 +18,7 @@ from a loopback-only demo relay, not public chats.
 
 ## Run
 
-Download a binary from [Releases](https://github.com/lessucettes/strchat-tui/releases)
+Download a binary from [release 0.5.2](https://github.com/lessucettes/strchat-tui/releases/tag/v0.5.2)
 or build with Go 1.27 or newer:
 
 ```sh
@@ -36,6 +36,13 @@ Release assets (no C compiler or runtime dependency needed):
 | macOS Intel | `strchat-tui-macos-intel` |
 | Windows | `strchat-tui.exe` (amd64) |
 
+Download `SHA256SUMS` alongside the binaries to verify their SHA-256 checksums.
+On Linux, for example, check the downloaded Linux asset with:
+
+```sh
+sha256sum --ignore-missing -c SHA256SUMS
+```
+
 Mark the downloaded file executable on Linux, macOS and Android (`chmod +x`).
 `--version` (or `-v`) prints the version and, when the release build stamped it,
 the commit and build date. No cross-compilation caveats apply: the client is pure
@@ -45,7 +52,7 @@ No account registration, database or background service is required. Configurati
 uses the OS user-config directory under `strchat-tui/config.json` (on Linux,
 `$XDG_CONFIG_HOME/strchat-tui`, or `~/.config/strchat-tui`). It includes a private
 key: do not publish it. Chat keys are separate ephemeral process-session keys;
-local group replies retain the existing main-key behavior.
+local group messages retain the existing main-key behavior.
 
 ## Start chatting
 
@@ -98,6 +105,45 @@ Rejected input can ring the terminal bell (BEL), for example at a history
 boundary, at the input length limit, or when typing into a read-only pane.
 Feedback is rate-limited; normal navigation and background relay errors are silent.
 
+### Conversations inside local groups
+
+A local group can combine geographic and named chats. It is a shared reading
+view, not a new room or a broadcast destination. All member messages stay in
+chronological order; selecting a conversation does not change subscriptions.
+
+With the active group selected in **Chats**, press **Alt+N** to focus **Info**.
+Use **Up/Down** to choose a member chat immediately, without confirmation
+(`Home`/`End` select the first/last member). While Info displays the active group,
+the `▶` marker identifies its chosen member even after focus returns to input.
+Press **Alt+I** to return to the message field, then type an
+ordinary message and press Enter. The selected member in Info identifies the
+destination. The first member is selected automatically. Each group's selection
+is saved in the configuration and restored after restarting the application,
+as long as the chat remains in that group. If that member is removed, the first
+remaining member becomes selected and saved. Deleting a group also removes its
+saved choice. An ordinary Enter always uses the selected chat. If saving fails,
+an error warns that the new choice is only remembered for the current session.
+
+The selected conversation forms a visual thread in the combined feed: `●`
+marks its messages and a thin gutter continues through wrapped and multiline
+text. Other conversations remain readable, nickname colors are preserved, and
+changing the conversation does not move the scroll position. Keyboard focus
+is still indicated by pane borders, independently of the selected conversation.
+
+A leading `@nick#suffix` retains its existing routing and takes precedence over
+the selected member without changing the reading thread.
+An unresolved recipient stays in the field; if its
+destination changes between preview and submission, the client refuses the send
+rather than silently publishing to a different chat.
+
+Incoming messages and relay updates do not change the selected conversation.
+Browsing an inactive group in Chats only previews its members; it cannot change
+the active group's destination.
+
+On small terminals where Info is normally hidden, **Alt+N** temporarily opens
+the same pane in place of the feed. **Alt+I** restores the feed and input; the
+draft, subscriptions and retained messages are unchanged.
+
 ### Mute messages by content
 
 `/mute` hides incoming messages whose content matches an enabled mute rule.
@@ -134,6 +180,39 @@ history, focus and chat selection are preserved. The selected name is saved in
 the `theme` field of `config.json` and restored at the next launch. Old configs
 without this field (or with an unknown theme name) use `default`. If saving
 fails, an error is shown and the previous theme remains active.
+
+## SOCKS5 and Tor
+
+Route every relay connection through a SOCKS5 proxy for this run:
+
+```sh
+./strchat-tui --socks=127.0.0.1:9050
+```
+
+`socks5://127.0.0.1:9050` and `socks5h://127.0.0.1:9050` are also accepted.
+Both forms send relay hostnames to the proxy for resolution, including `.onion`
+names; no local DNS lookup is needed for the relay. Use an IP address for the
+proxy itself if you also want to avoid resolving the proxy's hostname locally.
+Proxy credentials, URL paths, queries and fragments are not supported.
+
+Onion relays use the same `/relay` command as other relays. Supply `ws://` for
+an onion service exposing plain WebSocket on port 80, for example
+`/relay ws://<relay-address>.onion`; use `wss://` only if the service supports TLS
+with a trusted certificate. TLS verification is never disabled.
+
+The proxy applies to explicit relays, geographic catalog relays, reserves and
+redirects, even for loopback addresses or entries in `NO_PROXY`. If it is down
+or refuses a connection, the client retries through that proxy, **never directly**.
+Proxied connection setup allows up to 60 seconds for Tor circuit and onion
+descriptor setup, and remains cancelable. Invalid or explicitly empty `--socks`
+values stop startup before configuration is opened.
+Unexpected positional arguments are also rejected, so misplaced flags cannot
+silently disable proxy routing.
+
+This option is not saved: pass it on each launch. Omitting it preserves the
+existing networking behavior. SOCKS5 routes transport only; public messages,
+nicknames and persistent identities can still be linked. It is not a guarantee
+of anonymity.
 
 ## Predictable networking
 

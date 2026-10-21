@@ -72,6 +72,9 @@ type tui struct {
 	relaysRev       int64
 	completion      []string
 	completionRev   int64
+	messageTarget   client.MessageTarget
+	recipientRev    uint64
+	groupFocus      map[string]string // latest local choices, including pending saves
 	output          *lineBuffer
 	logs            *lineBuffer
 	outputSynced    int64
@@ -89,10 +92,15 @@ type tui struct {
 	plan                 layoutPlan
 	planApplied          bool
 	layoutDirty          bool
+	infoTemporary        bool
+	infoReveal           bool
 	logsMaximized        bool
 	outputMaximized      bool
 	maximizedView        tview.Primitive
 	selectedForGroup     map[string]bool
+	targetQuery          client.MessageTarget
+	targetQueryRev       uint64
+	targetRequested      bool
 	selectionRev         int64
 	chatListRev          int64
 	chatListSelectionRev int64
@@ -120,6 +128,7 @@ type tui struct {
 	detailsView           *tview.TextView
 	logsView              *tview.TextView
 	outputView            *tview.TextView
+	outputPane            *threadView
 	input                 *tview.InputField
 	hints                 *tview.TextView
 	maximizedLogsFlex     *tview.Flex
@@ -146,6 +155,7 @@ func New(actions chan<- client.UserAction, events <-chan client.DisplayEvent) *t
 		doneCh:            make(chan struct{}),
 		screenReady:       make(chan struct{}),
 		selectedForGroup:  make(map[string]bool),
+		groupFocus:        make(map[string]string),
 		completionEntries: []string{},
 		output:            newLineBuffer(maxOutputLines, maxOutputBytes),
 		logs:              newLineBuffer(maxLogLines, maxLogBytes),
@@ -322,6 +332,13 @@ func (t *tui) applyEvent(ev client.DisplayEvent) {
 		t.applyRelaysUpdate(ev)
 	case "NICK_COMPLETION_RESULT":
 		t.applyCompletion(ev)
+	case "MESSAGE_TARGET":
+		if result, ok := ev.Payload.(client.MessageTarget); ok {
+			t.mu.Lock()
+			t.messageTarget = result
+			t.mu.Unlock()
+			t.dirty.Store(true)
+		}
 	case "THEME_UPDATE":
 		t.mu.Lock()
 		t.themeName = ev.Content
@@ -334,6 +351,7 @@ func (t *tui) applyEvent(ev client.DisplayEvent) {
 func (t *tui) applyNewMessage(ev client.DisplayEvent) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.recipientRev++
 
 	if len(t.views) == 0 || t.activeViewIndex < 0 || t.activeViewIndex >= len(t.views) {
 		return
@@ -358,7 +376,11 @@ func (t *tui) applyNewMessage(ev client.DisplayEvent) {
 	if active.IsGroup {
 		style.label = fmt.Sprintf("%s%s[-] ", colorTag(defaultTheme.titleColor), sanitizeLineForDisplay(ev.Chat))
 	}
-	t.output.append(formatMessage(ev, style))
+	if active.IsGroup {
+		t.output.appendChat(formatMessage(ev, style), ev.Chat)
+	} else {
+		t.output.append(formatMessage(ev, style))
+	}
 	t.dirty.Store(true)
 }
 
@@ -383,6 +405,12 @@ func (t *tui) applyStateUpdate(ev client.DisplayEvent) {
 	t.activeViewIndex = state.ActiveViewIndex
 	t.nick = state.Nick
 	t.stateRev++
+	// Recipient routes depend on group membership as well as incoming users.
+	t.recipientRev++
+	t.messageTarget = client.MessageTarget{}
+	// Reconcile every snapshot, even if a group is deleted and recreated
+	// between renders. The collector and keyboard handler share this model.
+	t.pruneConversationFocusLocked(t.views)
 	t.mu.Unlock()
 	t.dirty.Store(true)
 }
@@ -434,6 +462,7 @@ func (t *tui) appendLogLine(line string) {
 type lineDelta struct {
 	rewrite bool     // rebuild the view from lines instead of appending
 	lines   []string // display lines in order
+	chats   []string // structured group source for each line
 	upto    int64    // absolute index of the last included line
 	first   int64    // oldest retained model line, independent of scroll position
 }
@@ -449,6 +478,8 @@ type modelSnapshot struct {
 	relaysRev     int64
 	completion    []string
 	completionRev int64
+	messageTarget client.MessageTarget
+	recipientRev  uint64
 	dropped       int
 	dropNotice    bool
 	output        lineDelta
@@ -460,7 +491,7 @@ type modelSnapshot struct {
 func (t *tui) snapshot() modelSnapshot {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return modelSnapshot{
+	s := modelSnapshot{
 		views:         slices.Clone(t.views),
 		activeIndex:   t.activeViewIndex,
 		nick:          t.nick,
@@ -470,20 +501,30 @@ func (t *tui) snapshot() modelSnapshot {
 		relaysRev:     t.relaysRev,
 		completion:    slices.Clone(t.completion),
 		completionRev: t.completionRev,
+		messageTarget: t.messageTarget,
+		recipientRev:  t.recipientRev,
 		dropped:       t.dropped,
 		dropNotice:    t.dropNotice,
 		output:        t.lineDeltaLocked(t.output, t.outputSynced, t.outputFirst),
 		logs:          t.lineDeltaLocked(t.logs, t.logsSynced, t.logsFirst),
 	}
+	// Older acknowledgements must not roll back a newer keyboard choice.
+	// Fold the local overlay into this immutable snapshot under the same lock.
+	for i := range s.views {
+		if chat, ok := t.groupFocus[s.views[i].Name]; s.views[i].IsGroup && ok {
+			s.views[i].SelectedChat = chat
+		}
+	}
+	return s
 }
 
 // lineDeltaLocked returns the lines after the sync cursor. When the cursor fell
 // out of the buffer the whole retained tail is returned for a rewrite.
 func (t *tui) lineDeltaLocked(buf *lineBuffer, synced, first int64) lineDelta {
 	if lines, ok := buf.unsynced(synced + 1); ok && first == buf.firstIndex() {
-		return lineDelta{lines: lines, upto: buf.lastIndex(), first: first}
+		return lineDelta{lines: lines, chats: buf.chatSources(synced + 1), upto: buf.lastIndex(), first: first}
 	}
-	return lineDelta{rewrite: true, lines: buf.snapshot(), upto: buf.lastIndex(), first: buf.firstIndex()}
+	return lineDelta{rewrite: true, lines: buf.snapshot(), chats: buf.chatSources(buf.firstIndex()), upto: buf.lastIndex(), first: buf.firstIndex()}
 }
 
 // setOutputSynced records that the message view wrote everything up to upto.
@@ -618,13 +659,17 @@ func (t *tui) initViews() {
 
 	t.detailsView = tview.NewTextView().SetDynamicColors(true).SetScrollable(true)
 	t.detailsView.SetBorder(true).SetTitle(titleInfo).SetTitleAlign(tview.AlignLeft)
+	t.installInfoScroll()
 
 	t.outputView = tview.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true).
-		SetMaxLines(maxOutputLines)
+		SetWordWrap(true)
 	t.outputView.SetBorder(true).SetTitle(titleMessages).SetTitleAlign(tview.AlignLeft)
 	t.outputView.ScrollToEnd()
+	// The model bounds retained text. A second wrapped-line cap would discard
+	// different messages on narrow screens and desynchronize the thread gutter.
+	t.outputPane = newThreadView(t.outputView)
 
 	t.input = tview.NewInputField().
 		SetLabelStyle(tcell.StyleDefault.Foreground(t.theme.titleColor)).
@@ -668,7 +713,7 @@ func (t *tui) initLayout() {
 
 	t.maximizedOutputFlex = tview.NewFlex().
 		SetDirection(tview.FlexRow).
-		AddItem(t.outputView, 0, 1, true).
+		AddItem(t.outputPane, 0, 1, true).
 		AddItem(t.hints, 1, 0, false)
 
 	// BeforeDraw is the only per-draw hook tview offers. It runs while tview

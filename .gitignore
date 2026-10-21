@@ -5,7 +5,7 @@ strchat-tui-macos-arm
 strchat-tui-macos-intel
 strchat-tui-android-arm64
 strchat-tui.exe
-strchat-tui
+/strchat-tui
 __pycache__/
 *.pyc
 docs/

@@ -184,10 +184,16 @@ func (c *client) dialRelay(ctx context.Context, url string) (*websocket.Conn, ti
 		<-c.dialPace
 		return nil, 0, ctx.Err()
 	}
-	dialCtx, cancel := context.WithTimeout(ctx, connectTimeout)
+	timeout := connectTimeout
+	var options *websocket.DialOptions
+	if c.relayHTTPClient != nil {
+		timeout = socksConnectTimeout
+		options = &websocket.DialOptions{HTTPClient: c.relayHTTPClient}
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	start := time.Now()
-	conn, _, err := websocket.Dial(dialCtx, url, nil)
+	conn, _, err := websocket.Dial(dialCtx, url, options)
 	return conn, time.Since(start), err
 }
 

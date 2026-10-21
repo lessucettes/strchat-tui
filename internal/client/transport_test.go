@@ -1579,6 +1579,7 @@ func TestRunSurvivesRapidActionsAndRelayChurn(t *testing.T) {
 	h.send(UserAction{Type: "CLEAR_FILTERS", Payload: ""})
 	h.send(UserAction{Type: "CLEAR_MUTES", Payload: ""})
 	h.send(UserAction{Type: "ACTIVATE_VIEW", Payload: "lobby"})
+	h.send(UserAction{Type: "SET_POW", Payload: "0"})
 	if !waitUntil(t, transportWaitSlow, func() bool { return h.countType("NEW_MESSAGE") > before }) {
 		t.Fatalf("no message displayed after the storm; events:%s", h.dump(25))
 	}
