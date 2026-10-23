@@ -98,6 +98,18 @@ Input history holds the last 100 submitted lines for the current run only.
 Moving forward past the newest entry restores your unfinished draft; history
 is not saved to disk. Pane titles and the footer show contextual shortcuts.
 
+### Mouse
+
+Mouse-capable terminals support left-clicking a pane to focus it, clicking a
+chat/group in Chats to activate it, and clicking a member of the active group
+in Info to choose the sending destination. Click in Input to position the
+cursor. The wheel scrolls the pane under the pointer without moving keyboard
+focus; moving the pointer alone does nothing.
+
+In tmux, mouse events are available when its `mouse` option is enabled. The
+client does not change tmux or system settings. For terminal text selection,
+use your terminal's mouse override (usually Shift while dragging).
+
 ## Local groups
 
 A group combines joined geographic and named chats in one chronological feed.

@@ -99,10 +99,15 @@ func (t *tui) handleInfoKeys(event *tcell.EventKey) *tcell.EventKey {
 		t.bell()
 		return nil
 	}
-	chat := view.Children[index]
+	t.selectConversation(s, view.Children[index])
+	return nil
+}
+
+func (t *tui) selectConversation(s modelSnapshot, chat string) {
+	view := activeView(s)
 	if chat != t.conversationChat(s) {
 		if !t.submit(client.UserAction{Type: "SELECT_GROUP_CHAT", View: view.Name, Chat: chat}) {
-			return nil
+			return
 		}
 		t.mu.Lock()
 		for _, current := range t.views {
@@ -115,7 +120,6 @@ func (t *tui) handleInfoKeys(event *tcell.EventKey) *tcell.EventKey {
 	}
 	t.infoReveal = true
 	t.render()
-	return nil
 }
 
 // Reveal after layout has assigned the real rectangle, not using the previous
@@ -128,12 +132,19 @@ func (t *tui) installInfoScroll() {
 			s := t.snapshot()
 			view := activeView(s)
 			if view != nil && view.IsGroup && t.chatList.GetCurrentItem() == s.activeIndex && height > 0 {
-				index := slices.Index(view.Children, t.conversationChat(s))
+				start, lines := 0, 0
+				for _, chat := range view.Children {
+					lines = groupInfoLines(chat, width)
+					if chat == t.conversationChat(s) {
+						break
+					}
+					start += lines
+				}
 				row, _ := t.detailsView.GetScrollOffset()
-				if index >= 0 && index < row {
-					t.detailsView.ScrollTo(index, 0)
-				} else if index >= row+height {
-					t.detailsView.ScrollTo(index-height+1, 0)
+				if start < row {
+					t.detailsView.ScrollTo(start, 0)
+				} else if start+lines > row+height {
+					t.detailsView.ScrollTo(min(start, start+lines-height), 0)
 				}
 			}
 			t.infoReveal = false

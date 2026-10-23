@@ -165,6 +165,7 @@ func New(actions chan<- client.UserAction, events <-chan client.DisplayEvent) *t
 	}
 	t.setupViews()
 	t.setupHandlers()
+	t.setupMouse()
 	t.redirectLog()
 
 	t.app.SetRoot(t.mainFlex, true)
@@ -313,7 +314,12 @@ func (t *tui) wake() {
 // stopped) and releases the first-draw signal used by the supervisor.
 func (t *tui) captureScreen(screen tcell.Screen) {
 	t.screen.Store(&screen)
-	t.screenOnce.Do(func() { close(t.screenReady) })
+	t.screenOnce.Do(func() {
+		// tview.EnableMouse requests motion too. Only clicks and wheel
+		// events are needed; unsupported terminals ignore this request.
+		screen.EnableMouse(tcell.MouseButtonEvents)
+		close(t.screenReady)
+	})
 }
 
 // applyEvent folds one client event into the model. It never touches widgets:
