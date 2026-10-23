@@ -2,11 +2,12 @@ package client
 
 import (
 	"context"
+
 	"errors"
 	"fmt"
 	"time"
 
-	"github.com/coder/websocket"
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/nbd-wtf/go-nostr"
 )
 
@@ -31,6 +32,10 @@ type relayAuth struct {
 	attempts   map[string]*relayAuthAttempt // public key -> result
 	pending    map[string]string            // AUTH event ID -> public key
 	changes    []time.Time                  // bounded sliding challenge-rate window
+	// signers caches the immutable identity validated for this socket. Keys do
+	// not rotate for a subscription; reusing the parsed signer avoids deriving
+	// the same public key again for every challenge.
+	signers map[string]*sessionSigner
 }
 
 func (a *relayAuth) setChallenge(challenge string) (bool, error) {
@@ -56,7 +61,7 @@ func (a *relayAuth) setChallenge(challenge string) (bool, error) {
 	return true, nil
 }
 
-func (a *relayAuth) send(ctx context.Context, conn *websocket.Conn, url string, keys map[string]string) error {
+func (a *relayAuth) send(ctx context.Context, conn relayConn, url string, keys map[string]string) error {
 	if !a.challenged {
 		return nil
 	}
@@ -67,15 +72,15 @@ func (a *relayAuth) send(ctx context.Context, conn *websocket.Conn, url string, 
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		derived, err := nostr.GetPublicKey(key)
-		if err != nil || derived != pubkey {
-			return errors.New("no valid chat identity for relay authentication")
+		signer, err := a.signerFor(pubkey, key)
+		if err != nil {
+			return err
 		}
 		event := nostr.Event{
 			Kind: nostr.KindClientAuthentication, CreatedAt: nostr.Now(),
 			Tags: nostr.Tags{{"relay", url}, {"challenge", a.challenge}},
 		}
-		if err := event.Sign(key); err != nil {
+		if err := signer.sign(&event); err != nil {
 			return errors.New("failed to sign relay authentication proof")
 		}
 		if err := writeFrame(ctx, conn, []any{"AUTH", event}); err != nil {
@@ -85,6 +90,40 @@ func (a *relayAuth) send(ctx context.Context, conn *websocket.Conn, url string, 
 		a.pending[event.ID] = pubkey
 	}
 	return nil
+}
+
+// signerFor returns the immutable signer for an AUTH snapshot, deriving and
+// validating it once per socket. A signer cached under pubkey necessarily has a
+// matching derived public key, so a later snapshot cannot substitute another
+// identity for the same key.
+func (a *relayAuth) signerFor(pubkey, key string) (*sessionSigner, error) {
+	if signer := a.signers[pubkey]; signer != nil {
+		// Fail closed if a later snapshot pairs the same public key label with
+		// a different secret, matching the old derive-and-compare behavior.
+		var raw [32]byte
+		if !decodeFixedHex(raw[:], key) {
+			return nil, errors.New("no valid chat identity for relay authentication")
+		}
+		// Match newSessionSigner's modulo-N normalization, including its
+		// noncanonical direct-call inputs, without re-deriving a public point.
+		var scalar btcec.ModNScalar
+		scalar.SetBytes(&raw)
+		matches := signer.key.Key.Equals(&scalar)
+		scalar.Zero()
+		if !matches {
+			return nil, errors.New("no valid chat identity for relay authentication")
+		}
+		return signer, nil
+	}
+	signer, err := newSessionSigner(key)
+	if err != nil || signer.pubKey != pubkey {
+		return nil, errors.New("no valid chat identity for relay authentication")
+	}
+	if a.signers == nil {
+		a.signers = make(map[string]*sessionSigner)
+	}
+	a.signers[pubkey] = signer
+	return signer, nil
 }
 
 func (a *relayAuth) acknowledge(id string, accepted bool, reason string) (string, bool) {
@@ -115,6 +154,11 @@ func (a *relayAuth) prune(keys map[string]string) {
 		if _, needed := keys[pubkey]; !needed {
 			delete(a.pending, attempt.id)
 			delete(a.attempts, pubkey)
+		}
+	}
+	for pubkey := range a.signers {
+		if _, needed := keys[pubkey]; !needed {
+			delete(a.signers, pubkey)
 		}
 	}
 }

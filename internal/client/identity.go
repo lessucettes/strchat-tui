@@ -17,11 +17,18 @@ func (c *client) ensureViewIdentities(view *View) {
 			continue
 		}
 		key := nostr.GeneratePrivateKey()
-		pubkey, _ := nostr.GetPublicKey(key)
+		// Parse the key and derive its public key once. The immutable signer is
+		// captured by queued publishes and socket AUTH snapshots instead of
+		// re-decoding and re-deriving the same secret per event.
+		signer, err := newSessionSigner(key)
+		if err != nil {
+			continue
+		}
+		pubkey := signer.pubKey
 		nick := c.config.Nick
 		if nick == "" {
 			nick = npubToTokiPona(pubkey)
 		}
-		c.chatKeys[chat] = chatSession{privKey: key, pubKey: pubkey, nick: nick}
+		c.chatKeys[chat] = chatSession{privKey: key, pubKey: pubkey, nick: nick, signer: signer}
 	}
 }

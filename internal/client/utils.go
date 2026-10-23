@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/rivo/uniseg"
@@ -81,18 +82,28 @@ func safeSuffix(s string, n int) string {
 }
 
 func truncateString(s string, maxClusters int) string {
-	g := uniseg.NewGraphemes(s)
-	var b strings.Builder
-	count := 0
-	for g.Next() {
-		if count >= maxClusters {
-			b.WriteString("...")
-			break
-		}
-		b.WriteString(g.Str())
-		count++
+	// Every cluster occupies at least one byte. Most messages need no scan.
+	if len(s) <= maxClusters || s == "" {
+		return s
 	}
-	return b.String()
+	rest, state := s, -1
+	count := 0
+	if rest[0] >= ' ' && rest[0] <= '~' {
+		// Skip a printable ASCII prefix, leaving its last byte in case a
+		// following Unicode mark extends that cluster. Keep this outside the
+		// Unicode loop so mixed text pays no extra per-cluster branch.
+		for count < maxClusters && count+1 < len(s) && s[count+1] >= ' ' && s[count+1] <= '~' {
+			count++
+		}
+		rest = rest[count:]
+	}
+	for ; count < maxClusters && rest != ""; count++ {
+		_, rest, _, state = uniseg.FirstGraphemeClusterInString(rest, state)
+	}
+	if rest == "" {
+		return s
+	}
+	return s[:len(s)-len(rest)] + "..."
 }
 
 func normalizeAndValidateChatName(name string) (string, error) {
@@ -117,18 +128,29 @@ func normalizeAndValidateChatName(name string) (string, error) {
 }
 
 func sanitizeString(s string) string {
-	var b strings.Builder
-	b.Grow(len(s))
-	for _, r := range s {
-		if r < 32 && r != '\n' && r != '\t' {
+	for i, r := range s {
+		invalid := false
+		if r == utf8.RuneError {
+			_, size := utf8.DecodeRuneInString(s[i:])
+			invalid = size == 1
+		}
+		if (r >= 32 || r == '\n' || r == '	') && r != 127 && !invalid {
 			continue
 		}
-		if r == 127 {
-			continue
+		// Allocate only after the first removed control or invalid UTF-8 byte.
+		// WriteRune retains the old replacement-rune behavior for invalid input.
+		var b strings.Builder
+		b.Grow(len(s))
+		b.WriteString(s[:i])
+		for _, r := range s[i:] {
+			if r < 32 && r != '\n' && r != '	' || r == 127 {
+				continue
+			}
+			b.WriteRune(r)
 		}
-		b.WriteRune(r)
+		return b.String()
 	}
-	return b.String()
+	return s
 }
 
 func normalizeRelayURL(raw string) (string, error) {

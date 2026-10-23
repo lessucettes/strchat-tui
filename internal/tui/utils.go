@@ -60,10 +60,5 @@ func pubkeyToColor(pubkey string, palette []string) string {
 // graphemeLen counts user-perceived characters (grapheme clusters)
 // to handle emoji and ZWJ sequences correctly in TUI input fields.
 func graphemeLen(s string) int {
-	g := uniseg.NewGraphemes(s)
-	count := 0
-	for g.Next() {
-		count++
-	}
-	return count
+	return uniseg.GraphemeClusterCount(s)
 }

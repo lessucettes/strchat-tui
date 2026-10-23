@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"slices"
@@ -10,7 +11,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/mmcloughlin/geohash"
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/rivo/uniseg"
 )
@@ -46,7 +46,7 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 	if active == nil || (!active.IsGroup && active.Name != chat) || (active.IsGroup && !slices.Contains(active.Children, chat)) {
 		return
 	}
-	if (ev.Kind == geoChatKind) != (geohash.Validate(chat) == nil) {
+	if (ev.Kind == geoChatKind) != isGeohashName(chat) {
 		return
 	}
 	now := nostr.Now()
@@ -64,13 +64,21 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 			return
 		}
 	}
-	if !ev.CheckID() {
+	minDifficulty := c.effectivePoWForChat(chat)
+	// Reject-only admission gate: a missing/underfilled proof must not spend a
+	// curve verification. Accepted events still prove canonical ID equality and
+	// the signature, and are never cached based on these untrusted ID bits.
+	if minDifficulty > 0 && !isPoWValid(ev, minDifficulty) {
 		return
 	}
-	if valid, _ := ev.CheckSignature(); !valid {
+	// Hash the canonical serialization once: the same digest proves the ID,
+	// feeds the BIP-340 signature check and the optional PoW bit count. The
+	// parsed author key is reused only for this exact validated public key.
+	authorKey, digest, ok := verifyEventDigestWarm(ev, c.cachedAuthorKey(ev.PubKey), c.authorVerify)
+	if !ok {
 		return
 	}
-	if !isPoWValid(ev, c.effectivePoWForChat(chat)) {
+	if !isPoWValidDigest(ev, minDifficulty, digest) {
 		return
 	}
 	c.seenCache.Add(ev.ID, true)
@@ -78,15 +86,21 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 	if c.matchesAny(content, c.mutesCompiled) || (len(c.filtersCompiled) > 0 && !c.matchesAny(content, c.filtersCompiled)) {
 		return
 	}
-	nick := npubToTokiPona(ev.PubKey)
-	short := ev.PubKey[:4]
+	nick, short := "", ev.PubKey[:4]
 	if tag := ev.Tags.Find("n"); len(tag) > 1 {
 		if text := strings.TrimSpace(sanitizeString(truncateString(tag[1], 64))); text != "" {
 			nick = text
 		}
 		short = safeSuffix(ev.PubKey, 4)
 	}
-	c.userContext.Add(ev.PubKey, userContext{nick: nick, chat: chat, shortPubKey: short})
+	// A usable n tag supplies the display name; only fall back to the generated
+	// name when it did not, instead of always paying for the formatting.
+	if nick == "" {
+		nick = npubToTokiPona(ev.PubKey)
+	}
+	previous, known := c.userContext.Peek(ev.PubKey)
+	recipientUnchanged := known && previous.nick == nick && previous.chat == chat && previous.shortPubKey == short
+	c.userContext.Add(ev.PubKey, userContext{nick: nick, chat: chat, shortPubKey: short, authorKey: authorKey})
 	own := c.retiredKeys.Contains(ev.PubKey)
 	for _, session := range c.chatKeys {
 		if session.pubKey == ev.PubKey {
@@ -95,7 +109,8 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 		}
 	}
 	c.emit(DisplayEvent{Type: "NEW_MESSAGE", Timestamp: time.Unix(int64(ev.CreatedAt), 0).Format("15:04:05"), Nick: nick,
-		FullPubKey: ev.PubKey, ShortPubKey: short, IsOwnMessage: own, Content: content, ID: safeSuffix(ev.ID, 4), Chat: chat, RelayURL: relayURL})
+		FullPubKey: ev.PubKey, ShortPubKey: short, IsOwnMessage: own, RecipientUnchanged: recipientUnchanged,
+		Content: content, ID: safeSuffix(ev.ID, 4), Chat: chat, RelayURL: relayURL})
 }
 
 const maxContentBytes = 16 << 10
@@ -103,6 +118,7 @@ const maxContentBytes = 16 << 10
 type publishJob struct {
 	event      nostr.Event
 	key, chat  string
+	signer     *sessionSigner // immutable identity captured when queued
 	difficulty int
 	relays     []*managedRelay
 }
@@ -127,7 +143,7 @@ func (c *client) resolveMessageTarget(text, viewName, defaultChat string) (*View
 	if viewName != "" && viewName != view.Name {
 		return nil, "", "", fmt.Errorf("Message was composed for '%s' but the active chat is now '%s'. Retry from the active chat.", viewName, view.Name)
 	}
-	chat, target, matched := view.Name, "", ""
+	chat, target, matchedLen := view.Name, "", 0
 	if defaultChat != "" {
 		// An explicit destination only makes sense for the view it came from,
 		// and it is validated before any @ override so a stale choice cannot be
@@ -148,15 +164,17 @@ func (c *client) resolveMessageTarget(text, viewName, defaultChat string) (*View
 				continue
 			}
 			// Completion expands a colliding short identifier to the full key.
-			for _, suffix := range []string{user.shortPubKey, pk} {
-				prefix := fmt.Sprintf("@%s#%s", user.nick, suffix)
-				if !strings.HasPrefix(text, prefix) || (len(text) > len(prefix) && text[len(prefix)] != ' ') {
+			// Compare the mention grammar in place rather than formatting every
+			// candidate prefix, so ordinary sends allocate no candidate strings.
+			for _, suffix := range [2]string{user.shortPubKey, pk} {
+				prefixLen, ok := mentionPrefixLen(text, user.nick, suffix)
+				if !ok {
 					continue
 				}
-				if len(prefix) > len(matched) {
-					target, chat, matched = pk, user.chat, prefix
+				if prefixLen > matchedLen {
+					target, chat, matchedLen = pk, user.chat, prefixLen
 					ambiguous = false
-				} else if len(prefix) == len(matched) && target != pk {
+				} else if prefixLen == matchedLen && target != pk {
 					ambiguous = true
 				}
 			}
@@ -175,6 +193,25 @@ func (c *client) resolveMessageTarget(text, viewName, defaultChat string) (*View
 		return nil, "", "", errors.New("Recipient is not in the active chat/group.")
 	}
 	return view, chat, target, nil
+}
+
+// mentionPrefixLen reports the byte length of the leading "@nick#suffix" when
+// text begins with that mention and the next byte is a space or the end of the
+// message. It replaces per-candidate fmt.Sprintf allocation with direct
+// comparisons while preserving the original grammar exactly.
+func mentionPrefixLen(text, nick, suffix string) (int, bool) {
+	if len(text) == 0 || text[0] != '@' {
+		return 0, false
+	}
+	nickStart, suffixStart := 1, 2+len(nick)
+	end := suffixStart + len(suffix)
+	if len(text) < end || text[nickStart:nickStart+len(nick)] != nick || text[nickStart+len(nick)] != '#' || text[suffixStart:end] != suffix {
+		return 0, false
+	}
+	if len(text) > end && text[end] != ' ' {
+		return 0, false
+	}
+	return end, true
 }
 
 // previewMessageTarget reports what a send would do without queueing anything.
@@ -220,18 +257,25 @@ func (c *client) publishMessageInView(message, viewName, defaultChat, expectedCh
 		c.emit(DisplayEvent{Type: "ERROR", Content: "No signing identity for the destination chat."})
 		return
 	}
-	pk, err := nostr.GetPublicKey(session.privKey)
-	if err != nil || pk != session.pubKey {
+	signer, err := session.signingIdentity()
+	if err != nil {
 		c.emit(DisplayEvent{Type: "ERROR", Content: "No valid signing identity."})
 		return
 	}
-	job := publishJob{key: session.privKey, chat: chat, difficulty: c.effectivePoWForChat(chat)}
+	if session.signer == nil {
+		// Sessions can predate immutable signers (tests and restored state);
+		// cache the validated signer on the owner-owned map once.
+		session.signer = signer
+		c.chatKeys[chat] = session
+	}
+	pk := signer.pubKey
+	job := publishJob{key: session.privKey, signer: signer, chat: chat, difficulty: c.effectivePoWForChat(chat)}
 	nick := session.nick
 	if nick == "" {
 		nick = npubToTokiPona(pk)
 	}
 	kind, tag := ephChatKind, "d"
-	if geohash.Validate(chat) == nil {
+	if isGeohashName(chat) {
 		kind, tag = geoChatKind, "g"
 	}
 	job.event = nostr.Event{PubKey: pk, Kind: kind, CreatedAt: nostr.Now(), Content: message, Tags: nostr.Tags{{tag, chat}, {"n", nick}}}
@@ -279,20 +323,55 @@ func executePublish(ctx context.Context, job publishJob) publishResult {
 	defer cancel()
 	event := job.event
 	event.CreatedAt = nostr.Now()
+	signer := job.signer
+	if signer == nil {
+		// Direct callers may carry only the captured key. Establish the same
+		// public key before mining that will be present in the signed event.
+		var err error
+		signer, err = newSessionSigner(job.key)
+		if err != nil {
+			result.message = "Failed to sign message."
+			return result
+		}
+	}
+	event.PubKey = signer.pubKey
 	if job.difficulty > 0 {
 		event.Tags = append(event.Tags, nostr.Tag{"nonce", "0", strconv.Itoa(job.difficulty)})
+		var miner *miningHasher
+		// Do not pay structural setup cost for the few expected low-PoW hashes.
+		if job.difficulty >= 8 {
+			var err error
+			miner, err = newMiningHasher(&event)
+			if err != nil {
+				result.message = "Failed to prepare proof-of-work."
+				return result
+			}
+		}
 		for nonce := uint64(0); ; nonce++ {
 			if nonce&1023 == 0 && ctx.Err() != nil {
 				result.message = "Proof-of-work timed out or was cancelled; message not sent."
 				return result
 			}
-			event.Tags[len(event.Tags)-1][1] = strconv.FormatUint(nonce, 10)
-			if countLeadingZeroBits(event.GetID()) >= job.difficulty {
+			var digest [32]byte
+			if miner != nil {
+				var err error
+				digest, err = miner.digest(nonce)
+				if err != nil {
+					result.message = "Failed to compute proof-of-work."
+					return result
+				}
+			} else {
+				event.Tags[len(event.Tags)-1][1] = strconv.FormatUint(nonce, 10)
+				digest = sha256.Sum256(event.Serialize())
+			}
+			if countLeadingZeroBitsDigest(digest) >= job.difficulty {
+				event.Tags[len(event.Tags)-1][1] = strconv.FormatUint(nonce, 10)
 				break
 			}
 		}
 	}
-	if err := event.Sign(job.key); err != nil {
+
+	if err := signer.sign(&event); err != nil {
 		result.message = "Failed to sign message."
 		return result
 	}

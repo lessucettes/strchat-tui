@@ -56,29 +56,26 @@ func TestLineBufferSingleOversizedLineStillAppends(t *testing.T) {
 	}
 }
 
-func TestLineBufferUnsynced(t *testing.T) {
+func TestLineBufferLinesFrom(t *testing.T) {
 	b := newLineBuffer(3, 0)
 	b.append("a")
 	b.append("b")
 
-	lines, ok := b.unsynced(0)
-	if !ok || strings.Join(lines, ",") != "a,b" {
-		t.Fatalf("unsynced(0) = %q ok=%v, want a,b true", lines, ok)
+	if lines := b.linesFrom(0); strings.Join(lines, ",") != "a,b" {
+		t.Fatalf("linesFrom(0) = %q, want a,b", lines)
 	}
-	lines, ok = b.unsynced(2)
-	if !ok || len(lines) != 0 {
-		t.Fatalf("unsynced(2) = %q ok=%v, want empty true", lines, ok)
+	if lines := b.linesFrom(2); len(lines) != 0 {
+		t.Fatalf("linesFrom(2) = %q, want empty", lines)
 	}
 
-	// Evict the first line and ask for it again: the caller must rewrite.
+	// Evict the first line: the caller cannot recover it from this buffer.
 	b.append("c")
 	b.append("d")
-	if _, ok := b.unsynced(0); ok {
-		t.Fatalf("unsynced(0) reported ok after eviction; want rewrite signal")
+	if lines := b.linesFrom(0); len(lines) != 0 {
+		t.Fatalf("linesFrom(0) = %q after eviction, want empty", lines)
 	}
-	lines, ok = b.unsynced(2)
-	if !ok || strings.Join(lines, ",") != "c,d" {
-		t.Fatalf("unsynced(2) = %q ok=%v, want c,d true", lines, ok)
+	if lines := b.linesFrom(2); strings.Join(lines, ",") != "c,d" {
+		t.Fatalf("linesFrom(2) = %q, want c,d", lines)
 	}
 }
 

@@ -9,10 +9,9 @@ import (
 	"math/rand/v2"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
-	"github.com/coder/websocket"
-	"github.com/mmcloughlin/geohash"
 	"github.com/nbd-wtf/go-nostr"
 )
 
@@ -23,6 +22,11 @@ const (
 	relayRetryCacheSize     = 4096
 	connectTimeout          = 5 * time.Second
 	maxFrameBytes           = 64 << 10
+	// relayPingInterval is the idle probe cadence; relayPongWait bounds one
+	// probe. Both are production defaults; serveRelayWithPing takes them as
+	// parameters so tests can drive probes without sleeping.
+	relayPingInterval = 30 * time.Second
+	relayPongWait     = connectTimeout
 )
 
 type relaySubscription struct {
@@ -63,31 +67,22 @@ type relayEvent struct {
 	problem   string
 }
 
+// relayProbe carries one asynchronous ping's outcome together with the reader
+// revision observed when that probe started.
+type relayProbe struct {
+	err      error
+	revision uint64
+}
+
+// getRelayPoolForChat returns a chat's effective relay pool: configured anchors
+// plus, for geohash chats, the merged nearest sets of both bundled catalogs.
+// The result is the immutable owner-owned plan slice and must not be modified
+// by callers. Normalization and geo ranking happen once per anchors revision
+// rather than once per relay status, which used to dominate large-group
+// refreshes.
 func (c *client) getRelayPoolForChat(chat string) []string {
-	urls := slices.Clone(c.config.AnchorRelays)
-	if geohash.Validate(chat) == nil {
-		// Nearest relays of both bundled catalogs (BitChat iOS and upstream
-		// georelays), because the two variants target different nearest sets.
-		lists, ok := c.geoPlans[chat]
-		if !ok {
-			lists, _ = rankedGeoRelays(chat, 2*defaultRelayCount)
-			c.geoPlans[chat] = lists
-		}
-		urls = append(urls, primaryGeoRelays(lists)...)
-	}
-	if len(urls) == 0 {
-		urls = defaultEphChatRelays
-	}
-	seen := make(map[string]bool)
-	var result []string
-	for _, raw := range urls {
-		url, err := normalizeRelayURL(raw)
-		if err == nil && !seen[url] {
-			seen[url] = true
-			result = append(result, url)
-		}
-	}
-	return result
+	c.syncRelayPlanning()
+	return c.relayPlanFor(chat).pool
 }
 
 func (c *client) updateRelaySubscriptions(desired map[string][]string) {
@@ -118,11 +113,15 @@ func (c *client) updateRelaySubscriptions(desired map[string][]string) {
 		if len(chats) == 0 {
 			continue
 		}
-		subscription := c.subscriptionForRelay(url, chats)
 		if worker := c.relays[url]; worker != nil {
-			if slices.Equal(worker.chats, chats) && maps.Equal(worker.keys, subscription.keys) {
+			// Compare the key/chat topology before constructing a subscription.
+			// Connection and latency statuses dominate refreshes and normally
+			// leave both unchanged; only a real topology or identity change
+			// needs a new snapshot and worker update.
+			if slices.Equal(worker.chats, chats) && c.relayKeysMatch(worker.keys, chats) {
 				continue
 			}
+			subscription := c.subscriptionForRelay(url, chats)
 			worker.chats = chats
 			worker.keys = subscription.keys
 			select {
@@ -131,6 +130,7 @@ func (c *client) updateRelaySubscriptions(desired map[string][]string) {
 			}
 			worker.updates <- subscription
 		} else if len(c.relays) < maxActiveRelays {
+			subscription := c.subscriptionForRelay(url, chats)
 			ctx, cancel := context.WithCancel(c.ctx)
 			worker := &managedRelay{url: url, cancel: cancel, done: make(chan struct{}), chats: chats, keys: subscription.keys, updates: make(chan relaySubscription, 1), publish: make(chan relayPublish, 1)}
 			worker.retry, _ = c.relayRetries.Peek(url)
@@ -144,7 +144,7 @@ func (c *client) updateRelaySubscriptions(desired map[string][]string) {
 func chatFilters(chats []string, since nostr.Timestamp) nostr.Filters {
 	var geo, topics []string
 	for _, chat := range chats {
-		if geohash.Validate(chat) == nil {
+		if isGeohashName(chat) {
 			geo = append(geo, chat)
 		} else {
 			topics = append(topics, chat)
@@ -169,7 +169,7 @@ func (c *client) relayStatus(ctx context.Context, worker *managedRelay, connecte
 
 // Bound both stalled handshakes and fast refusals. Waiting and dialing are
 // cancelable; a connected socket does not retain a dial permit.
-func (c *client) dialRelay(ctx context.Context, url string) (*websocket.Conn, time.Duration, error) {
+func (c *client) dialRelay(ctx context.Context, url string) (relayConn, time.Duration, error) {
 	select {
 	case c.dialSlots <- struct{}{}:
 	case <-ctx.Done():
@@ -192,15 +192,13 @@ func (c *client) dialRelay(ctx context.Context, url string) (*websocket.Conn, ti
 		return nil, 0, ctx.Err()
 	}
 	timeout := connectTimeout
-	var options *websocket.DialOptions
 	if c.relayHTTPClient != nil {
 		timeout = socksConnectTimeout
-		options = &websocket.DialOptions{HTTPClient: c.relayHTTPClient}
 	}
 	dialCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	start := time.Now()
-	conn, _, err := websocket.Dial(dialCtx, url, options)
+	conn, err := dialRelayTransport(dialCtx, url, c.relayHTTPClient, timeout)
 	return conn, time.Since(start), err
 }
 
@@ -264,17 +262,17 @@ func (c *client) runRelay(ctx context.Context, worker *managedRelay, subscriptio
 	}
 }
 
-func writeFrame(ctx context.Context, conn *websocket.Conn, frame any) error {
+func writeFrame(ctx context.Context, conn relayConn, frame any) error {
 	data, err := json.Marshal(frame)
 	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(ctx, connectTimeout)
 	defer cancel()
-	return conn.Write(ctx, websocket.MessageText, data)
+	return conn.Write(ctx, relayMessageText, data)
 }
 
-func subscribe(ctx context.Context, conn *websocket.Conn, chats []string, since nostr.Timestamp) error {
+func subscribe(ctx context.Context, conn relayConn, chats []string, since nostr.Timestamp) error {
 	// Admission or owner backpressure may have aged the snapshot before use.
 	since = max(since, nostr.Now()-30)
 	frame := []any{"REQ", "chat"}
@@ -286,11 +284,36 @@ func subscribe(ctx context.Context, conn *websocket.Conn, chats []string, since 
 
 // One reader, one bounded queue, no goroutine per frame. The websocket library
 // handles control frames while Read is active; Ping has a bounded pong deadline.
-func (c *client) serveRelay(ctx context.Context, worker *managedRelay, conn *websocket.Conn, sub relaySubscription, latency time.Duration) (relaySubscription, bool) {
+func (c *client) serveRelay(ctx context.Context, worker *managedRelay, conn relayConn, sub relaySubscription, latency time.Duration) (relaySubscription, bool) {
+	ticker := time.NewTicker(relayPingInterval)
+	defer ticker.Stop()
+	return c.serveRelayWithPing(ctx, worker, conn, sub, latency, ticker.C, relayPongWait)
+}
+
+// serveRelayWithPing serves one connection until it fails or the context ends.
+// ticks is the idle-probe cadence and pongWait bounds a single probe; the
+// production wrapper supplies relayPingInterval and relayPongWait. A probe runs
+// asynchronously so the serve loop keeps draining the reader even while a pong
+// is outstanding; a missed pong is only fatal when the reader itself is idle,
+// because otherwise the pong is queued behind data we have not drained yet.
+func (c *client) serveRelayWithPing(ctx context.Context, worker *managedRelay, conn relayConn, sub relaySubscription, latency time.Duration, ticks <-chan time.Time, pongWait time.Duration) (relaySubscription, bool) {
 	ctx, cancel := context.WithCancel(ctx)
+	// Bind lifetime cancellation once for the whole connection. Closing the
+	// socket unblocks the reader and any stalled writer; no per-frame context
+	// scaffold or gorilla deadline-field mutation is needed.
+	stopLifetime := context.AfterFunc(ctx, func() { _ = conn.CloseNow() })
+	defer cancel()
+	defer stopLifetime()
 	// Keep aggregate buffering small when a group uses many relay sockets.
 	frames := make(chan []byte, 4)
 	readerDone := make(chan struct{})
+	// The reader publishes cheap liveness evidence for the serve loop: a
+	// revision advanced after every successful read, and a flag set exactly
+	// while it is parked handing us a frame. A missed pong is inconclusive
+	// whenever either one shows the connection is busy, because the pong is
+	// then queued behind data we have not drained yet.
+	var readRevision atomic.Uint64
+	var readerBlocked atomic.Bool
 	go func() {
 		defer close(readerDone)
 		defer close(frames)
@@ -299,17 +322,38 @@ func (c *client) serveRelay(ctx context.Context, worker *managedRelay, conn *web
 			if err != nil {
 				return
 			}
-			if kind != websocket.MessageText {
+			readRevision.Add(1)
+			if kind != relayMessageText {
 				continue
 			}
 			select {
 			case frames <- data:
+				continue
+			default:
+			}
+			readerBlocked.Store(true)
+			select {
+			case frames <- data:
+				readerBlocked.Store(false)
 			case <-ctx.Done():
+				readerBlocked.Store(false)
 				return
 			}
 		}
 	}()
-	defer func() { cancel(); conn.CloseNow(); <-readerDone }()
+	var pinging bool
+	var lastActivity uint64
+	probeDone := make(chan relayProbe, 1)
+	defer func() {
+		cancel()
+		conn.CloseNow()
+		<-readerDone
+		// A probe waits for a pong or the connection lifetime, never for
+		// shutdown: closing the socket and cancelling ctx end it promptly.
+		if pinging {
+			<-probeDone
+		}
+	}()
 	var pending *relayPublish
 	var pendingDone <-chan struct{}
 	var pendingWait, pendingSent, publishRetried bool
@@ -418,8 +462,6 @@ func (c *client) serveRelay(ctx context.Context, worker *managedRelay, conn *web
 		}
 		return nil
 	}
-	ping := time.NewTicker(30 * time.Second)
-	defer ping.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -428,11 +470,27 @@ func (c *client) serveRelay(ctx context.Context, worker *managedRelay, conn *web
 			return failAuth(errors.New("relay authentication timed out waiting for a challenge or AUTH acknowledgement"))
 		case <-pendingDone:
 			finishPending(pending.ctx.Err())
-		case <-ping.C:
-			pingCtx, stop := context.WithTimeout(ctx, connectTimeout)
-			err := conn.Ping(pingCtx)
-			stop()
-			if err != nil {
+		case <-ticks:
+			revision := readRevision.Load()
+			// Frames already arriving, queued frames, or a reader parked on
+			// our full queue prove liveness better than an idle control probe.
+			if !pinging && revision == lastActivity && len(frames) == 0 && !readerBlocked.Load() && ctx.Err() == nil {
+				pinging = true
+				go func(revision uint64) {
+					pingCtx, stop := context.WithTimeout(ctx, pongWait)
+					err := conn.Ping(pingCtx)
+					stop()
+					probeDone <- relayProbe{err: err, revision: revision}
+				}(revision)
+			}
+			lastActivity = revision
+		case probe := <-probeDone:
+			pinging = false
+			// A missed pong only proves the peer is gone when the reader had
+			// no traffic and was not parked on our own queue. Otherwise the
+			// exact pong is behind frames we have not drained, and treating
+			// the timeout as remote death would be self-inflicted.
+			if probe.err != nil && ctx.Err() == nil && readRevision.Load() == probe.revision && len(frames) == 0 && !readerBlocked.Load() {
 				return sub, false
 			}
 		case update := <-worker.updates:
@@ -473,17 +531,17 @@ func (c *client) serveRelay(ctx context.Context, worker *managedRelay, conn *web
 			if !ok {
 				return sub, false
 			}
-			var frame []json.RawMessage
-			if json.Unmarshal(data, &frame) != nil || len(frame) < 2 {
+			parts, count := splitRelayEnvelope(data)
+			if count < 2 {
 				continue
 			}
-			var label, id string
-			if json.Unmarshal(frame[0], &label) != nil || json.Unmarshal(frame[1], &id) != nil {
+			label, id, validHead := decodeRelayEnvelopeHead(parts[0], parts[1])
+			if !validHead {
 				continue
 			}
 			switch label {
 			case "AUTH":
-				if len(frame) != 2 {
+				if count != 2 {
 					continue
 				}
 				changed, err := auth.setChallenge(id)
@@ -498,11 +556,14 @@ func (c *client) serveRelay(ctx context.Context, worker *managedRelay, conn *web
 					return failAuth(fmt.Errorf("relay authentication failed: %w", err))
 				}
 			case "EVENT":
-				if id != "chat" || len(frame) != 3 {
+				if id != "chat" || count != 3 {
 					continue
 				}
 				var event nostr.Event
-				if json.Unmarshal(frame[2], &event) != nil {
+				// The splitter validates the complete frame with json.Valid.
+				// Decode the known-valid event directly, without validating it
+				// a second time or copying it into a generic RawMessage.
+				if event.UnmarshalJSON(parts[2]) != nil {
 					continue
 				}
 				select {
@@ -512,7 +573,7 @@ func (c *client) serveRelay(ctx context.Context, worker *managedRelay, conn *web
 				}
 			case "EOSE":
 				var hints []string
-				if id == "chat" && len(frame) == 3 && !subRetried && json.Unmarshal(frame[2], &hints) == nil && slices.Contains(hints, "auth") {
+				if id == "chat" && count == 3 && !subRetried && json.Unmarshal(parts[2], &hints) == nil && slices.Contains(hints, "auth") {
 					subWait = true
 					if err := startAuth(); err != nil {
 						return failAuth(err)
@@ -520,7 +581,7 @@ func (c *client) serveRelay(ctx context.Context, worker *managedRelay, conn *web
 				}
 			case "CLOSED":
 				var reason string
-				if id != "chat" || len(frame) != 3 || json.Unmarshal(frame[2], &reason) != nil {
+				if id != "chat" || count != 3 || json.Unmarshal(parts[2], &reason) != nil {
 					continue
 				}
 				if strings.HasPrefix(reason, "auth-required:") {
@@ -538,12 +599,12 @@ func (c *client) serveRelay(ctx context.Context, worker *managedRelay, conn *web
 					return sub, false
 				}
 			case "OK":
-				if len(frame) != 4 {
+				if count != 4 {
 					continue
 				}
 				var accepted bool
 				var reason string
-				if json.Unmarshal(frame[2], &accepted) != nil || json.Unmarshal(frame[3], &reason) != nil {
+				if json.Unmarshal(parts[2], &accepted) != nil || json.Unmarshal(parts[3], &reason) != nil {
 					continue
 				}
 				if pubkey, matched := auth.acknowledge(id, accepted, reason); matched {

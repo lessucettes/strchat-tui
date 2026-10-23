@@ -76,10 +76,14 @@ type DisplayEvent struct {
 	FullPubKey   string
 	ShortPubKey  string
 	IsOwnMessage bool
-	RelayURL     string
-	ID           string
-	Chat         string
-	Payload      any
+	// RecipientUnchanged certifies that this validated message did not change
+	// the owner's cached nickname, short identifier or chat for its author.
+	// False is conservative for other producers and always refreshes previews.
+	RecipientUnchanged bool
+	RelayURL           string
+	ID                 string
+	Chat               string
+	Payload            any
 }
 
 // StateUpdate is a specific payload for a DisplayEvent to update the TUI's state.
@@ -93,6 +97,10 @@ type chatSession struct {
 	privKey string
 	pubKey  string
 	nick    string
+	// signer is the immutable parsed identity captured by queued publishes and
+	// AUTH snapshots. It is derived once from privKey and validated against
+	// pubKey; leave never zeroes it while a captured job still references it.
+	signer *sessionSigner
 }
 
 // userContext holds cached information about a user in a specific chat.
@@ -100,6 +108,9 @@ type userContext struct {
 	nick        string
 	chat        string
 	shortPubKey string
+	// authorKey is a bounded, owner-only parsed verification key. It is only
+	// stored after the event's ID and signature validated for this exact key.
+	authorKey *authorPublicKey
 }
 
 // compiledPattern holds a pre-compiled regex or a literal string for matching.

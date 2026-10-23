@@ -532,15 +532,22 @@ func TestGetAppConfigDirHonorsXDG(t *testing.T) {
 // ten-second publish deadline with signing and acknowledgement, so a difficulty
 // whose expected hashes do not fit that deadline must not be accepted.
 func BenchmarkExecutePublishMining(b *testing.B) {
-	key := transportTestKey
+	key := performanceTestKey
 	msg := strings.Repeat("m", 200)
+	pubkey, err := nostr.GetPublicKey(key)
+	if err != nil {
+		b.Fatal(err)
+	}
 	hashes := uint64(0)
 	for b.Loop() {
-		job := publishJob{event: nostr.Event{Kind: geoChatKind, Content: msg, Tags: nostr.Tags{{"g", "u33dc0"}}},
+		job := publishJob{event: nostr.Event{PubKey: pubkey, Kind: geoChatKind, Content: msg, Tags: nostr.Tags{{"g", "u33dc0"}}},
 			key: key, chat: "lobby", difficulty: 16}
 		result := executePublish(context.Background(), job)
 		if result.kind != "ERROR" {
 			b.Fatalf("unexpected publish result: %+v", result)
+		}
+		if !result.event.CheckID() || !isPoWValid(&result.event, 16) {
+			b.Fatal("mining produced an invalid final proof")
 		}
 		// The winning nonce is the number of tries the loop actually needed.
 		nonce, err := strconv.ParseUint(result.event.Tags[len(result.event.Tags)-1][1], 10, 64)

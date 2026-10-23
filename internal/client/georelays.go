@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -284,16 +284,40 @@ func selectClosestHosts(entries []relayEntry, geohashStr string, count int) ([]s
 		host     string
 		distance float64
 	}
-	ranked := make([]relayDistance, len(entries))
-	for i, entry := range entries {
-		ranked[i] = relayDistance{host: entry.Host, distance: haversine(lat, lon, entry.Lat, entry.Lon)}
-	}
-	sort.Slice(ranked, func(i, j int) bool {
-		if ranked[i].distance != ranked[j].distance {
-			return ranked[i].distance < ranked[j].distance
+	compare := func(a, b relayDistance) int {
+		if a.distance < b.distance {
+			return -1
 		}
-		return ranked[i].host < ranked[j].host
-	})
+		if a.distance > b.distance {
+			return 1
+		}
+		return strings.Compare(a.host, b.host)
+	}
+	var ranked []relayDistance
+	if count > len(entries)/4 {
+		// Full ranking avoids quadratic insertion when most hosts are requested.
+		ranked = make([]relayDistance, len(entries))
+		for i, entry := range entries {
+			ranked[i] = relayDistance{host: entry.Host, distance: haversine(lat, lon, entry.Lat, entry.Lon)}
+		}
+		slices.SortFunc(ranked, compare)
+	} else {
+		// Normal callers need only five primaries and five reserves. Do not
+		// allocate or sort the hundreds of catalog entries they will not use.
+		ranked = make([]relayDistance, 0, count)
+		for _, entry := range entries {
+			candidate := relayDistance{host: entry.Host, distance: haversine(lat, lon, entry.Lat, entry.Lon)}
+			if len(ranked) == count && compare(candidate, ranked[count-1]) >= 0 {
+				continue
+			}
+			at, _ := slices.BinarySearchFunc(ranked, candidate, compare)
+			if len(ranked) < count {
+				ranked = append(ranked, relayDistance{})
+			}
+			copy(ranked[at+1:], ranked[at:len(ranked)-1])
+			ranked[at] = candidate
+		}
+	}
 
 	hosts := make([]string, count)
 	for i := range hosts {

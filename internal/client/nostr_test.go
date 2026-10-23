@@ -158,7 +158,7 @@ func TestPublishKeepsAcknowledgementsReceivedBeforeCancellation(t *testing.T) {
 
 func BenchmarkProcessMessage(b *testing.B) {
 	c, events := testClient(b)
-	e := signedEvent(b, "A short public chat message.")
+	e := performanceEvent(b, "A short public chat message.")
 	b.ReportAllocs()
 	for b.Loop() {
 		c.seenCache.Purge()

@@ -301,17 +301,31 @@ the same connection; separate keys alone do not guarantee anonymity.
 Go 1.27 or newer is required. Build and check the project from the repository root:
 
 ```sh
-go build -trimpath -o strchat-tui ./cmd/strchat-tui
+go build -tags purego -trimpath -o strchat-tui ./cmd/strchat-tui
 ./strchat-tui --version
 go test ./...
+go test -tags purego ./...
 go test -race ./...
 go vet ./...
 ```
 
+`-tags purego` selects the portable Pure Go secp256k1 backend used for
+BIP-340 verification of incoming chat events. A pinned local fork adds a
+public-data-only wNAF verification kernel; its source changes, license and
+update procedure are documented in `third_party/secp256k1-voi/UPSTREAM.md`.
+Build from a repository checkout containing that directory. Version-suffixed
+`go install ...@version` is not supported while this local replacement is used;
+use the release binaries or the checkout build command above instead.
+Chat and NIP-42 AUTH signing
+use the existing btcec backend. The mage release targets pass the tag on
+every platform; all supported targets build with `CGO_ENABLED=0`. Omitting the
+tag still builds, but amd64 then uses the dependency's optional Go assembly
+table accelerator instead of the portable backend.
+
 Optional benchmarks and loopback relay-scale check:
 
 ```sh
-go test ./internal/client ./internal/tui -run '^$' -bench . -benchmem
+go test -tags purego ./internal/client ./internal/tui -run '^$' -bench . -benchmem
 STRCHAT_RELAY_SCALE=1 go test ./internal/client -run '^TestRelayGroupSafetyCeilingLoopback$' -count=1 -timeout=90s -v
 ```
 

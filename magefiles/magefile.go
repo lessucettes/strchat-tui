@@ -14,6 +14,9 @@ import (
 const (
 	binBase = "strchat-tui"
 	pkgPath = "./cmd/strchat-tui"
+	// buildTags selects secp256k1-voi's portable Pure Go backend for BIP-340
+	// verification on every target instead of the optional amd64 assembly table.
+	buildTags = "purego"
 )
 
 var (
@@ -100,5 +103,5 @@ func build(goos, goarch string, out string) error {
 		"CGO_ENABLED": "0",
 	}
 	fmt.Printf("Building %s/%s → %s\n", goos, goarch, out)
-	return sh.RunWithV(env, goexe, "build", "-ldflags", ldFlags, "-o", out, pkgPath)
+	return sh.RunWithV(env, goexe, "build", "-tags", buildTags, "-ldflags", ldFlags, "-o", out, pkgPath)
 }

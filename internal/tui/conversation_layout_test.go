@@ -43,10 +43,12 @@ func TestThreadWrapIndexMatchesNativeUnicodeRendering(t *testing.T) {
 			s.draw()
 			s.onLoop(func() {
 				v := s.ui.outputPane
-				if len(v.spans) != 4 {
-					t.Fatalf("span count = %d, want one per retained message", len(v.spans))
+				if v.count() != 4 {
+					t.Fatalf("retained record count = %d, want one per retained message", v.count())
 				}
-				if got, want := v.spans[len(v.spans)-1].end, s.ui.outputView.GetWrappedLineCount(); got != want {
+				last := v.count() - 1
+				got := v.recordStartRow(last) + int64(v.rec(last).rows)
+				if want := int64(s.ui.outputView.GetWrappedLineCount()); got != want {
 					t.Errorf("thread/native wrapped row counts differ: %d != %d", got, want)
 				}
 			})

@@ -348,14 +348,19 @@ func (t *tui) render() {
 	t.outputPane.accent = t.theme.titleColor
 	t.outputPane.muted = t.theme.logInfoColor
 	t.outputPane.background = t.theme.backgroundColor
+	var replacer *strings.Replacer
+	if t.theme != defaultTheme {
+		replacer = t.themeColors
+	}
+	t.outputView.replacer = replacer
+	t.logsView.replacer = replacer
 	if t.visible(t.outputView) {
 		t.outputPane.sync(s.output)
-		t.writeLines(t.outputView, s.output)
-		t.setOutputSynced(s.output.upto, s.output.first)
+		t.setOutputSynced(s.output.upto)
 	}
 	if t.visible(t.logsView) {
-		t.writeLines(t.logsView, s.logs)
-		t.setLogsSynced(s.logs.upto, s.logs.first)
+		t.logsView.sync(s.logs)
+		t.setLogsSynced(s.logs.upto)
 	}
 	t.renderChatList(s)
 	t.renderDetails(s)
@@ -366,32 +371,6 @@ func (t *tui) render() {
 	t.renderHints(s)
 }
 
-// writeLines writes the pending lines into a scrollback view. Incremental
-// appends keep the work proportional to what arrived; a rewrite happens only
-// whenever the model evicts lines, even while the user has scrolled to the top.
-// TextView.SetMaxLines alone only evicts lines above the visible viewport.
-func (t *tui) writeLines(view *tview.TextView, delta lineDelta) {
-	if len(delta.lines) == 0 {
-		return
-	}
-	if delta.rewrite {
-		view.SetText(t.colorScrollback("\n" + strings.Join(delta.lines, "\n")))
-		return
-	}
-	var b strings.Builder
-	for _, line := range delta.lines {
-		b.WriteString("\n")
-		b.WriteString(line)
-	}
-	fmt.Fprint(view, t.colorScrollback(b.String()))
-}
-
-func (t *tui) colorScrollback(text string) string {
-	if t.theme == defaultTheme {
-		return text // Keep the default-theme hot path allocation-free.
-	}
-	return t.themeColors.Replace(text)
-}
 
 // renderChatList rebuilds the chat list only when client state or the local
 // selection changed: rebuilding clears the widget, so it must stay rare.

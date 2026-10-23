@@ -30,6 +30,7 @@ type client struct {
 	relayTiming                    relayTiming
 	relayRetries                   *lru.Cache[string, relayRetry]
 	geoPlans                       map[string][][]string
+	relayPlans                     relayPlanner
 	nextRelayRetry                 time.Time
 	lastRelayNotice                string
 	lastRelayNoticeView            string
@@ -38,6 +39,7 @@ type client struct {
 	results                        chan publishResult
 	seenCache                      *lru.Cache[string, bool]
 	userContext                    *lru.Cache[string, userContext]
+	authorVerify                   *authorVerifyCache
 	filtersCompiled, mutesCompiled []compiledPattern
 }
 
@@ -71,6 +73,9 @@ func newClient(cfg *config, actions <-chan UserAction, events chan<- DisplayEven
 		relayTiming: defaultRelayTiming, relayRetries: retries, geoPlans: make(map[string][][]string),
 		incoming: make(chan relayEvent, 256), outgoing: make(chan publishJob, 8), results: make(chan publishResult, 8),
 		seenCache: seen, userContext: users, retiredKeys: retired}
+	// Retain bounded public precomputation for repeat authors; never identities
+	// or signing material. Entries are admitted only after verification.
+	c.authorVerify = newAuthorVerifyCache(authorVerifyCacheSize)
 	c.rebuildRegexCaches()
 	c.ensureViewIdentities(c.getActiveView())
 	return c

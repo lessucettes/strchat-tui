@@ -45,7 +45,7 @@ const wakeRune rune = 0
 
 // tui is the whole TUI: widgets, model and lifecycle.
 type tui struct {
-	app         *tview.Application
+	app         *screenHost
 	actionsChan chan<- client.UserAction
 	events      <-chan client.DisplayEvent
 
@@ -80,8 +80,6 @@ type tui struct {
 	logs            *lineBuffer
 	outputSynced    int64
 	logsSynced      int64
-	outputFirst     int64
-	logsFirst       int64
 	dropped         int
 	dropNotice      bool
 
@@ -127,9 +125,9 @@ type tui struct {
 	bottomFlex            *tview.Flex
 	chatList              *tview.List
 	detailsView           *tview.TextView
-	logsView              *tview.TextView
-	outputView            *tview.TextView
-	outputPane            *threadView
+	logsView              *scrollbackView
+	outputView            *scrollbackView
+	outputPane            *scrollbackView
 	input                 *tview.InputField
 	hints                 *tview.TextView
 	maximizedLogsFlex     *tview.Flex
@@ -149,7 +147,7 @@ type logRedirect struct {
 // logger into the bounded log view (restored by Run's cleanup).
 func New(actions chan<- client.UserAction, events <-chan client.DisplayEvent) *tui {
 	t := &tui{
-		app:               tview.NewApplication(),
+		app:               newScreenHost(),
 		actionsChan:       actions,
 		events:            events,
 		quitCh:            make(chan struct{}),
@@ -199,8 +197,31 @@ func (t *tui) Run() error {
 	if t.isQuitRequested() {
 		return nil // Stop was called before Run started: nothing to show.
 	}
+	if err := t.installScreen(); err != nil {
+		return err
+	}
 	t.startWorkers()
 	return t.app.Run()
+}
+
+// installScreen gives tview a screen that writes only the cells a frame actually
+// changes. tview clears and redraws every primitive each frame, and tcell cannot
+// recognise a frame that ends where it started, so without this every keystroke
+// repaints the whole screen.
+//
+// A screen installed by the caller (tests, embedders) is left alone: replacing
+// it would finalise a screen they still hold. tview's SetScreen discards the
+// error from Init, so the failure is reported from the wrapped screen instead.
+func (t *tui) installScreen() error {
+	if t.app.external.Load() {
+		return nil
+	}
+	screen, err := newFrameScreen()
+	if err != nil {
+		return err
+	}
+	t.app.SetScreen(screen)
+	return screen.InitError()
 }
 
 // Stop asks the UI to shut down, making Run return as soon as the event loop
@@ -358,7 +379,9 @@ func (t *tui) applyEvent(ev client.DisplayEvent) {
 func (t *tui) applyNewMessage(ev client.DisplayEvent) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.recipientRev++
+	if !ev.RecipientUnchanged {
+		t.recipientRev++
+	}
 
 	if len(t.views) == 0 || t.activeViewIndex < 0 || t.activeViewIndex >= len(t.views) {
 		return
@@ -465,13 +488,15 @@ func (t *tui) appendLogLine(line string) {
 	t.dirty.Store(true)
 }
 
-// lineDelta is the set of lines a scrollback view still has to write.
+// lineDelta is the contiguous, still-unwritten slice of a bounded line buffer.
+// The view reconciles it by absolute index, so eviction needs a head drop, not
+// a full-text rewrite.
 type lineDelta struct {
-	rewrite bool     // rebuild the view from lines instead of appending
-	lines   []string // display lines in order
-	chats   []string // structured group source for each line
-	upto    int64    // absolute index of the last included line
-	first   int64    // oldest retained model line, independent of scroll position
+	lines []string // canonical display lines, starting at from
+	chats []string // structured group source for each line
+	from  int64    // absolute index of lines[0]
+	upto  int64    // absolute index of the last included line
+	first int64    // oldest retained model line, independent of scroll position
 }
 
 // modelSnapshot is a consistent copy of the shared model for one render pass.
@@ -512,8 +537,8 @@ func (t *tui) snapshot() modelSnapshot {
 		recipientRev:  t.recipientRev,
 		dropped:       t.dropped,
 		dropNotice:    t.dropNotice,
-		output:        t.lineDeltaLocked(t.output, t.outputSynced, t.outputFirst),
-		logs:          t.lineDeltaLocked(t.logs, t.logsSynced, t.logsFirst),
+		output:        t.lineDeltaLocked(t.output, t.outputSynced),
+		logs:          t.lineDeltaLocked(t.logs, t.logsSynced),
 	}
 	// Older acknowledgements must not roll back a newer keyboard choice.
 	// Fold the local overlay into this immutable snapshot under the same lock.
@@ -525,28 +550,33 @@ func (t *tui) snapshot() modelSnapshot {
 	return s
 }
 
-// lineDeltaLocked returns the lines after the sync cursor. When the cursor fell
-// out of the buffer the whole retained tail is returned for a rewrite.
-func (t *tui) lineDeltaLocked(buf *lineBuffer, synced, first int64) lineDelta {
-	if lines, ok := buf.unsynced(synced + 1); ok && first == buf.firstIndex() {
-		return lineDelta{lines: lines, chats: buf.chatSources(synced + 1), upto: buf.lastIndex(), first: first}
+// lineDeltaLocked returns the retained lines after the sync cursor. The result
+// always starts at max(synced+1, first): an append is one line, and a cursor
+// that fell behind eviction gets the retained tail once.
+func (t *tui) lineDeltaLocked(buf *lineBuffer, synced int64) lineDelta {
+	first := buf.firstIndex()
+	from := max(synced+1, first)
+	last := buf.lastIndex()
+	if last < first {
+		return lineDelta{from: from, upto: last, first: first}
 	}
-	return lineDelta{rewrite: true, lines: buf.snapshot(), chats: buf.chatSources(buf.firstIndex()), upto: buf.lastIndex(), first: buf.firstIndex()}
+	if from > last {
+		return lineDelta{from: last + 1, upto: last, first: first}
+	}
+	return lineDelta{lines: buf.linesFrom(from), chats: buf.chatSources(from), from: from, upto: last, first: first}
 }
 
-// setOutputSynced records that the message view wrote everything up to upto.
-func (t *tui) setOutputSynced(upto, first int64) {
+// setOutputSynced records that the message view folded everything up to upto.
+func (t *tui) setOutputSynced(upto int64) {
 	t.mu.Lock()
 	t.outputSynced = upto
-	t.outputFirst = first
 	t.mu.Unlock()
 }
 
-// setLogsSynced records that the log view wrote everything up to upto.
-func (t *tui) setLogsSynced(upto, first int64) {
+// setLogsSynced records that the log view folded everything up to upto.
+func (t *tui) setLogsSynced(upto int64) {
 	t.mu.Lock()
 	t.logsSynced = upto
-	t.logsFirst = first
 	t.mu.Unlock()
 }
 
@@ -651,13 +681,10 @@ const (
 	titleInputShort    = "Alt+I"
 )
 
-// initViews builds every widget. Scrollback views keep a bounded buffer
-// (SetMaxLines) and follow the tail until the user scrolls.
+// initViews builds every widget. Scan scrollback is bounded by the model and
+// windowed into the tview widgets by scrollbackView.
 func (t *tui) initViews() {
-	t.logsView = tview.NewTextView().
-		SetDynamicColors(true).
-		SetScrollable(true).
-		SetMaxLines(maxLogLines)
+	t.logsView = newScrollbackView(false)
 	t.logsView.SetBorder(true).SetTitle(titleLogs).SetTitleAlign(tview.AlignLeft)
 	t.logsView.ScrollToEnd()
 
@@ -668,15 +695,12 @@ func (t *tui) initViews() {
 	t.detailsView.SetBorder(true).SetTitle(titleInfo).SetTitleAlign(tview.AlignLeft)
 	t.installInfoScroll()
 
-	t.outputView = tview.NewTextView().
-		SetDynamicColors(true).
-		SetScrollable(true).
-		SetWordWrap(true)
+	t.outputView = newScrollbackView(true)
 	t.outputView.SetBorder(true).SetTitle(titleMessages).SetTitleAlign(tview.AlignLeft)
 	t.outputView.ScrollToEnd()
 	// The model bounds retained text. A second wrapped-line cap would discard
 	// different messages on narrow screens and desynchronize the thread gutter.
-	t.outputPane = newThreadView(t.outputView)
+	t.outputPane = t.outputView
 
 	t.input = tview.NewInputField().
 		SetLabelStyle(tcell.StyleDefault.Foreground(t.theme.titleColor)).
@@ -686,7 +710,7 @@ func (t *tui) initViews() {
 	t.input.SetAutocompleteUseTags(false)
 	t.input.SetAutocompleteFunc(t.handleAutocomplete)
 	t.input.SetAcceptanceFunc(func(text string, _ rune) bool {
-		if graphemeLen(text) > client.MaxMsgLen {
+		if len(text) > client.MaxMsgLen && graphemeLen(text) > client.MaxMsgLen {
 			t.bell()
 			return false
 		}

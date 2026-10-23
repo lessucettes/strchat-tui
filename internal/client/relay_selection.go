@@ -5,7 +5,6 @@ import (
 	"slices"
 	"time"
 
-	"github.com/mmcloughlin/geohash"
 	"github.com/nbd-wtf/go-nostr"
 )
 
@@ -62,15 +61,19 @@ func (c *client) relayCovers(url string, now time.Time) bool {
 
 // A newly used reserve, including a shared socket gaining another chat, needs
 // the same bounded recovery overlap as a reconnect. Ordinary joins stay live-first.
+// The per-chat pool consulted here is the cached immutable plan, so this no
+// longer rebuilds and re-normalizes the relay list for every (relay, chat) pair.
 func (c *client) subscriptionForRelay(url string, chats []string) relaySubscription {
-	update := relaySubscription{chats: chats, since: nostr.Now(), keys: make(map[string]string)}
+	c.syncRelayPlanning()
+	update := relaySubscription{chats: chats, since: nostr.Now(), keys: make(map[string]string, len(chats))}
 	for _, chat := range chats {
 		if session, ok := c.chatKeys[chat]; ok {
 			update.keys[session.pubKey] = session.privKey
 		}
 	}
 	for _, chat := range chats {
-		if _, isGeo := c.geoPlans[chat]; isGeo && !slices.Contains(c.getRelayPoolForChat(chat), url) {
+		plan := c.relayPlanFor(chat)
+		if plan.geo && !plan.contains(url) {
 			update.since -= 30
 			break
 		}
@@ -81,20 +84,14 @@ func (c *client) subscriptionForRelay(url string, chats []string) relaySubscript
 // Preserve each catalog's nearest five independently. Only failed primaries
 // open a deficit; a healthy reserve never cancels primary recovery attempts.
 func (c *client) geoReserveForChat(chat string, now time.Time) ([]string, bool) {
-	lists, ok := c.geoPlans[chat]
-	if !ok {
-		var err error
-		lists, err = rankedGeoRelays(chat, 2*defaultRelayCount)
-		if err != nil {
-			return nil, true
-		}
-		c.geoPlans[chat] = lists
+	c.syncRelayPlanning()
+	plan := c.relayPlanFor(chat)
+	lists := plan.lists
+	if lists == nil {
+		return nil, true
 	}
 	var reserves []string
-	selected := make(map[string]bool)
-	for _, url := range c.getRelayPoolForChat(chat) {
-		selected[url] = true
-	}
+	var chosen map[string]struct{}
 	exhausted := false
 	for _, list := range lists {
 		primaryCount := min(defaultRelayCount, len(list))
@@ -110,14 +107,20 @@ func (c *client) geoReserveForChat(chat string, now time.Time) ([]string, bool) 
 				if missing == 0 {
 					break
 				}
-				if selected[url] {
+				if plan.contains(url) {
+					continue
+				}
+				if _, selected := chosen[url]; selected {
 					continue
 				}
 				worker := c.relays[url]
 				isConnected := worker != nil && worker.connected
 				if isConnected == connected && c.relayEligible(url, now) {
 					reserves = append(reserves, url)
-					selected[url] = true
+					if chosen == nil {
+						chosen = make(map[string]struct{})
+					}
+					chosen[url] = struct{}{}
 					missing--
 				}
 			}
@@ -128,6 +131,7 @@ func (c *client) geoReserveForChat(chat string, now time.Time) ([]string, bool) 
 }
 
 func (c *client) selectRelaySubscriptions(chats []string, now time.Time) (map[string][]string, string) {
+	c.syncRelayPlanning()
 	c.nextRelayRetry = time.Time{}
 	// Also do this before retiring a view's sockets: their successful stable
 	// lifetime must clear old failure penalties even if no later error occurs.
@@ -141,20 +145,17 @@ func (c *client) selectRelaySubscriptions(chats []string, now time.Time) (map[st
 			delete(c.geoPlans, chat)
 		}
 	}
+	c.pruneRelayPlans(chats)
 	primary := make([][]string, len(chats))
 	anchors := make([][]string, len(chats))
 	reserve := make([][]string, len(chats))
 	exhausted, usingReserve, unavailable := false, false, false
 	for i, chat := range chats {
-		pool := c.getRelayPoolForChat(chat)
-		isGeo := geohash.Validate(chat) == nil
-		var rendezvous []string
-		if isGeo {
-			rendezvous = primaryGeoRelays(c.geoPlans[chat])
-		}
-		for _, url := range pool {
+		plan := c.relayPlanFor(chat)
+		isGeo := plan.geo
+		for _, url := range plan.pool {
 			if c.relayEligible(url, now) {
-				if isGeo && !slices.Contains(rendezvous, url) {
+				if isGeo && !plan.inRendezvous(url) {
 					anchors[i] = append(anchors[i], url)
 				} else {
 					primary[i] = append(primary[i], url)

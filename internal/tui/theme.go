@@ -160,7 +160,7 @@ func (t *tui) applyTheme() {
 	}
 	text := tcell.StyleDefault.Foreground(th.textColor).Background(th.backgroundColor)
 	selected := tcell.StyleDefault.Foreground(th.backgroundColor).Background(th.titleColor)
-	for _, view := range []*tview.TextView{t.logsView, t.detailsView, t.outputView, t.hints} {
+	for _, view := range []*tview.TextView{t.logsView.TextView, t.detailsView, t.outputView.TextView, t.hints} {
 		view.SetTextStyle(text)
 	}
 	t.chatList.SetMainTextStyle(text).SetSecondaryTextStyle(text).SetSelectedStyle(selected)
@@ -168,9 +168,11 @@ func (t *tui) applyTheme() {
 		SetFieldStyle(text.Foreground(th.inputTextColor).Background(th.inputBgColor)).
 		SetAutocompleteStyles(th.backgroundColor, text, selected)
 	t.themeColors = th.scrollbackColors()
-	t.mu.Lock()
-	t.outputSynced, t.logsSynced = -2, -2 // Repaint retained canonical lines.
-	t.mu.Unlock()
+	// Scrollback records keep canonical default-theme markup; only the widget
+	// window has to be recolored, so no history rewrite or cursor reset is
+	// needed here.
+	t.outputView.invalidateWindow()
+	t.logsView.invalidateWindow()
 	t.detailsKeySet = false
 	t.updateFocusBorders()
 	t.updateHints()

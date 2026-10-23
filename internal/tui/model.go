@@ -101,31 +101,25 @@ func (b *lineBuffer) chatSources(from int64) []string {
 // lastIndex returns the absolute index of the newest retained line, or -1.
 func (b *lineBuffer) lastIndex() int64 { return b.first + int64(b.count) - 1 }
 
-// snapshot returns all retained lines in display order.
-func (b *lineBuffer) snapshot() []string {
-	out := make([]string, 0, b.count)
-	for i := 0; i < b.count; i++ {
-		out = append(out, b.lines[(b.head+i)%b.maxLines])
+// linesFrom returns the retained lines with absolute index >= from, in display
+// order. It returns nil when the range is empty or starts before the oldest
+// retained line; callers clamp to firstIndex.
+func (b *lineBuffer) linesFrom(from int64) []string {
+	if b.count == 0 || from < b.first || from > b.lastIndex() {
+		return nil
+	}
+	skip := int(from - b.first)
+	out := make([]string, b.count-skip)
+	for i := skip; i < b.count; i++ {
+		out[i-skip] = b.lines[(b.head+i)%b.maxLines]
 	}
 	return out
 }
 
-// unsynced returns the retained lines with absolute index >= from. The ok
-// result is false when the caller's cursor fell out of the buffer, meaning the
-// view must be rewritten from a full snapshot instead.
-func (b *lineBuffer) unsynced(from int64) (lines []string, ok bool) {
-	if from < b.first {
-		return nil, false
-	}
-	if b.count == 0 || from > b.lastIndex() {
-		return nil, true
-	}
-	skip := int(from - b.first)
-	out := make([]string, 0, b.count-skip)
-	for i := skip; i < b.count; i++ {
-		out = append(out, b.lines[(b.head+i)%b.maxLines])
-	}
-	return out, true
+// snapshot returns every retained line in display order. It is a diagnostic
+// helper: rendering uses linesFrom so a saturated append copies one line.
+func (b *lineBuffer) snapshot() []string {
+	return b.linesFrom(b.first)
 }
 
 // sanitizeForDisplay makes untrusted text safe for a dynamic-colors TextView:

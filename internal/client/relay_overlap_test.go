@@ -77,7 +77,7 @@ func TestRelaySubscriptionClampsQueuedRecoveryOverlap(t *testing.T) {
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), transportWaitOp)
 	defer cancel()
-	conn, _, err := websocket.Dial(ctx, server.url, nil)
+	conn, err := dialRelayTransport(ctx, server.url, nil, connectTimeout)
 	if err != nil {
 		t.Fatal(err)
 	}

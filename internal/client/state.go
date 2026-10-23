@@ -8,8 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
-
-	"github.com/mmcloughlin/geohash"
 )
 
 // Chat/Group View
@@ -25,7 +23,7 @@ func (c *client) joinChats(payload string) {
 
 outer:
 	for _, name := range chatNames {
-		if geohash.Validate(name) != nil {
+		if !isGeohashName(name) {
 			normalizedName, err := normalizeAndValidateChatName(name)
 			if err != nil {
 				c.emit(DisplayEvent{Type: "ERROR", Content: err.Error()})
@@ -367,7 +365,6 @@ func (c *client) getHelp() {
 
 func (c *client) handleNickCompletion(prefix string) {
 	prefix = strings.TrimPrefix(prefix, "@")
-	var entries []string
 
 	activeView := c.getActiveView()
 	if activeView == nil {
@@ -384,31 +381,72 @@ func (c *client) handleNickCompletion(prefix string) {
 		relevantChats[activeView.Name] = struct{}{}
 	}
 
-	byIdentifier := make(map[string][]string)
-	for _, key := range c.userContext.Keys() {
-		if value, ok := c.userContext.Get(key); ok {
-			if _, isActiveChat := relevantChats[value.chat]; isActiveChat {
-				if strings.HasPrefix(value.nick, prefix) {
-					identifier := fmt.Sprintf("@%s#%s ", value.nick, value.shortPubKey)
-					byIdentifier[identifier] = append(byIdentifier[identifier], fmt.Sprintf("@%s#%s ", value.nick, key))
-				}
-			}
+	// Count collisions across every match before selecting the first ten.
+	// A completion query must not refresh every participant's LRU recency.
+	type identifier struct{ nick, suffix string }
+	counts := make(map[identifier]int)
+	keys := c.userContext.Keys()
+	for _, key := range keys {
+		value, _ := c.userContext.Peek(key)
+		if _, active := relevantChats[value.chat]; active && strings.HasPrefix(value.nick, prefix) {
+			counts[identifier{value.nick, value.shortPubKey}]++
 		}
 	}
-	for identifier, full := range byIdentifier {
-		if len(full) == 1 {
-			entries = append(entries, identifier)
-		} else {
-			entries = append(entries, full...)
+	var entries []string
+	hasCollisions := false
+	for id, count := range counts {
+		if count > 1 {
+			hasCollisions = true
+			continue
 		}
+		entries = addCompletion(entries, id.nick, id.suffix)
 	}
-
-	sort.Strings(entries)
-	if len(entries) > 10 {
-		entries = entries[:10]
+	if !hasCollisions {
+		c.emit(DisplayEvent{Type: "NICK_COMPLETION_RESULT", Payload: entries})
+		return
+	}
+	// Only collisions need a second cache scan to recover full public keys.
+	for _, key := range keys {
+		value, _ := c.userContext.Peek(key)
+		if _, active := relevantChats[value.chat]; !active || !strings.HasPrefix(value.nick, prefix) {
+			continue
+		}
+		if counts[identifier{value.nick, value.shortPubKey}] > 1 {
+			entries = addCompletion(entries, value.nick, key)
+		}
 	}
 
 	c.emit(DisplayEvent{Type: "NICK_COMPLETION_RESULT", Payload: entries})
+}
+
+func addCompletion(entries []string, nick, suffix string) []string {
+	if len(entries) == 10 && !completionLess(nick, suffix, entries[9]) {
+		return entries
+	}
+	entry := "@" + nick + "#" + suffix + " "
+	at := sort.SearchStrings(entries, entry)
+	if len(entries) < 10 {
+		entries = append(entries, "")
+	}
+	copy(entries[at+1:], entries[at:len(entries)-1])
+	entries[at] = entry
+	return entries
+}
+
+// completionLess compares the prospective entry without allocating its text.
+// Comparing nicknames alone is incorrect when one contains '#' or whitespace.
+func completionLess(nick, suffix, entry string) bool {
+	for _, part := range [...]string{"@", nick, "#", suffix, " "} {
+		n := min(len(part), len(entry))
+		if cmp := strings.Compare(part[:n], entry[:n]); cmp != 0 {
+			return cmp < 0
+		}
+		if n < len(part) {
+			return false
+		}
+		entry = entry[n:]
+	}
+	return len(entry) > 0
 }
 
 // Core State Primitives
