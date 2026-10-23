@@ -13,7 +13,6 @@ import (
 func TestSetThemePersistsAcrossReload(t *testing.T) {
 	c, events := testClient(t)
 	c.config.path = filepath.Join(t.TempDir(), "config.json")
-	c.config.PrivateKey = testSecret(t)
 	c.config.Nick = "alice"
 	for _, name := range []string{"blue-gray", "red-gold", "monochrome", "default"} {
 		c.handleAction(UserAction{Type: "SET_THEME", Payload: name})

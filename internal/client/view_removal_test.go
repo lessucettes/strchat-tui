@@ -17,7 +17,6 @@ func TestDeletingViewActivatesRemainingChatIdentity(t *testing.T) {
 				{Name: "group", IsGroup: true, Children: []string{"lobby", "other"}},
 			}
 			c.config.ActiveViewName = active
-			c.sk = transportTestKey
 			t.Cleanup(func() { c.cancel(); c.wg.Wait() })
 
 			c.deleteView(active)
@@ -26,9 +25,7 @@ func TestDeletingViewActivatesRemainingChatIdentity(t *testing.T) {
 			if !ok || session.privKey == "" {
 				t.Fatal("fallback chat has no ephemeral identity")
 			}
-			if session.privKey == c.sk {
-				t.Fatal("fallback chat uses the persistent main key")
-			}
+
 			// Exercise the actual publish boundary without running a socket worker.
 			c.relays["local"] = &managedRelay{connected: true, chats: []string{"other"}, cancel: func() {}}
 			c.publishMessage("hello from the fallback chat")

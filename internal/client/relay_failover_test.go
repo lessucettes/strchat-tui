@@ -66,7 +66,8 @@ func TestGeoReserveReplacesFailedPrimaryAndReturns(t *testing.T) {
 		// Reinsert a recovered primary as an inert, stable connected handle.
 		c.relayRetries.Add(list[0], relayRetry{delay: time.Minute})
 		c.relays[list[0]] = &managedRelay{url: list[0], connected: true,
-			connectedAt: time.Now().Add(-2 * time.Minute), chats: []string{chat}, cancel: func() {}}
+			connectedAt: time.Now().Add(-2 * time.Minute), chats: []string{chat},
+			keys: c.subscriptionForRelay(list[0], []string{chat}).keys, cancel: func() {}}
 	}
 	c.updateAllSubscriptions()
 	for _, list := range lists {

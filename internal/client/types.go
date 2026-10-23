@@ -86,7 +86,7 @@ type DisplayEvent struct {
 type StateUpdate struct {
 	Views           []View
 	ActiveViewIndex int
-	Nick            string
+	ChatNicks       map[string]string // public display metadata, no signing material
 }
 
 type chatSession struct {

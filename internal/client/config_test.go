@@ -19,10 +19,9 @@ import (
 )
 
 // Tests for config loading, validation and persistence hardening:
-//   - the on-disk JSON shape is unchanged and backward compatible,
-//   - a missing file still produces a fresh default identity,
-//   - malformed files and unusable private keys fail with errors that never
-//     echo key material,
+//   - the on-disk JSON holds no private key or other identity/secret field,
+//   - a missing file produces a fresh secret-free default,
+//   - malformed files fail with decode errors that never echo file contents,
 //   - saves are atomic (temp file + rename) and owner-only where the platform
 //     supports it.
 
@@ -56,29 +55,31 @@ func dirEntryNames(t *testing.T, dir string) []string {
 	return names
 }
 
-// testSecret returns a fresh, syntactically valid nostr secret key.
-func testSecret(t *testing.T) string {
+// assertNoSecretFields fails when raw config JSON carries an identity or
+// secret-bearing field. The client keeps no persistent key, so no credential
+// may ever be written to disk.
+func assertNoSecretFields(t *testing.T, raw []byte) {
 	t.Helper()
-	sk := nostr.GeneratePrivateKey()
-	if len(sk) != 64 {
-		t.Fatalf("generated secret key has %d characters, want 64", len(sk))
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatalf("config is not a JSON object: %v", err)
 	}
-	return sk
-}
-
-// requireNoSecretLeak fails the test if err mentions secret or a prefix of it.
-func requireNoSecretLeak(t *testing.T, err error, secret string) {
-	t.Helper()
-	message := err.Error()
-	if secret != "" && strings.Contains(message, secret) {
-		t.Fatalf("error message leaks the private key: %q", message)
-	}
-	if len(secret) > 16 && strings.Contains(message, secret[:16]) {
-		t.Fatalf("error message leaks private key material: %q", message)
+	for _, key := range []string{"private_key", "secret_key", "nsec"} {
+		if _, ok := fields[key]; ok {
+			t.Errorf("config contains secret field %q: %s", key, raw)
+		}
 	}
 }
 
-func TestLoadConfigFromCreatesPrivateDefault(t *testing.T) {
+// requireNoContentEcho fails the test if err repeats raw file content.
+func requireNoContentEcho(t *testing.T, err error, marker string) {
+	t.Helper()
+	if strings.Contains(err.Error(), marker) {
+		t.Fatalf("error message echoes file content: %q", err.Error())
+	}
+}
+
+func TestLoadConfigFromCreatesSecretFreeDefault(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 
@@ -89,11 +90,11 @@ func TestLoadConfigFromCreatesPrivateDefault(t *testing.T) {
 	if conf.path != path {
 		t.Errorf("config path = %q, want %q", conf.path, path)
 	}
-	if len(conf.PrivateKey) != 64 {
-		t.Errorf("default private key has %d characters, want 64", len(conf.PrivateKey))
+	if conf.Theme != DefaultTheme {
+		t.Errorf("default theme = %q, want %q", conf.Theme, DefaultTheme)
 	}
-	if _, err := nostr.GetPublicKey(conf.PrivateKey); err != nil {
-		t.Errorf("default private key is unusable: %v", err)
+	if conf.Nick != "" || len(conf.Views) != 0 || conf.ActiveViewName != "" {
+		t.Errorf("default config is not empty: %+v", conf)
 	}
 
 	info, err := os.Stat(path)
@@ -108,24 +109,31 @@ func TestLoadConfigFromCreatesPrivateDefault(t *testing.T) {
 		t.Errorf("config directory contains %v, want only config.json", names)
 	}
 
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read default config: %v", err)
+	}
+	assertNoSecretFields(t, raw)
+
 	reloaded, err := loadConfigFrom(path)
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if reloaded.PrivateKey != conf.PrivateKey {
-		t.Error("default private key was not persisted")
+	if reloaded.path != conf.path || reloaded.Nick != "" || reloaded.Theme != DefaultTheme ||
+		reloaded.ActiveViewName != "" || len(reloaded.Views) != 0 || len(reloaded.AnchorRelays) != 0 {
+		t.Errorf("default config did not round trip: %+v", reloaded)
 	}
 }
 
-func TestLoadConfigFromRejectsMalformedJSONWithoutLeakingSecret(t *testing.T) {
-	sk := testSecret(t)
+func TestLoadConfigFromRejectsMalformedJSONWithoutEchoingContent(t *testing.T) {
+	marker := "SENSITIVE-MARKER"
 	cases := map[string]string{
-		"truncated":    `{"private_key":"` + sk + `","views":[`,
+		"truncated":    `{"nick":"` + marker + `","views":[`,
 		"second_value": `{} {}`,
 		"null":         `null`,
-		"trailing":     `{"private_key":"` + sk + `",}`,
-		"wrong_types":  `{"private_key":"` + sk + `","views":"not-a-list"}`,
-		"not_json":     sk,
+		"trailing":     `{"nick":"` + marker + `",}`,
+		"wrong_types":  `{"nick":"` + marker + `","views":"not-a-list"}`,
+		"not_json":     marker,
 	}
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -139,43 +147,15 @@ func TestLoadConfigFromRejectsMalformedJSONWithoutLeakingSecret(t *testing.T) {
 			if !strings.Contains(err.Error(), "decode") {
 				t.Errorf("error should identify the decode failure, got %q", err)
 			}
-			requireNoSecretLeak(t, err, sk)
+			requireNoContentEcho(t, err, marker)
 		})
 	}
 }
 
-func TestLoadConfigFromRejectsInvalidPrivateKey(t *testing.T) {
-	sk := testSecret(t)
+func TestLoadConfigFromKeepsExistingFileUntouched(t *testing.T) {
 	cases := map[string]string{
-		"too_short": strings.Repeat("ab", 31),
-		"zero":      strings.Repeat("0", 64),
-		"overflow":  strings.Repeat("f", 64),
-		"too_long":  sk + "00",
-		"non_hex":   strings.Repeat("zz", 32),
-		"padded":    " " + sk + " ",
-	}
-	for name, key := range cases {
-		t.Run(name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "config.json")
-			writeTestFile(t, path, `{"private_key":"`+key+`"}`, 0o600)
-
-			_, err := loadConfigFrom(path)
-			if err == nil {
-				t.Fatal("expected an error for an invalid private key")
-			}
-			if !strings.Contains(err.Error(), "private_key") {
-				t.Errorf("error should name the invalid field, got %q", err)
-			}
-			requireNoSecretLeak(t, err, key)
-		})
-	}
-}
-
-func TestLoadConfigFromAllowsMissingPrivateKey(t *testing.T) {
-	cases := map[string]string{
-		"empty_string": `{"private_key":""}`,
-		"field_absent": `{}`,
-		"other_fields": `{"nick":"alice","anchor_relays":["wss://relay.example.com"]}`,
+		"empty_object":  `{}`,
+		"settings_only": `{"nick":"alice","anchor_relays":["wss://relay.example.com"]}`,
 	}
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -187,8 +167,8 @@ func TestLoadConfigFromAllowsMissingPrivateKey(t *testing.T) {
 			if err != nil {
 				t.Fatalf("loadConfigFrom: %v", err)
 			}
-			if conf.PrivateKey != "" {
-				t.Errorf("private key = %q, want empty", conf.PrivateKey)
+			if conf.path != path {
+				t.Errorf("config path = %q, want %q", conf.path, path)
 			}
 			// Loading must not rewrite an existing file.
 			raw, err := os.ReadFile(path)
@@ -203,9 +183,7 @@ func TestLoadConfigFromAllowsMissingPrivateKey(t *testing.T) {
 }
 
 func TestLoadConfigFromPreservesExistingShape(t *testing.T) {
-	sk := testSecret(t)
 	original := `{
-  "private_key": "` + sk + `",
   "nick": "alice",
   "views": [
     {"name": "berlin", "is_group": false, "children": ["u33dc0"], "pow": 9},
@@ -223,9 +201,6 @@ func TestLoadConfigFromPreservesExistingShape(t *testing.T) {
 	conf, err := loadConfigFrom(path)
 	if err != nil {
 		t.Fatalf("loadConfigFrom: %v", err)
-	}
-	if conf.PrivateKey != sk {
-		t.Error("private key changed on load")
 	}
 	if conf.Nick != "alice" || conf.ActiveViewName != "group-one" {
 		t.Errorf("scalar fields changed: nick=%q active_view=%q", conf.Nick, conf.ActiveViewName)
@@ -268,11 +243,12 @@ func TestLoadConfigFromPreservesExistingShape(t *testing.T) {
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		t.Fatalf("saved config is not valid JSON: %v", err)
 	}
-	for _, key := range []string{"private_key", "nick", "views", "active_view_name", "anchor_relays", "blocked_users", "filters", "mutes"} {
+	for _, key := range []string{"nick", "views", "active_view_name", "anchor_relays", "blocked_users", "filters", "mutes"} {
 		if _, ok := fields[key]; !ok {
 			t.Errorf("saved config lost JSON key %q", key)
 		}
 	}
+	assertNoSecretFields(t, raw)
 }
 
 func TestLoadConfigFromRejectsOutOfRangePoW(t *testing.T) {
@@ -311,7 +287,7 @@ func TestLoadConfigFromAcceptsBoundedPoW(t *testing.T) {
 
 func TestSaveRejectsOutOfRangePoW(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	conf := &config{PrivateKey: testSecret(t), Views: []View{{Name: "berlin", PoW: maxPoW + 1}}, path: path}
+	conf := &config{Views: []View{{Name: "berlin", PoW: maxPoW + 1}}, path: path}
 
 	err := conf.save()
 	if err == nil {
@@ -319,6 +295,22 @@ func TestSaveRejectsOutOfRangePoW(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "pow") {
 		t.Errorf("error should mention the pow field, got %q", err)
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Errorf("config file exists after a rejected save (stat err: %v)", statErr)
+	}
+}
+
+func TestSaveRejectsInvalidRelayWithoutWriting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	conf := &config{AnchorRelays: []string{"http://relay.example.com"}, path: path}
+
+	err := conf.save()
+	if err == nil {
+		t.Fatal("expected save to reject an invalid relay URL")
+	}
+	if !strings.Contains(err.Error(), "relay") {
+		t.Errorf("error should mention the relay field, got %q", err)
 	}
 	if _, statErr := os.Stat(path); !errors.Is(statErr, fs.ErrNotExist) {
 		t.Errorf("config file exists after a rejected save (stat err: %v)", statErr)
@@ -336,7 +328,7 @@ func TestSaveWithEmptyPathCreatesNothing(t *testing.T) {
 		t.Fatalf("chmod: %v", err)
 	}
 
-	conf := &config{PrivateKey: testSecret(t)} // path deliberately left empty
+	conf := &config{Nick: "alice"} // path deliberately left empty
 	err := conf.save()
 	if err == nil {
 		t.Fatal("expected save to fail without a config path")
@@ -352,7 +344,7 @@ func TestSaveWithEmptyPathCreatesNothing(t *testing.T) {
 func TestSaveIsPrivateAndLeavesNoTemporaryFiles(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "nested", "deeper", "config.json")
-	conf := &config{PrivateKey: testSecret(t), Nick: "alice", path: path}
+	conf := &config{Nick: "alice", path: path}
 
 	if err := conf.save(); err != nil {
 		t.Fatalf("save: %v", err)
@@ -398,17 +390,18 @@ func TestSaveIsPrivateAndLeavesNoTemporaryFiles(t *testing.T) {
 	if err := json.Unmarshal(raw, &probe); err != nil {
 		t.Fatalf("saved config is not complete JSON: %v", err)
 	}
-	if probe.Nick != "alice" || probe.PrivateKey != conf.PrivateKey {
+	if probe.Nick != "alice" {
 		t.Errorf("saved config is incomplete: %+v", probe)
 	}
+	assertNoSecretFields(t, raw)
 }
 
 func TestSaveTightensExistingFilePermissions(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	writeTestFile(t, path, `{"private_key":"","nick":"old"}`, 0o644)
+	writeTestFile(t, path, `{"nick":"old"}`, 0o644)
 
-	conf := &config{PrivateKey: testSecret(t), Nick: "new", path: path}
+	conf := &config{Nick: "new", path: path}
 	if err := conf.save(); err != nil {
 		t.Fatalf("save: %v", err)
 	}
@@ -433,25 +426,10 @@ func TestSaveTightensExistingFilePermissions(t *testing.T) {
 	if err := json.Unmarshal(raw, &probe); err != nil {
 		t.Fatalf("saved config is not valid JSON: %v", err)
 	}
-	if probe.Nick != "new" || probe.PrivateKey != conf.PrivateKey {
+	if probe.Nick != "new" {
 		t.Errorf("saved config does not match: %+v", probe)
 	}
-}
-
-func TestSaveRejectsInvalidPrivateKeyWithoutWriting(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-	key := strings.Repeat("zz", 32)
-
-	conf := &config{PrivateKey: key, path: path}
-	err := conf.save()
-	if err == nil {
-		t.Fatal("expected save to reject an invalid private key")
-	}
-	requireNoSecretLeak(t, err, key)
-	if _, statErr := os.Stat(path); !errors.Is(statErr, fs.ErrNotExist) {
-		t.Errorf("config file exists after a rejected save (stat err: %v)", statErr)
-	}
+	assertNoSecretFields(t, raw)
 }
 
 func TestSaveRemovesTemporaryFileWhenRenameFails(t *testing.T) {
@@ -464,7 +442,7 @@ func TestSaveRemovesTemporaryFileWhenRenameFails(t *testing.T) {
 	marker := filepath.Join(path, "marker")
 	writeTestFile(t, marker, "x", 0o600)
 
-	conf := &config{PrivateKey: testSecret(t), path: path}
+	conf := &config{Nick: "alice", path: path}
 	if err := conf.save(); err == nil {
 		t.Fatal("expected save to fail when the target cannot be replaced")
 	}
@@ -480,8 +458,8 @@ func TestSaveRemovesTemporaryFileWhenRenameFails(t *testing.T) {
 func TestConcurrentSavesLeaveOneValidGeneration(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	a := &config{PrivateKey: testSecret(t), Nick: "alice", path: path}
-	b := &config{PrivateKey: testSecret(t), Nick: "bob", path: path}
+	a := &config{Nick: "alice", AnchorRelays: []string{"wss://a.example.com"}, path: path}
+	b := &config{Nick: "bob", AnchorRelays: []string{"wss://b.example.com"}, path: path}
 
 	var wg sync.WaitGroup
 	for _, conf := range []*config{a, b} {
@@ -508,11 +486,11 @@ func TestConcurrentSavesLeaveOneValidGeneration(t *testing.T) {
 	if got.Nick != "alice" && got.Nick != "bob" {
 		t.Errorf("nick = %q, want one of alice/bob", got.Nick)
 	}
-	// The nick and the key must come from the same save generation.
-	if got.Nick == "alice" && got.PrivateKey != a.PrivateKey {
+	// The nick and the relay set must come from the same save generation.
+	if got.Nick == "alice" && !reflect.DeepEqual(got.AnchorRelays, a.AnchorRelays) {
 		t.Error("config mixes fields from different save generations")
 	}
-	if got.Nick == "bob" && got.PrivateKey != b.PrivateKey {
+	if got.Nick == "bob" && !reflect.DeepEqual(got.AnchorRelays, b.AnchorRelays) {
 		t.Error("config mixes fields from different save generations")
 	}
 	if names := dirEntryNames(t, dir); len(names) != 1 || names[0] != "config.json" {
@@ -542,9 +520,11 @@ func TestGetAppConfigDirHonorsXDG(t *testing.T) {
 	if filepath.Dir(conf.path) != appDir {
 		t.Errorf("config path %q is not inside %q", conf.path, appDir)
 	}
-	if _, err := os.Stat(filepath.Join(appDir, "config.json")); err != nil {
-		t.Errorf("default config not created in app config dir: %v", err)
+	raw, err := os.ReadFile(filepath.Join(appDir, "config.json"))
+	if err != nil {
+		t.Fatalf("default config not created in app config dir: %v", err)
 	}
+	assertNoSecretFields(t, raw)
 }
 
 // BenchmarkExecutePublishMining measures the real balance the maxPoW bound is
@@ -576,7 +556,7 @@ func BenchmarkExecutePublishMining(b *testing.B) {
 
 func BenchmarkConfigSave(b *testing.B) {
 	dir := b.TempDir()
-	conf := &config{PrivateKey: strings.Repeat("ab", 32), Nick: "bench", path: filepath.Join(dir, "config.json")}
+	conf := &config{Nick: "bench", path: filepath.Join(dir, "config.json")}
 	b.ReportAllocs()
 	for b.Loop() {
 		if err := conf.save(); err != nil {
@@ -589,7 +569,6 @@ func BenchmarkConfigLoad(b *testing.B) {
 	dir := b.TempDir()
 	path := filepath.Join(dir, "config.json")
 	seed := &config{
-		PrivateKey:     strings.Repeat("ab", 32),
 		Nick:           "bench",
 		Views:          []View{{Name: "berlin", Children: []string{"u33dc0"}}},
 		ActiveViewName: "berlin",

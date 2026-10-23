@@ -527,10 +527,11 @@ func (t *tui) renderCompletion(s modelSnapshot) {
 	t.input.Autocomplete()
 }
 
-// renderInputLabel keeps the prompt label in sync with the active nick.
+// renderInputLabel shows the actual destination chat's sender, never a group identity.
 func (t *tui) renderInputLabel(s modelSnapshot) {
 	label := "> "
-	if t.plan.mode != modeTiny && s.nick != "" {
+	nick := t.composerNick(s)
+	if t.plan.mode != modeTiny && nick != "" {
 		maxWidth := maxInputLabelWidth
 		if screen := t.screen.Load(); screen != nil {
 			width, _ := (*screen).Size()
@@ -538,14 +539,14 @@ func (t *tui) renderInputLabel(s modelSnapshot) {
 				maxWidth = available
 			}
 		}
-		nick := strings.Map(func(r rune) rune {
+		nick = strings.Map(func(r rune) rune {
 			switch r {
 			case '\n', '\r', '	':
 				return ' '
 			default:
 				return r
 			}
-		}, sanitizeRunes(s.nick))
+		}, sanitizeRunes(nick))
 		maxNickWidth := maxWidth - len(" > ")
 		if uniseg.StringWidth(nick) > maxNickWidth {
 			maxNickWidth-- // Reserve one cell for the truncation marker.

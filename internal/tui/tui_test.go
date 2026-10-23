@@ -251,12 +251,22 @@ func testState(views ...client.View) client.DisplayEvent {
 	if len(views) == 0 {
 		views = []client.View{{Name: "chat"}}
 	}
+	nicks := make(map[string]string)
+	for _, view := range views {
+		if view.IsGroup {
+			for _, chat := range view.Children {
+				nicks[chat] = "me"
+			}
+		} else {
+			nicks[view.Name] = "me"
+		}
+	}
 	return client.DisplayEvent{
 		Type: "STATE_UPDATE",
 		Payload: client.StateUpdate{
 			Views:           views,
 			ActiveViewIndex: 0,
-			Nick:            "me",
+			ChatNicks:       nicks,
 		},
 	}
 }

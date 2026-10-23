@@ -40,7 +40,8 @@ func TestPrimaryRecoveryKeepsReserveNeededByAnotherChat(t *testing.T) {
 	}
 	c.relayRetries.Add(primary, relayRetry{delay: time.Minute})
 	c.relays[primary] = &managedRelay{url: primary, connected: true,
-		connectedAt: time.Now().Add(-2 * time.Minute), chats: []string{chat}, cancel: func() {}}
+		connectedAt: time.Now().Add(-2 * time.Minute), chats: []string{chat},
+		keys: c.subscriptionForRelay(primary, []string{chat}).keys, cancel: func() {}}
 	c.updateAllSubscriptions()
 	if c.relays[reserve] != shared || !slices.Equal(shared.chats, []string{other}) {
 		t.Fatalf("primary recovery retired another chat's working relay: %v", shared.chats)

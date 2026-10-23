@@ -63,7 +63,12 @@ func (c *client) relayCovers(url string, now time.Time) bool {
 // A newly used reserve, including a shared socket gaining another chat, needs
 // the same bounded recovery overlap as a reconnect. Ordinary joins stay live-first.
 func (c *client) subscriptionForRelay(url string, chats []string) relaySubscription {
-	update := relaySubscription{chats: chats, since: nostr.Now()}
+	update := relaySubscription{chats: chats, since: nostr.Now(), keys: make(map[string]string)}
+	for _, chat := range chats {
+		if session, ok := c.chatKeys[chat]; ok {
+			update.keys[session.pubKey] = session.privKey
+		}
+	}
 	for _, chat := range chats {
 		if _, isGeo := c.geoPlans[chat]; isGeo && !slices.Contains(c.getRelayPoolForChat(chat), url) {
 			update.since -= 30
@@ -206,6 +211,7 @@ func (c *client) updateAllSubscriptions() {
 	var chats []string
 	var viewName string
 	if view := c.getActiveView(); view != nil {
+		c.ensureViewIdentities(view)
 		viewName = view.Name
 		if view.IsGroup {
 			chats = slices.Clone(view.Children)

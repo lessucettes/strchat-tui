@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -65,7 +66,7 @@ type tui struct {
 	mu              sync.Mutex
 	views           []client.View
 	activeViewIndex int
-	nick            string
+	chatNicks       map[string]string
 	themeName       string
 	relays          []client.RelayInfo
 	stateRev        int64
@@ -376,8 +377,8 @@ func (t *tui) applyNewMessage(ev client.DisplayEvent) {
 		ownColor:  defaultTheme.inputTextColor,
 		metaColor: defaultTheme.logInfoColor,
 	}
-	if t.nick != "" {
-		style.mention = "@" + t.nick
+	if nick := t.chatNicks[ev.Chat]; nick != "" {
+		style.mention = "@" + nick
 	}
 	if active.IsGroup {
 		style.label = fmt.Sprintf("%s%s[-] ", colorTag(defaultTheme.titleColor), sanitizeLineForDisplay(ev.Chat))
@@ -409,7 +410,7 @@ func (t *tui) applyStateUpdate(ev client.DisplayEvent) {
 	t.mu.Lock()
 	t.views = slices.Clone(state.Views)
 	t.activeViewIndex = state.ActiveViewIndex
-	t.nick = state.Nick
+	t.chatNicks = maps.Clone(state.ChatNicks)
 	t.stateRev++
 	// Recipient routes depend on group membership as well as incoming users.
 	t.recipientRev++
@@ -477,7 +478,7 @@ type lineDelta struct {
 type modelSnapshot struct {
 	views         []client.View
 	activeIndex   int
-	nick          string
+	chatNicks     map[string]string
 	themeName     string
 	relays        []client.RelayInfo
 	stateRev      int64
@@ -500,7 +501,7 @@ func (t *tui) snapshot() modelSnapshot {
 	s := modelSnapshot{
 		views:         slices.Clone(t.views),
 		activeIndex:   t.activeViewIndex,
-		nick:          t.nick,
+		chatNicks:     t.chatNicks, // immutable after the collector clones it
 		themeName:     t.themeName,
 		relays:        slices.Clone(t.relays),
 		stateRev:      t.stateRev,

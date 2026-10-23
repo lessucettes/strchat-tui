@@ -15,7 +15,11 @@ import (
 func groupDestinationClient(t *testing.T, pow int) (*client, chan DisplayEvent) {
 	t.Helper()
 	c, events := testClient(t)
-	c.sk = transportTestKey
+	for _, chat := range []string{"lobby", "u33dc"} {
+		key := nostr.GeneratePrivateKey()
+		pk, _ := nostr.GetPublicKey(key)
+		c.chatKeys[chat] = chatSession{privKey: key, pubKey: pk, nick: "sender-" + chat}
+	}
 	c.config.Views = []View{
 		{Name: "lobby"},
 		{Name: "u33dc"},
@@ -74,7 +78,6 @@ func relayURLs(job publishJob) []string {
 
 func TestSendToExplicitGroupDestinationSelectsWireFormatAndRelays(t *testing.T) {
 	c, _ := groupDestinationClient(t, 4)
-	mainPK, _ := nostr.GetPublicKey(transportTestKey)
 
 	cases := []struct {
 		name     string
@@ -96,8 +99,9 @@ func TestSendToExplicitGroupDestinationSelectsWireFormatAndRelays(t *testing.T) 
 			if job.event.Kind != tt.kind || job.event.Tags.Find(tt.tag)[1] != tt.chat {
 				t.Fatalf("destination tag/kind = %v/%d, want %s/%d", job.event.Tags, job.event.Kind, tt.tag, tt.kind)
 			}
-			if job.key != transportTestKey || job.event.PubKey != mainPK {
-				t.Fatal("explicit group destination changed the signing identity")
+			session := c.chatKeys[tt.chat]
+			if job.key != session.privKey || job.event.PubKey != session.pubKey || job.event.Tags.Find("n")[1] != session.nick {
+				t.Fatal("group send did not use the destination chat's session identity")
 			}
 			if job.event.Content != "hello group" {
 				t.Fatalf("content = %q, want exact payload", job.event.Content)
@@ -152,6 +156,9 @@ func TestMentionOverridesExplicitDestination(t *testing.T) {
 		job := nextJob(t, c)
 		if job.chat != "u33dc" || job.event.Kind != geoChatKind || job.event.Tags.Find("g")[1] != "u33dc" {
 			t.Fatal("mention did not override the explicit destination")
+		}
+		if session := c.chatKeys["u33dc"]; job.key != session.privKey || job.event.PubKey != session.pubKey || job.event.Tags.Find("n")[1] != session.nick {
+			t.Fatal("mention did not select the overridden chat's sender")
 		}
 		if tag := job.event.Tags.Find("p"); tag == nil || tag[1] != fullKey {
 			t.Fatalf("recipient tag = %v, want %s", tag, fullKey)
@@ -307,21 +314,13 @@ func TestResolveMessageTargetPreviewMatchesSendWithoutSideEffects(t *testing.T) 
 	}
 }
 
-func mustPublicKey(t *testing.T, key string) string {
-	t.Helper()
-	pk, err := nostr.GetPublicKey(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return pk
-}
-
 func TestQueuedExplicitDestinationIsImmutableAfterFocusChange(t *testing.T) {
 	c, _ := groupDestinationClient(t, 3)
 	c.userContext.Add(strings.Repeat("b", 60)+"cafe", userContext{nick: "alice", shortPubKey: "cafe", chat: "u33dc"})
 	c.handleAction(UserAction{Type: "SEND_MESSAGE", Payload: "@alice#cafe hello", View: "group", Chat: "lobby"})
 	job := nextJob(t, c)
 
+	session := c.chatKeys["u33dc"]
 	// Everything the TUI could legitimately change afterwards: another view,
 	// a group that lost the member, PoW cleared, a new chat identity and dead
 	// relays.
@@ -336,7 +335,7 @@ func TestQueuedExplicitDestinationIsImmutableAfterFocusChange(t *testing.T) {
 	if job.chat != "u33dc" || job.event.Tags.Find("g")[1] != "u33dc" {
 		t.Fatal("queued job changed its destination with the active view")
 	}
-	if job.key != transportTestKey || job.event.PubKey != mustPublicKey(t, transportTestKey) {
+	if job.key != session.privKey || job.event.PubKey != session.pubKey {
 		t.Fatal("queued job changed its signing identity")
 	}
 	if tag := job.event.Tags.Find("p"); tag == nil || tag[1] != strings.Repeat("b", 60)+"cafe" {
@@ -366,7 +365,6 @@ func TestDestinationContextWithoutActiveChat(t *testing.T) {
 	for _, actionType := range []string{"SEND_MESSAGE", "RESOLVE_MESSAGE_TARGET"} {
 		t.Run(actionType, func(t *testing.T) {
 			c, events := testClient(t)
-			c.sk = transportTestKey
 			c.config.Views = nil
 			c.config.ActiveViewName = ""
 			c.handleAction(UserAction{Type: actionType, Payload: "hello", View: "group", Chat: "lobby"})

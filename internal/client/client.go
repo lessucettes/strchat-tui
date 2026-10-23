@@ -10,16 +10,15 @@ import (
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
-	"github.com/nbd-wtf/go-nostr"
 )
 
 // Run is the only owner of configuration, identities, caches and relay handles.
 // Workers receive immutable snapshots and return results through bounded channels.
 type client struct {
-	sk, pk, n                      string
 	config                         *config
 	relayHTTPClient                *http.Client
 	chatKeys                       map[string]chatSession
+	retiredKeys                    *lru.Cache[string, bool] // public keys only, for late echoes
 	actionsChan                    <-chan UserAction
 	eventsChan                     chan<- DisplayEvent
 	ctx                            context.Context
@@ -65,13 +64,15 @@ func newClient(cfg *config, actions <-chan UserAction, events chan<- DisplayEven
 	seen, _ := lru.New[string, bool](seenCacheSize)
 	users, _ := lru.New[string, userContext](userContextCacheSize)
 	retries, _ := lru.New[string, relayRetry](relayRetryCacheSize)
+	retired, _ := lru.New[string, bool](seenCacheSize)
 	c := &client{config: cfg, actionsChan: actions, eventsChan: events, ctx: ctx, cancel: cancel,
 		chatKeys: make(map[string]chatSession), relays: make(map[string]*managedRelay),
 		dialSlots: make(chan struct{}, maxConcurrentRelayDials), dialPace: make(chan struct{}, 1),
 		relayTiming: defaultRelayTiming, relayRetries: retries, geoPlans: make(map[string][][]string),
 		incoming: make(chan relayEvent, 256), outgoing: make(chan publishJob, 8), results: make(chan publishResult, 8),
-		seenCache: seen, userContext: users, n: cfg.Nick}
+		seenCache: seen, userContext: users, retiredKeys: retired}
 	c.rebuildRegexCaches()
+	c.ensureViewIdentities(c.getActiveView())
 	return c
 }
 
@@ -91,13 +92,7 @@ func (c *client) Run() {
 	if c.ctx.Err() != nil {
 		return
 	}
-	c.sk = c.config.PrivateKey
-	if c.sk == "" {
-		c.sk = nostr.GeneratePrivateKey()
-		c.config.PrivateKey = c.sk
-		c.saveConfig()
-	}
-	c.pk, _ = nostr.GetPublicKey(c.sk)
+
 	// Start the transport before the first display write: emit blocks while the
 	// display channel is full, and relay workers must not depend on the UI
 	// draining its queue, or a saturated display leaves the client with no dial,
@@ -108,9 +103,6 @@ func (c *client) Run() {
 	if view := c.getActiveView(); view != nil {
 		c.setActiveView(view.Name)
 	} else {
-		if c.n == "" {
-			c.n = npubToTokiPona(c.pk)
-		}
 		c.emit(DisplayEvent{Type: "INFO", Content: "No chats joined. Use /join <chat> and /help. Public messages are not encrypted."})
 	}
 	c.sendStateUpdate()
@@ -138,6 +130,10 @@ func (c *client) Run() {
 		case incoming := <-c.incoming:
 			worker := incoming.worker
 			if c.relays[worker.url] != worker {
+				continue
+			}
+			if incoming.problem != "" {
+				c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Relay %s: %s", worker.url, incoming.problem)})
 				continue
 			}
 			if incoming.event != nil {

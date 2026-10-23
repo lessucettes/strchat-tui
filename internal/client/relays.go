@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/coder/websocket"
@@ -26,6 +28,7 @@ const (
 type relaySubscription struct {
 	chats []string
 	since nostr.Timestamp
+	keys  map[string]string // immutable public-key -> signing-key snapshot
 }
 
 // The client loop owns these handles; the worker owns its socket and subscription.
@@ -34,18 +37,20 @@ type managedRelay struct {
 	cancel      context.CancelFunc
 	done        chan struct{}
 	chats       []string
+	keys        map[string]string // owner-only current subscription identities
 	updates     chan relaySubscription
 	publish     chan relayPublish
 	connected   bool
 	latency     time.Duration
 	connectedAt time.Time
-	retry       relayRetry      // immutable retry snapshot passed to the worker
-	startSince  nostr.Timestamp // immutable initial subscription watermark
+	retry       relayRetry // immutable retry snapshot passed to the worker
+
 }
 
 type relayPublish struct {
 	ctx    context.Context
 	event  nostr.Event
+	key    string // immutable signing identity of this queued event
 	result chan error
 }
 
@@ -55,6 +60,7 @@ type relayEvent struct {
 	connected bool
 	latency   time.Duration
 	retry     relayRetry
+	problem   string
 }
 
 func (c *client) getRelayPoolForChat(chat string) []string {
@@ -112,23 +118,24 @@ func (c *client) updateRelaySubscriptions(desired map[string][]string) {
 		if len(chats) == 0 {
 			continue
 		}
+		subscription := c.subscriptionForRelay(url, chats)
 		if worker := c.relays[url]; worker != nil {
-			if slices.Equal(worker.chats, chats) {
+			if slices.Equal(worker.chats, chats) && maps.Equal(worker.keys, subscription.keys) {
 				continue
 			}
 			worker.chats = chats
+			worker.keys = subscription.keys
 			select {
 			case <-worker.updates:
 			default:
 			}
-			worker.updates <- c.subscriptionForRelay(url, chats)
+			worker.updates <- subscription
 		} else if len(c.relays) < maxActiveRelays {
 			ctx, cancel := context.WithCancel(c.ctx)
-			worker := &managedRelay{url: url, cancel: cancel, done: make(chan struct{}), chats: chats, updates: make(chan relaySubscription, 1), publish: make(chan relayPublish, 1)}
+			worker := &managedRelay{url: url, cancel: cancel, done: make(chan struct{}), chats: chats, keys: subscription.keys, updates: make(chan relaySubscription, 1), publish: make(chan relayPublish, 1)}
 			worker.retry, _ = c.relayRetries.Peek(url)
-			worker.startSince = c.subscriptionForRelay(url, chats).since
 			c.relays[url] = worker
-			c.wg.Go(func() { defer close(worker.done); c.runRelay(ctx, worker, chats) })
+			c.wg.Go(func() { defer close(worker.done); c.runRelay(ctx, worker, subscription) })
 		}
 	}
 	c.sendRelaysUpdate()
@@ -199,13 +206,13 @@ func (c *client) dialRelay(ctx context.Context, url string) (*websocket.Conn, ti
 
 // Retry forever while selected. Neither an initial failure nor CLOSED permanently
 // blacklists a relay. Backoff resets only after a stable connection, not a handshake.
-func (c *client) runRelay(ctx context.Context, worker *managedRelay, chats []string) {
+func (c *client) runRelay(ctx context.Context, worker *managedRelay, subscription relaySubscription) {
 	delay := max(c.relayTiming.minimum, worker.retry.delay)
-	since := worker.startSince
+	since := subscription.since
 	if since == 0 {
 		since = nostr.Now()
 	}
-	if worker.retry.since > 0 && slices.Equal(worker.retry.chats, chats) {
+	if worker.retry.since > 0 && slices.Equal(worker.retry.chats, subscription.chats) {
 		since = min(since, max(worker.retry.since, nostr.Now()-30))
 	}
 	for ctx.Err() == nil {
@@ -213,9 +220,16 @@ func (c *client) runRelay(ctx context.Context, worker *managedRelay, chats []str
 		if err == nil {
 			conn.SetReadLimit(maxFrameBytes)
 			connectedAt := time.Now()
-			chats = c.serveRelay(ctx, worker, conn, chats, since, latency)
+			subscription.since = since
+			var authFailed bool
+			subscription, authFailed = c.serveRelay(ctx, worker, conn, subscription, latency)
+			since = subscription.since
 			conn.CloseNow()
-			if time.Since(connectedAt) >= c.relayTiming.stable {
+			if authFailed {
+				// A fresh random key cannot fix a permission denial. Keep normal
+				// recovery, but do not hammer an auth/restricted relay on reconnect.
+				delay = max(delay, time.Minute)
+			} else if time.Since(connectedAt) >= c.relayTiming.stable {
 				delay = c.relayTiming.minimum
 			}
 		}
@@ -226,7 +240,7 @@ func (c *client) runRelay(ctx context.Context, worker *managedRelay, chats []str
 		since = max(since, nostr.Now()-30)
 		pause := delay/2 + time.Duration(rand.Int64N(int64(delay/2)+1))
 		delay = min(delay*2, c.relayTiming.maximum)
-		retry := relayRetry{until: time.Now().Add(pause), delay: delay, since: since, chats: slices.Clone(chats)}
+		retry := relayRetry{until: time.Now().Add(pause), delay: delay, since: since, chats: slices.Clone(subscription.chats)}
 		select {
 		case c.incoming <- relayEvent{worker: worker, retry: retry}:
 		case <-ctx.Done():
@@ -240,7 +254,7 @@ func (c *client) runRelay(ctx context.Context, worker *managedRelay, chats []str
 				timer.Stop()
 				return
 			case update := <-worker.updates:
-				chats, since = update.chats, update.since
+				subscription, since = update, update.since
 			case request := <-worker.publish:
 				request.result <- errors.New("relay is reconnecting")
 			case <-timer.C:
@@ -272,7 +286,7 @@ func subscribe(ctx context.Context, conn *websocket.Conn, chats []string, since 
 
 // One reader, one bounded queue, no goroutine per frame. The websocket library
 // handles control frames while Read is active; Ping has a bounded pong deadline.
-func (c *client) serveRelay(ctx context.Context, worker *managedRelay, conn *websocket.Conn, chats []string, since nostr.Timestamp, latency time.Duration) []string {
+func (c *client) serveRelay(ctx context.Context, worker *managedRelay, conn *websocket.Conn, sub relaySubscription, latency time.Duration) (relaySubscription, bool) {
 	ctx, cancel := context.WithCancel(ctx)
 	// Keep aggregate buffering small when a group uses many relay sockets.
 	frames := make(chan []byte, 4)
@@ -298,36 +312,140 @@ func (c *client) serveRelay(ctx context.Context, worker *managedRelay, conn *web
 	defer func() { cancel(); conn.CloseNow(); <-readerDone }()
 	var pending *relayPublish
 	var pendingDone <-chan struct{}
+	var pendingWait, pendingSent, publishRetried bool
+	var terminalErr error
 	defer func() {
 		if pending != nil {
-			pending.result <- errors.New("relay disconnected before acknowledgement")
+			if terminalErr == nil {
+				terminalErr = errors.New("relay disconnected before acknowledgement")
+			}
+			pending.result <- terminalErr
 		}
 	}()
-	if subscribe(ctx, conn, chats, since) != nil {
-		return chats
+	if subscribe(ctx, conn, sub.chats, sub.since) != nil {
+		return sub, false
 	}
 	c.relayStatus(ctx, worker, true, latency)
+	var auth relayAuth
+	var subWait, subRetried, authReported bool
+	authTimer := time.NewTimer(time.Hour)
+	authTimer.Stop()
+	defer authTimer.Stop()
+	var authC <-chan time.Time
+	var authDeadline time.Time
+	// A queued event may outlive its originating view. Authenticate that exact
+	// accepted job's key too; never look up a replacement identity on the worker.
+	authKeys := func() map[string]string {
+		keys := maps.Clone(sub.keys)
+		if keys == nil {
+			keys = make(map[string]string)
+		}
+		if pending != nil && pending.key != "" {
+			keys[pending.event.PubKey] = pending.key
+		}
+		return keys
+	}
+	startAuth := func() error {
+		keys := authKeys()
+		if len(keys) == 0 {
+			return errors.New("no chat identity for relay authentication")
+		}
+		if authC == nil {
+			authDeadline = time.Now().Add(connectTimeout)
+			authTimer.Reset(time.Until(authDeadline))
+			authC = authTimer.C
+		}
+		authCtx, stop := context.WithDeadline(ctx, authDeadline)
+		defer stop()
+		return auth.send(authCtx, conn, worker.url, keys)
+	}
+	finishPending := func(err error) {
+		pending.result <- err
+		pending, pendingDone = nil, nil
+		pendingWait, pendingSent, publishRetried = false, false, false
+		auth.prune(sub.keys)
+	}
+	failAuth := func(err error) (relaySubscription, bool) {
+		terminalErr = err
+		c.relayProblem(ctx, worker, err)
+		return sub, true
+	}
+	// Only explicit rejections are retried, once for this challenge/request.
+	// An AUTH OK is not an acknowledgement of the pending chat EVENT.
+	resume := func() error {
+		if pendingWait {
+			if err := pending.ctx.Err(); err != nil {
+				finishPending(err)
+			} else if attempt := auth.attempts[pending.event.PubKey]; attempt != nil && attempt.done {
+				if attempt.err != nil {
+					finishPending(attempt.err)
+				} else {
+					if err := writeFrame(pending.ctx, conn, []any{"EVENT", pending.event}); err != nil {
+						return err
+					}
+					pendingWait = false
+					publishRetried = pendingSent
+					pendingSent = true
+				}
+			}
+		}
+		if subWait && auth.complete(sub.keys) {
+			var accepted bool
+			var rejected error
+			for pubkey := range sub.keys {
+				attempt := auth.attempts[pubkey]
+				if attempt.err == nil {
+					accepted = true
+				} else {
+					rejected = attempt.err
+				}
+			}
+			if !accepted {
+				if rejected == nil {
+					rejected = errors.New("no authenticated chat identity")
+				}
+				return rejected
+			}
+			if err := subscribe(ctx, conn, sub.chats, sub.since); err != nil {
+				return err
+			}
+			subWait, subRetried = false, true
+			c.relayStatus(ctx, worker, true, latency)
+		}
+		if !subWait && !pendingWait && auth.complete(authKeys()) {
+			authTimer.Stop()
+			authC = nil
+		}
+		return nil
+	}
 	ping := time.NewTicker(30 * time.Second)
 	defer ping.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return chats
+			return sub, false
+		case <-authC:
+			return failAuth(errors.New("relay authentication timed out waiting for a challenge or AUTH acknowledgement"))
 		case <-pendingDone:
-			pending.result <- pending.ctx.Err()
-			pending = nil
-			pendingDone = nil
+			finishPending(pending.ctx.Err())
 		case <-ping.C:
 			pingCtx, stop := context.WithTimeout(ctx, connectTimeout)
 			err := conn.Ping(pingCtx)
 			stop()
 			if err != nil {
-				return chats
+				return sub, false
 			}
 		case update := <-worker.updates:
-			chats, since = update.chats, update.since
-			if subscribe(ctx, conn, chats, since) != nil {
-				return chats
+			sub = update
+			auth.prune(authKeys())
+			subRetried = false
+			if auth.challenged {
+				subWait = true
+				if err := startAuth(); err != nil {
+					return failAuth(err)
+				}
+			} else if subscribe(ctx, conn, sub.chats, sub.since) != nil {
+				return sub, false
 			}
 		case request := <-worker.publish:
 			if request.ctx.Err() != nil {
@@ -338,15 +456,22 @@ func (c *client) serveRelay(ctx context.Context, worker *managedRelay, conn *web
 				request.result <- errors.New("relay publish queue is busy")
 				continue
 			}
-			if err := writeFrame(request.ctx, conn, []any{"EVENT", request.event}); err != nil {
-				request.result <- err
-				return chats
-			}
 			pending = &request
 			pendingDone = request.ctx.Done()
+			if auth.challenged {
+				pendingWait = true
+				if err := startAuth(); err != nil {
+					return failAuth(err)
+				}
+			} else if err := writeFrame(request.ctx, conn, []any{"EVENT", request.event}); err != nil {
+				finishPending(err)
+				return sub, false
+			} else {
+				pendingSent = true
+			}
 		case data, ok := <-frames:
 			if !ok {
-				return chats
+				return sub, false
 			}
 			var frame []json.RawMessage
 			if json.Unmarshal(data, &frame) != nil || len(frame) < 2 {
@@ -357,6 +482,21 @@ func (c *client) serveRelay(ctx context.Context, worker *managedRelay, conn *web
 				continue
 			}
 			switch label {
+			case "AUTH":
+				if len(frame) != 2 {
+					continue
+				}
+				changed, err := auth.setChallenge(id)
+				if err != nil {
+					return failAuth(err)
+				}
+				if !changed {
+					continue
+				}
+				subRetried, authReported = false, false
+				if err := startAuth(); err != nil {
+					return failAuth(fmt.Errorf("relay authentication failed: %w", err))
+				}
 			case "EVENT":
 				if id != "chat" || len(frame) != 3 {
 					continue
@@ -368,14 +508,37 @@ func (c *client) serveRelay(ctx context.Context, worker *managedRelay, conn *web
 				select {
 				case c.incoming <- relayEvent{worker: worker, event: &event}:
 				case <-ctx.Done():
-					return chats
+					return sub, false
+				}
+			case "EOSE":
+				var hints []string
+				if id == "chat" && len(frame) == 3 && !subRetried && json.Unmarshal(frame[2], &hints) == nil && slices.Contains(hints, "auth") {
+					subWait = true
+					if err := startAuth(); err != nil {
+						return failAuth(err)
+					}
 				}
 			case "CLOSED":
-				if id == "chat" {
-					return chats
+				var reason string
+				if id != "chat" || len(frame) != 3 || json.Unmarshal(frame[2], &reason) != nil {
+					continue
+				}
+				if strings.HasPrefix(reason, "auth-required:") {
+					if subRetried {
+						return failAuth(relayRejection("relay still requires authentication after AUTH", reason))
+					}
+					subWait = true
+					c.relayStatus(ctx, worker, false, 0)
+					if err := startAuth(); err != nil {
+						return failAuth(err)
+					}
+				} else if strings.HasPrefix(reason, "restricted:") {
+					return failAuth(relayRejection("relay access restricted", reason))
+				} else {
+					return sub, false
 				}
 			case "OK":
-				if len(frame) != 4 || pending == nil || id != pending.event.ID {
+				if len(frame) != 4 {
 					continue
 				}
 				var accepted bool
@@ -383,15 +546,35 @@ func (c *client) serveRelay(ctx context.Context, worker *managedRelay, conn *web
 				if json.Unmarshal(frame[2], &accepted) != nil || json.Unmarshal(frame[3], &reason) != nil {
 					continue
 				}
-				var err error
-				if !accepted {
-					err = fmt.Errorf("relay rejected event: %s", truncateString(sanitizeString(reason), 200))
+				if pubkey, matched := auth.acknowledge(id, accepted, reason); matched {
+					if !accepted && !authReported {
+						c.relayProblem(ctx, worker, auth.attempts[pubkey].err)
+						authReported = true
+					}
+				} else if pending != nil && !pendingWait && id == pending.event.ID {
+					if accepted {
+						finishPending(nil)
+					} else if strings.HasPrefix(reason, "auth-required:") && !publishRetried {
+						pendingWait = true
+						if err := startAuth(); err != nil {
+							return failAuth(err)
+						}
+					} else {
+						finishPending(relayRejection("relay rejected event", reason))
+					}
 				}
-				pending.result <- err
-				pending = nil
-				pendingDone = nil
 			}
 		}
+		if err := resume(); err != nil {
+			return failAuth(err)
+		}
+	}
+}
+
+func (c *client) relayProblem(ctx context.Context, worker *managedRelay, err error) {
+	select {
+	case c.incoming <- relayEvent{worker: worker, problem: truncateString(sanitizeString(err.Error()), 240)}:
+	case <-ctx.Done():
 	}
 }
 

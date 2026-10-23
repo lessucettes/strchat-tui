@@ -1090,6 +1090,8 @@ func TestRelayDropsMalformedDuplicateAndForgedTraffic(t *testing.T) {
 			[]byte(`["EVENT","chat"]`),
 			[]byte(`["EVENT","chat",42]`),
 			[]byte(`["BOGUS","chat",{}]`),
+			[]byte(`["AUTH",42]`),
+			[]byte(`["AUTH","invalid-extra-field",{}]`),
 			mustMarshal(relayEventFrame("other-sub", alpha)),
 			mustMarshal(relayEventFrame("chat", alpha)),
 			mustMarshal(relayEventFrame("chat", alpha)), // duplicate

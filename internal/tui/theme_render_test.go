@@ -13,7 +13,7 @@ import (
 func TestThemeRecolorsRetainedScrollback(t *testing.T) {
 	s := newSimTUI(t, 120, 40)
 	s.ui.applyEvent(client.DisplayEvent{Type: "STATE_UPDATE", Payload: client.StateUpdate{
-		Views: []client.View{{Name: "lobby"}}, Nick: "me",
+		Views: []client.View{{Name: "lobby"}}, ChatNicks: map[string]string{"lobby": "me"},
 	}})
 	s.ui.applyEvent(client.DisplayEvent{Type: "INFO", Content: "retained information"})
 	s.ui.applyEvent(client.DisplayEvent{Type: "NEW_MESSAGE", Chat: "lobby", Nick: "me", IsOwnMessage: true, Content: "retained message [#32cd32]"})

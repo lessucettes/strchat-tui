@@ -113,15 +113,15 @@ func TestProcessEventValidationAndDedup(t *testing.T) {
 
 func TestPublishSnapshotsIdentityAndChat(t *testing.T) {
 	c, _ := testClient(t)
-	c.sk = strings.Repeat("0", 63) + "1"
-	pk, _ := nostr.GetPublicKey(c.sk)
-	c.chatKeys["lobby"] = chatSession{privKey: c.sk, pubKey: pk, nick: "alice"}
+	key := strings.Repeat("0", 63) + "1"
+	pk, _ := nostr.GetPublicKey(key)
+	c.chatKeys["lobby"] = chatSession{privKey: key, pubKey: pk, nick: "alice"}
 	c.relays["local"] = &managedRelay{url: "local", connected: true, chats: []string{"lobby"}}
 	c.publishMessage("hello")
 	job := <-c.outgoing
 	c.config.ActiveViewName = "other"
 	c.chatKeys["lobby"] = chatSession{}
-	if job.chat != "lobby" || job.key != c.sk || job.event.PubKey != pk || job.event.Tags.Find("n")[1] != "alice" {
+	if job.chat != "lobby" || job.key != key || job.event.PubKey != pk || job.event.Tags.Find("n")[1] != "alice" {
 		t.Fatal("queued send did not capture identity and chat")
 	}
 }

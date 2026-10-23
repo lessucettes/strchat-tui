@@ -87,7 +87,7 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 		short = safeSuffix(ev.PubKey, 4)
 	}
 	c.userContext.Add(ev.PubKey, userContext{nick: nick, chat: chat, shortPubKey: short})
-	own := ev.PubKey == c.pk
+	own := c.retiredKeys.Contains(ev.PubKey)
 	for _, session := range c.chatKeys {
 		if session.pubKey == ev.PubKey {
 			own = true
@@ -206,7 +206,7 @@ func (c *client) publishMessageInView(message, viewName, defaultChat, expectedCh
 		c.emit(DisplayEvent{Type: "ERROR", Content: "Message exceeds 2000 characters or 16 KiB."})
 		return
 	}
-	view, chat, target, err := c.resolveMessageTarget(message, viewName, defaultChat)
+	_, chat, target, err := c.resolveMessageTarget(message, viewName, defaultChat)
 	if err != nil {
 		c.emit(DisplayEvent{Type: "ERROR", Content: err.Error()})
 		return
@@ -215,19 +215,18 @@ func (c *client) publishMessageInView(message, viewName, defaultChat, expectedCh
 		c.emit(DisplayEvent{Type: "ERROR", Content: "Message destination changed since the preview. Check the destination and retry."})
 		return
 	}
-	job := publishJob{key: c.sk, chat: chat, difficulty: c.effectivePoWForChat(chat)}
-	nick := c.config.Nick
-	if !view.IsGroup {
-		if session, ok := c.chatKeys[chat]; ok {
-			job.key = session.privKey
-			nick = session.nick
-		}
+	session, ok := c.chatKeys[chat]
+	if !ok || session.privKey == "" {
+		c.emit(DisplayEvent{Type: "ERROR", Content: "No signing identity for the destination chat."})
+		return
 	}
-	pk, err := nostr.GetPublicKey(job.key)
-	if err != nil {
+	pk, err := nostr.GetPublicKey(session.privKey)
+	if err != nil || pk != session.pubKey {
 		c.emit(DisplayEvent{Type: "ERROR", Content: "No valid signing identity."})
 		return
 	}
+	job := publishJob{key: session.privKey, chat: chat, difficulty: c.effectivePoWForChat(chat)}
+	nick := session.nick
 	if nick == "" {
 		nick = npubToTokiPona(pk)
 	}
@@ -274,7 +273,8 @@ func (c *client) publishLoop() {
 func executePublish(ctx context.Context, job publishJob) publishResult {
 	result := publishResult{kind: "ERROR"}
 	// Mining and publishing share one deadline and one worker, not one CPU loop per
-	// keystroke. Work not acknowledged is never retried automatically.
+	// keystroke. Only explicit auth-required rejections permit a bounded retry
+	// of the same signed event on the same socket, within this deadline.
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	event := job.event
@@ -311,7 +311,7 @@ func executePublish(ctx context.Context, job publishJob) publishResult {
 		default:
 		}
 		answer := make(chan error, 1)
-		request := relayPublish{ctx: ctx, event: event, result: answer}
+		request := relayPublish{ctx: ctx, event: event, key: job.key, result: answer}
 		select {
 		case worker.publish <- request:
 			answers = append(answers, relayAnswer{result: answer, done: worker.done})

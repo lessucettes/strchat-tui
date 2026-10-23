@@ -1,7 +1,6 @@
 package client
 
 import (
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,9 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-
-	"github.com/btcsuite/btcd/btcec/v2"
-	"github.com/nbd-wtf/go-nostr"
 )
 
 type View struct {
@@ -35,7 +31,6 @@ type filter struct {
 
 // config is the main structure of the configuration file.
 type config struct {
-	PrivateKey     string        `json:"private_key"`
 	Nick           string        `json:"nick,omitempty"`
 	Theme          string        `json:"theme,omitempty"`
 	Views          []View        `json:"views"`
@@ -65,9 +60,8 @@ func loadConfig() (*config, error) {
 }
 
 // loadConfigFrom reads (or creates) the configuration file at path. A missing
-// file is replaced by a freshly generated default configuration. A malformed
-// file, or one carrying a private key that is not a valid nostr secret key, is
-// reported as an error; error messages never include key material.
+// file is replaced by a fresh default configuration. A malformed file is
+// reported as an error; error messages never include file contents.
 func loadConfigFrom(path string) (*config, error) {
 	conf := &config{path: path}
 
@@ -119,11 +113,8 @@ func (c *config) normalizeGroupSelections() {
 const maxConfigPoW = maxPoW
 
 // validate checks the configuration for malformed values. Error messages must
-// never contain the private key or any part of it.
+// not echo raw file contents.
 func (c *config) validate() error {
-	if err := validatePrivateKey(c.PrivateKey); err != nil {
-		return err
-	}
 	for i, relay := range c.AnchorRelays {
 		if _, err := normalizeRelayURL(relay); err != nil {
 			return fmt.Errorf("config: invalid relay URL at index %d: %w", i+1, err)
@@ -134,27 +125,6 @@ func (c *config) validate() error {
 			return fmt.Errorf("config: view %q has pow %d outside the supported range 0..%d",
 				truncateString(sanitizeString(view.Name), 32), view.PoW, maxConfigPoW)
 		}
-	}
-	return nil
-}
-
-// validatePrivateKey accepts an empty key (the client then generates an
-// ephemeral identity at runtime) and otherwise requires the 64-character
-// hexadecimal form used by nostr and by every config written so far.
-func validatePrivateKey(key string) error {
-	if key == "" {
-		return nil
-	}
-	if len(key) != 64 {
-		return fmt.Errorf("config: private_key must be a 64-character hexadecimal string (got %d characters)", len(key))
-	}
-	decoded, err := hex.DecodeString(key)
-	if err != nil || len(decoded) != 32 {
-		return fmt.Errorf("config: private_key must be a 64-character hexadecimal string")
-	}
-	var scalar btcec.ModNScalar
-	if scalar.SetByteSlice(decoded) || scalar.IsZero() {
-		return errors.New("config: private_key is outside the valid secp256k1 range")
 	}
 	return nil
 }
@@ -214,11 +184,9 @@ func (c *config) save() error {
 	return nil
 }
 
-// createDefaultConfig generates a new private key and a default config file.
+// createDefaultConfig writes a fresh, secret-free default config file.
 func createDefaultConfig(path string) (*config, error) {
-	sk := nostr.GeneratePrivateKey()
 	conf := &config{
-		PrivateKey:     sk,
 		Theme:          DefaultTheme,
 		Views:          []View{},
 		ActiveViewName: "",

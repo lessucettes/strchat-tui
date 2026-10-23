@@ -39,7 +39,7 @@ The README also documents Mage release targets: `go run github.com/magefile/mage
 
 ## Pitfalls
 
-- Chat messages are public and not encrypted. The OS user-config directory contains `strchat-tui/config.json` with a private key; do not expose or overwrite a user's config while testing.
+- Chat messages are public and not encrypted. Signing identities are per-chat, memory-only, and shared by all views of that chat; there is no global sender or persisted signing key. The OS user-config directory contains `strchat-tui/config.json` with personal settings and joined channels; do not expose or overwrite a user's config while testing.
 - `go test ./...` does not run the sustained soak unless `STRCHAT_SOAK_DURATION` is set. The soak uses local `httptest` relays; it does not need public relays.
 - The PTY smoke test needs a built binary and a POSIX controlling PTY. It creates an isolated temporary config and uses only a dead loopback relay, so it does not contact public relays or publish messages.
 - Geographic relay catalogs are pinned CSV files embedded into the binary, not runtime-fetched data. Treat changes to them as protocol/reachability changes, not generated-file edits.

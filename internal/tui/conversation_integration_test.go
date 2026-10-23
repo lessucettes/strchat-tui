@@ -98,7 +98,7 @@ func TestGroupConversationEndToEndLoopback(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := map[string]any{
-		"private_key": nostr.GeneratePrivateKey(), "nick": "me", "active_view_name": "mixed",
+		"nick": "me", "active_view_name": "mixed",
 		"anchor_relays": []string{"ws" + strings.TrimPrefix(server.URL, "http")},
 		"views":         []client.View{{Name: "mixed", IsGroup: true, Children: []string{"coffee", "lobby"}}, {Name: "coffee"}, {Name: "lobby"}},
 	}
@@ -134,8 +134,10 @@ func TestGroupConversationEndToEndLoopback(t *testing.T) {
 		s.ui.input.SetText("plain message")
 	})
 	s.key(tcell.KeyEnter, 0, tcell.ModNone)
+	var coffeePK string
 	select {
 	case event := <-published:
+		coffeePK = event.PubKey
 		if event.Kind != 23333 || event.Tags.Find("d")[1] != "coffee" || event.Content != "plain message" {
 			t.Fatalf("wrong published message: kind %d tags %v content %q", event.Kind, event.Tags, event.Content)
 		}
@@ -166,10 +168,30 @@ func TestGroupConversationEndToEndLoopback(t *testing.T) {
 		if event.Tags.Find("d")[1] != "lobby" || event.Tags.Find("p")[1] != peerPK {
 			t.Fatal("mention did not override the focused coffee destination")
 		}
+		if event.PubKey == coffeePK {
+			t.Fatal("different group members shared a signing identity")
+		}
+		if ok, err := event.CheckSignature(); err != nil || !ok {
+			t.Fatalf("mention event is not signed: %v", err)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("group mention never reached the loopback relay")
 	}
 	if got := requests.Load(); got != baseline {
 		t.Fatalf("conversation selection changed subscriptions: %d -> %d", baseline, got)
+	}
+	enterText(s, "/set coffee")
+	waitFor(t, 5*time.Second, func() bool {
+		return s.matches(func() bool { view := activeView(s.ui.snapshot()); return view != nil && view.Name == "coffee" })
+	})
+	s.onLoop(func() { s.ui.input.SetText("direct coffee") })
+	s.key(tcell.KeyEnter, 0, tcell.ModNone)
+	select {
+	case event := <-published:
+		if event.PubKey != coffeePK || event.Tags.Find("d")[1] != "coffee" || event.Content != "direct coffee" {
+			t.Fatal("opening the chat separately changed the wire sender")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("direct chat message never reached the loopback relay")
 	}
 }

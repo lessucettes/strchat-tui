@@ -16,7 +16,7 @@ func focusGroupState() client.DisplayEvent {
 		Views: []client.View{
 			{Name: "mixed", IsGroup: true, Children: []string{"coffee", "ucfv0", "lobby"}},
 			{Name: "coffee"}, {Name: "ucfv0"}, {Name: "lobby"},
-		}, ActiveViewIndex: 0, Nick: "me",
+		}, ActiveViewIndex: 0, ChatNicks: map[string]string{"coffee": "me", "ucfv0": "me", "lobby": "me"},
 	}}
 }
 

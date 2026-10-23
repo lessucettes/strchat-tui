@@ -214,8 +214,8 @@ actual address:
 
 Use `ws://` for an onion service offering plain WebSocket on port 80, or `wss://`
 if it offers TLS with a trusted certificate. TLS verification stays enabled.
-Tor changes transport routing; public content and persistent identities can
-still be linked, so it is not an anonymity guarantee.
+Tor changes transport routing; public content, nicknames and traffic patterns
+can still be linked, so it is not an anonymity guarantee.
 
 ## Relays and compatibility
 
@@ -245,8 +245,33 @@ Keep `/pow 0` when communicating with peers that do not mine proof-of-work.
 
 The client is live-first: it does not fetch BitChat's one-hour history or send
 presence heartbeats. Relay acceptance is not proof of recipient delivery.
-Unacknowledged sends are reported as unconfirmed; there is no automatic resend
-or persistent outbox.
+Sends without an acknowledgement are reported as unconfirmed and are not
+resent after a timeout or disconnect. There is no persistent outbox.
+
+### Relay authentication (NIP-42)
+
+Authentication is automatic when a relay sends an `AUTH` challenge. The client
+signs kind `22242` proofs with the session keys of the chats subscribed on that
+connection; it does not create a separate application identity or save keys.
+The relay receives those session public keys even if you have not posted yet.
+Proofs are sent as `AUTH`, never as chat messages.
+
+After an `auth-required:` rejection, the client waits for the matching `AUTH`
+acknowledgement and retries the subscription or the **same signed event** once.
+It also handles the `auth` hint in `EOSE`. Challenges and authentication results
+are connection-local: reconnecting requires a fresh exchange, and switching
+chats authenticates newly needed keys. Waiting is bounded; denied access is
+reported, and subscription/authentication failures use a paced retry cooldown.
+To limit relay-driven signing and bandwidth amplification, challenges are
+limited to 1024 bytes and four new values per minute on each connection.
+
+Multiple chats share one socket per relay. This relies on NIP-42's requirement
+that relays retain all authenticated keys; relays that remember only the last
+key may reject group traffic. Authentication proves key ownership, not a right
+to access a relay: `restricted:` can still mean payment or allowlist membership
+is required. Ephemeral chat keys do not provide membership tied to a permanent
+key. Authentication does not encrypt messages or prevent a relay from linking
+the chats on its connection.
 
 ## Configuration and privacy
 
@@ -255,10 +280,21 @@ Configuration is saved in the OS user-config directory under
 `$XDG_CONFIG_HOME/strchat-tui/config.json`, or
 `~/.config/strchat-tui/config.json` when XDG_CONFIG_HOME is unset.
 
-The file contains a **private key**: do not share it or commit it to a repository.
-It also stores joined chats/groups, selected group destinations, relays,
-nickname, theme, filters and mutes. Individual chats use separate session keys
-that rotate on restart; group messages use the persistent main key.
+The file stores joined chats/groups, selected group destinations, relays,
+nickname, theme, filters and mutes, but no private keys. These settings can
+still reveal personal information, including joined geographic channels.
+
+Each chat has an independent signing identity kept only in memory. Sending to
+the same chat separately or through any local group uses the same identity.
+Groups have no signing identity of their own. Restarting the client, or leaving
+and rejoining a chat, creates a new identity. There is no global or persistent
+sender key.
+
+Without a custom nickname, each chat's nickname is derived from its session
+public key. `/nick` sets a shared display-name preference without changing
+keys; clearing it restores the individual chat nicknames. Reusing a nickname
+can link activity across chats. Relays can also associate chats carried over
+the same connection; separate keys alone do not guarantee anonymity.
 
 ## Development
 

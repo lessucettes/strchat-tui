@@ -178,6 +178,18 @@ func (t *tui) renderConversationTitles(s modelSnapshot) {
 	t.input.SetTitle(titleInput)
 }
 
+func (t *tui) composerNick(s modelSnapshot) string {
+	chat := t.conversationChat(s)
+	if view := activeView(s); view != nil && view.IsGroup && strings.HasPrefix(strings.TrimSpace(t.input.GetText()), "@") {
+		target, ready := t.currentMessageTarget(s)
+		if !ready || target.Error != "" {
+			return ""
+		}
+		chat = target.Chat
+	}
+	return s.chatNicks[chat]
+}
+
 func (t *tui) currentMessageTarget(s modelSnapshot) (client.MessageTarget, bool) {
 	view := activeView(s)
 	result := s.messageTarget

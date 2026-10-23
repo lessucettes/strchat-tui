@@ -60,7 +60,7 @@ func TestInputLabelEscapesMarkupAndPreservesTypedText(t *testing.T) {
 	t.Run("markup nickname is literal", func(t *testing.T) {
 		s := newSimTUI(t, 80, 24)
 		s.onLoop(func() {
-			s.ui.applyEvent(client.DisplayEvent{Type: "STATE_UPDATE", Payload: client.StateUpdate{Nick: "[red]"}})
+			s.ui.applyEvent(client.DisplayEvent{Type: "STATE_UPDATE", Payload: client.StateUpdate{Views: []client.View{{Name: "chat"}}, ChatNicks: map[string]string{"chat": "[red]"}}})
 			s.ui.input.SetText("typed")
 			s.ui.render()
 			s.ui.app.ForceDraw()
@@ -73,7 +73,7 @@ func TestInputLabelEscapesMarkupAndPreservesTypedText(t *testing.T) {
 	t.Run("long nickname leaves room for input", func(t *testing.T) {
 		s := newSimTUI(t, 60, 24)
 		s.onLoop(func() {
-			s.ui.applyEvent(client.DisplayEvent{Type: "STATE_UPDATE", Payload: client.StateUpdate{Nick: strings.Repeat("n", 200)}})
+			s.ui.applyEvent(client.DisplayEvent{Type: "STATE_UPDATE", Payload: client.StateUpdate{Views: []client.View{{Name: "chat"}}, ChatNicks: map[string]string{"chat": strings.Repeat("n", 200)}}})
 			s.ui.input.SetText("typed")
 			s.ui.render()
 			s.ui.app.ForceDraw()

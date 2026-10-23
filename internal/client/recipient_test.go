@@ -9,7 +9,6 @@ func TestReplyRejectsAmbiguousRecipient(t *testing.T) {
 	for _, group := range []bool{false, true} {
 		t.Run(map[bool]string{false: "chat", true: "group"}[group], func(t *testing.T) {
 			c, events := testClient(t)
-			c.sk = transportTestKey
 			if group {
 				c.config.Views = []View{{Name: "group", IsGroup: true, Children: []string{"lobby", "other"}}}
 				c.config.ActiveViewName = "group"
@@ -34,7 +33,6 @@ func TestReplyRejectsAmbiguousRecipient(t *testing.T) {
 
 func TestReplyIgnoresMatchingRecipientOutsideActiveChat(t *testing.T) {
 	c, _ := testClient(t)
-	c.sk = transportTestKey
 	inside := strings.Repeat("a", 60) + "beef"
 	outside := strings.Repeat("b", 60) + "beef"
 	c.userContext.Add(outside, userContext{nick: "alice", shortPubKey: "beef", chat: "other"})
@@ -53,9 +51,9 @@ func TestReplyIgnoresMatchingRecipientOutsideActiveChat(t *testing.T) {
 
 func TestCompletionDisambiguatesRecipients(t *testing.T) {
 	c, events := testClient(t)
-	c.sk = transportTestKey
 	c.config.Views = []View{{Name: "group", IsGroup: true, Children: []string{"lobby", "other"}}}
 	c.config.ActiveViewName = "group"
+	c.ensureViewIdentities(c.getActiveView())
 	keys := []string{strings.Repeat("a", 60) + "beef", strings.Repeat("b", 60) + "beef"}
 	for i, chat := range []string{"lobby", "other"} {
 		c.userContext.Add(keys[i], userContext{nick: "alice", shortPubKey: "beef", chat: chat})

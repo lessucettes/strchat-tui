@@ -10,8 +10,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/mmcloughlin/geohash"
-	"github.com/nbd-wtf/go-nostr"
-	"github.com/nbd-wtf/go-nostr/nip19"
 )
 
 // Chat/Group View
@@ -188,6 +186,9 @@ func (c *client) leaveChat(chatName string) {
 	}
 
 	c.config.Views = finalViews
+	if session, ok := c.chatKeys[chatName]; ok {
+		c.retiredKeys.Add(session.pubKey, true)
+	}
 	delete(c.chatKeys, chatName)
 	c.activateRemainingView()
 }
@@ -255,22 +256,19 @@ func (c *client) setNick(nick string) {
 	c.config.Nick = nick
 
 	if nick != "" {
-		c.n = nick
 		c.emit(DisplayEvent{
 			Type:    "STATUS",
-			Content: fmt.Sprintf("Nick set to: %s", c.n),
+			Content: fmt.Sprintf("Nick set to: %s", nick),
 		})
-		for name, session := range c.chatKeys {
-			session.nick = c.n
-			c.chatKeys[name] = session
-		}
 	} else {
-		c.n = npubToTokiPona(c.pk)
-		for name, session := range c.chatKeys {
-			session.nick = npubToTokiPona(session.pubKey)
-			c.chatKeys[name] = session
-		}
 		c.emit(DisplayEvent{Type: "STATUS", Content: "Nick has been cleared."})
+	}
+	for name, session := range c.chatKeys {
+		session.nick = nick
+		if nick == "" {
+			session.nick = npubToTokiPona(session.pubKey)
+		}
+		c.chatKeys[name] = session
 	}
 
 	c.saveConfig()
@@ -434,28 +432,7 @@ func (c *client) setActiveView(name string) {
 		return
 	}
 
-	if _, exists := c.chatKeys[name]; !view.IsGroup && !exists {
-		sk := nostr.GeneratePrivateKey()
-		pk, _ := nostr.GetPublicKey(sk)
-
-		nick := c.config.Nick
-		if nick == "" {
-			nick = npubToTokiPona(pk)
-		}
-
-		c.chatKeys[name] = chatSession{
-			privKey: sk,
-			pubKey:  pk,
-			nick:    nick,
-		}
-
-		npub, _ := nip19.EncodePublicKey(pk)
-		c.emit(DisplayEvent{
-			Type: "STATUS",
-			Content: fmt.Sprintf("Generated ephemeral identity for chat '%s': %s (%s)",
-				view.Name, npub, nick),
-		})
-	}
+	c.ensureViewIdentities(view)
 
 	c.config.ActiveViewName = name
 	c.saveConfig()
@@ -492,7 +469,7 @@ func (c *client) sendStateUpdate() {
 	state := StateUpdate{
 		Views:           slices.Clone(c.config.Views),
 		ActiveViewIndex: activeIdx,
-		Nick:            c.n,
+		ChatNicks:       make(map[string]string),
 	}
 	for i := range state.Views {
 		state.Views[i].Children = slices.Clone(state.Views[i].Children)
@@ -503,17 +480,9 @@ func (c *client) sendStateUpdate() {
 		return
 	}
 
-	if c.config.Nick != "" {
-		state.Nick = c.config.Nick
-	} else {
-		v := c.config.Views[activeIdx]
-		if v.IsGroup {
-			state.Nick = npubToTokiPona(c.pk)
-		} else if s, ok := c.chatKeys[v.Name]; ok && s.nick != "" {
-			state.Nick = s.nick
-		} else {
-			state.Nick = npubToTokiPona(c.pk)
-		}
+	c.ensureViewIdentities(c.getActiveView())
+	for chat, session := range c.chatKeys {
+		state.ChatNicks[chat] = session.nick
 	}
 
 	c.emit(DisplayEvent{Type: "STATE_UPDATE", Payload: state})
