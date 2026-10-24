@@ -527,6 +527,8 @@ func TestSlashCommandsArePreserved(t *testing.T) {
 		{"/relay wss://example.com", client.UserAction{Type: "MANAGE_ANCHORS", Payload: "wss://example.com"}},
 		{"/help", client.UserAction{Type: "GET_HELP"}},
 		{"/h", client.UserAction{Type: "GET_HELP"}},
+		{"/help chats", client.UserAction{Type: "GET_HELP", Payload: "chats"}},
+		{"/h	appearance", client.UserAction{Type: "GET_HELP", Payload: "appearance"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.input, func(t *testing.T) {

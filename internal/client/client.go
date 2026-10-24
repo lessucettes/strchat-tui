@@ -187,6 +187,12 @@ func (c *client) shutdown() {
 
 func (c *client) handleAction(action UserAction) {
 	switch action.Type {
+	case "CLEAR":
+		// Swap empty caches instead of walking their entries. Keep dedup IDs,
+		// identities and transport state so history is not replayed on clear.
+		c.userContext, _ = lru.New[string, userContext](userContextCacheSize)
+		c.authorVerify = newAuthorVerifyCache(authorVerifyCacheSize)
+		c.emit(DisplayEvent{Type: "CLEARED"})
 	case "SEND_MESSAGE":
 		c.publishMessageInView(action.Payload, action.View, action.Chat, action.ExpectedChat)
 	case "RESOLVE_MESSAGE_TARGET":
@@ -194,8 +200,12 @@ func (c *client) handleAction(action UserAction) {
 	case "SELECT_GROUP_CHAT":
 		c.selectGroupChat(action.View, action.Chat)
 	case "ACTIVATE_VIEW":
-		c.setActiveView(action.Payload)
-		c.updateAllSubscriptions()
+		if action.Chat != "" {
+			c.activateGroupChat(action.Payload, action.Chat)
+		} else {
+			c.setActiveView(action.Payload)
+			c.updateAllSubscriptions()
+		}
 	case "CREATE_GROUP":
 		c.createGroup(action.Payload)
 	case "JOIN_CHATS":
@@ -241,7 +251,7 @@ func (c *client) handleAction(action UserAction) {
 	case "MANAGE_ANCHORS":
 		c.manageAnchors(action.Payload)
 	case "GET_HELP":
-		c.getHelp()
+		c.getHelp(action.Payload)
 	case "QUIT":
 		c.Stop()
 	}

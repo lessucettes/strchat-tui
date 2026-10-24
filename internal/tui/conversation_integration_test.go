@@ -147,6 +147,27 @@ func TestGroupConversationEndToEndLoopback(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("plain group message never reached the loopback relay")
 	}
+	enterText(s, "/set mixed lobby")
+	waitFor(t, 5*time.Second, func() bool {
+		return s.matches(func() bool { return s.ui.conversationChat(s.ui.snapshot()) == "lobby" })
+	})
+	s.onLoop(func() { s.ui.input.SetText("command destination") })
+	s.key(tcell.KeyEnter, 0, tcell.ModNone)
+	select {
+	case event := <-published:
+		if event.Tags.Find("d")[1] != "lobby" || event.Content != "command destination" || len(event.Tags.Find("p")) != 0 || event.PubKey == coffeePK {
+			t.Fatal("command-selected destination did not control the signed ordinary send")
+		}
+		if ok, err := event.CheckSignature(); err != nil || !ok {
+			t.Fatalf("command-selected event is not signed: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("command-selected message never reached the loopback relay")
+	}
+	enterText(s, "/s mixed coffee")
+	waitFor(t, 5*time.Second, func() bool {
+		return s.matches(func() bool { return s.ui.conversationChat(s.ui.snapshot()) == "coffee" })
+	})
 	peerPK, _ := nostr.GetPublicKey(peerKey)
 	s.onLoop(func() { s.ui.input.SetText("@peer#" + peerPK + " reply") })
 	t.Cleanup(func() {
@@ -194,4 +215,11 @@ func TestGroupConversationEndToEndLoopback(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("direct chat message never reached the loopback relay")
 	}
+	enterText(s, "/set mixed lobby")
+	waitFor(t, 5*time.Second, func() bool {
+		return s.matches(func() bool {
+			view := activeView(s.ui.snapshot())
+			return view != nil && view.Name == "mixed" && s.ui.conversationChat(s.ui.snapshot()) == "lobby"
+		})
+	})
 }

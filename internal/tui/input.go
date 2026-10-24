@@ -29,6 +29,25 @@ func (t *tui) bell() {
 // they never block (see submit) and never call QueueUpdate (which would block
 // against the loop they are already running on).
 func (t *tui) setupHandlers() {
+	t.setupInputHandlers()
+	t.app.SetInputCapture(t.handleKey)
+	t.chatList.SetChangedFunc(func(index int, mainText, secondaryText string, shortcut rune) {
+		t.updateDetailsView()
+	})
+}
+
+// Rebind the fresh editor after clear, without replacing its layout primitive.
+func (t *tui) setupInputHandlers() {
+	t.input.SetAutocompleteUseTags(false)
+	t.input.SetAutocompleteFunc(t.handleAutocomplete)
+	t.input.SetAcceptanceFunc(func(text string, _ rune) bool {
+		if len(text) > client.MaxMsgLen && graphemeLen(text) > client.MaxMsgLen {
+			t.bell()
+			return false
+		}
+		return true
+	})
+	t.applyInputTheme()
 	// Enter sends the message or runs the slash command.
 	t.input.SetDoneFunc(func(key tcell.Key) {
 		if key != tcell.KeyEnter {
@@ -55,7 +74,7 @@ func (t *tui) setupHandlers() {
 					if !ready || result.Error != "" {
 						t.bell()
 						if ready && result.Error != "" {
-							t.applyLog(client.DisplayEvent{Type: "ERROR", Content: result.Error})
+							t.applyLocalEvent(client.DisplayEvent{Type: "ERROR", Content: result.Error})
 						}
 						t.renderConversationTitles(s)
 						return
@@ -124,10 +143,6 @@ func (t *tui) setupHandlers() {
 		return nil
 	})
 
-	t.app.SetInputCapture(t.handleKey)
-	t.chatList.SetChangedFunc(func(index int, mainText, secondaryText string, shortcut rune) {
-		t.updateDetailsView()
-	})
 }
 
 // handleKey is the global key handler: focus management, maximize toggles,
@@ -300,11 +315,17 @@ func (t *tui) handleChatListKeys(event *tcell.EventKey) *tcell.EventKey {
 	return event
 }
 
-// handleCommand parses and dispatches slash commands. The command set and
-// aliases are unchanged from before the hardening.
+// handleCommand parses and dispatches slash commands.
 func (t *tui) handleCommand(text string) {
 	command, payload := splitCommand(text)
 	switch command {
+	case "/clear":
+		if payload != "" {
+			t.bell()
+			t.applyLocalEvent(client.DisplayEvent{Type: "ERROR", Content: "Usage: /clear"})
+			return
+		}
+		t.clearSession()
 	case "/quit", "/q":
 		t.submit(client.UserAction{Type: "QUIT"})
 		t.requestQuit()
@@ -313,7 +334,7 @@ func (t *tui) handleCommand(text string) {
 			t.submit(client.UserAction{Type: "JOIN_CHATS", Payload: payload})
 		} else {
 			t.bell()
-			t.applyEvent(client.DisplayEvent{Type: "ERROR", Content: "Usage: /join <chat> [chat...]"})
+			t.applyLocalEvent(client.DisplayEvent{Type: "ERROR", Content: "Usage: /join <chat> [chat...]"})
 		}
 	case "/pow", "/p":
 		if payload == "" {
@@ -330,6 +351,20 @@ func (t *tui) handleCommand(text string) {
 		case 1:
 			t.submit(client.UserAction{Type: "ACTIVATE_VIEW", Payload: args[0]})
 		default:
+			for _, view := range t.snapshot().views {
+				if !view.IsGroup || view.Name != args[0] {
+					continue
+				}
+				if len(args) != 2 {
+					t.bell()
+					t.applyLocalEvent(client.DisplayEvent{Type: "ERROR", Content: "Usage: /set <group> <member>"})
+					return
+				}
+				if t.submit(client.UserAction{Type: "ACTIVATE_VIEW", Payload: args[0], Chat: args[1]}) {
+					t.rememberConversation(args[0], args[1])
+				}
+				return
+			}
 			t.submit(client.UserAction{Type: "CREATE_GROUP", Payload: strings.Join(args, ",")})
 		}
 	case "/nick", "/n":
@@ -367,14 +402,14 @@ func (t *tui) handleCommand(text string) {
 	case "/relay", "/r":
 		t.submit(client.UserAction{Type: "MANAGE_ANCHORS", Payload: payload})
 	case "/help", "/h":
-		t.submit(client.UserAction{Type: "GET_HELP"})
+		t.submit(client.UserAction{Type: "GET_HELP", Payload: payload})
 	case "/theme", "/t":
 		t.handleTheme(payload)
 	case "/scrollbar", "/sb":
 		t.submit(client.UserAction{Type: "SET_SCROLLBAR", Payload: payload})
 	default:
 		t.bell()
-		t.applyEvent(client.DisplayEvent{Type: "ERROR", Content: "Unknown command: " + command + ". Use /help to list commands."})
+		t.applyLocalEvent(client.DisplayEvent{Type: "ERROR", Content: "Unknown command: " + command + ". Use /help to list commands."})
 	}
 }
 

@@ -59,6 +59,15 @@ func newLineBuffer(maxLines, maxBytes int) *lineBuffer {
 	}
 }
 
+// clear releases text references but reuses the bounded storage. Absolute
+// indices keep increasing so a later render cannot mistake new lines for old.
+func (b *lineBuffer) clear() {
+	clear(b.lines)
+	clear(b.chats)
+	b.first += int64(b.count)
+	b.head, b.count, b.bytes = 0, 0, 0
+}
+
 // append adds a line, evicting the oldest lines until both bounds hold. A
 // single line larger than maxBytes is still retained (bounded by maxLineRunes).
 func (b *lineBuffer) append(line string) {

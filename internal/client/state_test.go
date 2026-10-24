@@ -9,7 +9,7 @@ import (
 
 func TestHelpDocumentsThemeCommand(t *testing.T) {
 	c, events := testClient(t)
-	c.getHelp()
+	c.getHelp("")
 	help := <-events
 	if help.Type != "INFO" || !strings.Contains(help.Content, "/theme [name|number]") || !strings.Contains(help.Content, "Alias: /t") {
 		t.Fatalf("help does not document theme selection: %s", help.Content)

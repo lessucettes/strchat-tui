@@ -506,7 +506,7 @@ func (v *scrollbackView) rebuildWindow(height int) {
 	for end < count {
 		r := v.rec(end)
 		rowAfter := row + int64(max(1, r.rows))
-		if end > start && rowAfter > coverBottom &&
+		if end > start && row >= coverBottom &&
 			(rowAfter > extendBottom || int64(rows+r.rows) > capRows || bytes+len(r.text) > maxScrollbackWindowBytes) {
 			break
 		}

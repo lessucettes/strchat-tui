@@ -83,6 +83,7 @@ type tui struct {
 	logsSynced      int64
 	dropped         int
 	dropNotice      bool
+	clearPending    int // accepted clears not yet acknowledged by the client
 
 	// dirty marks model changes that the redraw loop has not painted yet.
 	dirty atomic.Bool
@@ -137,7 +138,7 @@ type tui struct {
 	logsView              *scrollbackView
 	outputView            *scrollbackView
 	outputPane            *scrollbackView
-	input                 *tview.InputField
+	input                 *inputField
 	hints                 *tview.TextView
 	maximizedLogsFlex     *tview.Flex
 	maximizedOutputFlex   *tview.Flex
@@ -356,12 +357,16 @@ func (t *tui) captureScreen(screen tcell.Screen) {
 // rendering happens later, on the event loop.
 func (t *tui) applyEvent(ev client.DisplayEvent) {
 	switch ev.Type {
+	case "CLEARED":
+		t.mu.Lock()
+		if t.clearPending > 0 {
+			t.clearPending--
+		}
+		t.mu.Unlock()
 	case "NEW_MESSAGE":
 		t.applyNewMessage(ev)
-	case "INFO":
-		t.appendOutput(formatInfo(ev.Content, defaultTheme.titleColor))
-	case "STATUS", "WARN", "ERROR":
-		t.applyLog(ev)
+	case "INFO", "STATUS", "WARN", "ERROR":
+		t.applyTextEvent(ev, false)
 	case "STATE_UPDATE":
 		t.applyStateUpdate(ev)
 	case "RELAYS_UPDATE":
@@ -371,7 +376,9 @@ func (t *tui) applyEvent(ev client.DisplayEvent) {
 	case "MESSAGE_TARGET":
 		if result, ok := ev.Payload.(client.MessageTarget); ok {
 			t.mu.Lock()
-			t.messageTarget = result
+			if t.clearPending == 0 {
+				t.messageTarget = result
+			}
 			t.mu.Unlock()
 			t.dirty.Store(true)
 		}
@@ -394,6 +401,9 @@ func (t *tui) applyEvent(ev client.DisplayEvent) {
 func (t *tui) applyNewMessage(ev client.DisplayEvent) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.clearPending > 0 {
+		return
+	}
 	if !ev.RecipientUnchanged {
 		t.recipientRev++
 	}
@@ -429,17 +439,47 @@ func (t *tui) applyNewMessage(ev client.DisplayEvent) {
 	t.dirty.Store(true)
 }
 
-// applyLog renders operational events with a severity, distinct from INFO
-// events, which carry command output for the message view.
-func (t *tui) applyLog(ev client.DisplayEvent) {
-	level, color := "INFO", defaultTheme.logInfoColor
-	switch ev.Type {
-	case "WARN":
-		level, color = "WARN", defaultTheme.logWarnColor
-	case "ERROR":
-		level, color = "ERROR", defaultTheme.logErrorColor
+// applyLocalEvent keeps new UI diagnostics and command output visible even while
+// buffered client text is being discarded at a clear boundary.
+func (t *tui) applyLocalEvent(ev client.DisplayEvent) {
+	t.applyTextEvent(ev, true)
+}
+
+func (t *tui) applyTextEvent(ev client.DisplayEvent, local bool) {
+	// Only Messages output participates in clear. Operational Logs always flow.
+	preserve := local || ev.Type != "INFO"
+	if !preserve {
+		t.mu.Lock()
+		clearing := t.clearPending > 0
+		t.mu.Unlock()
+		if clearing {
+			return // Do not format large payloads that will be discarded.
+		}
 	}
-	t.appendLogLine(formatLogLine(level, ev.Content, color, time.Now().Format("15:04:05")))
+	var line string
+	if ev.Type == "INFO" {
+		line = formatInfo(ev.Content, defaultTheme.titleColor)
+	} else {
+		level, color := "INFO", defaultTheme.logInfoColor
+		switch ev.Type {
+		case "WARN":
+			level, color = "WARN", defaultTheme.logWarnColor
+		case "ERROR":
+			level, color = "ERROR", defaultTheme.logErrorColor
+		}
+		line = formatLogLine(level, ev.Content, color, time.Now().Format("15:04:05"))
+	}
+	t.mu.Lock()
+	// Clear may have started while formatting outside the model lock.
+	if preserve || t.clearPending == 0 {
+		if ev.Type == "INFO" {
+			t.output.append(line)
+		} else {
+			t.logs.append(line)
+		}
+	}
+	t.mu.Unlock()
+	t.dirty.Store(true)
 }
 
 // applyStateUpdate replaces the chat/group state.
@@ -485,8 +525,10 @@ func (t *tui) applyCompletion(ev client.DisplayEvent) {
 		return
 	}
 	t.mu.Lock()
-	t.completion = slices.Clone(entries)
-	t.completionRev++
+	if t.clearPending == 0 {
+		t.completion = slices.Clone(entries)
+		t.completionRev++
+	}
 	t.mu.Unlock()
 	t.dirty.Store(true)
 }
@@ -494,7 +536,9 @@ func (t *tui) applyCompletion(ev client.DisplayEvent) {
 // appendOutput adds one rendered line to the bounded message scrollback.
 func (t *tui) appendOutput(line string) {
 	t.mu.Lock()
-	t.output.append(line)
+	if t.clearPending == 0 {
+		t.output.append(line)
+	}
 	t.mu.Unlock()
 	t.dirty.Store(true)
 }
@@ -627,9 +671,7 @@ func (t *tui) noteBackpressure() {
 	t.dropNotice = true
 	t.mu.Unlock()
 	if first {
-		t.appendLogLine(formatLogLine("WARN",
-			"Client input queue is full. Some requests were not accepted; retry if needed.",
-			defaultTheme.logWarnColor, time.Now().Format("15:04:05")))
+		t.applyLocalEvent(client.DisplayEvent{Type: "WARN", Content: "Client input queue is full. Some requests were not accepted; retry if needed."})
 	}
 	t.updateHints()
 }
@@ -644,9 +686,7 @@ func (t *tui) clearBackpressure() {
 		return
 	}
 	if dropped > 0 {
-		t.appendLogLine(formatLogLine("INFO",
-			"Client input queue recovered. Retry any action that was not accepted.",
-			defaultTheme.logInfoColor, time.Now().Format("15:04:05")))
+		t.applyLocalEvent(client.DisplayEvent{Type: "STATUS", Content: "Client input queue recovered. Retry any action that was not accepted."})
 	}
 	t.updateHints()
 }
@@ -723,20 +763,11 @@ func (t *tui) initViews() {
 	// different messages on narrow screens and desynchronize the thread gutter.
 	t.outputPane = t.outputView
 
-	t.input = tview.NewInputField().
+	t.input = &inputField{InputField: tview.NewInputField().
 		SetLabelStyle(tcell.StyleDefault.Foreground(t.theme.titleColor)).
 		SetFieldBackgroundColor(t.theme.inputBgColor).
-		SetFieldTextColor(t.theme.inputTextColor)
+		SetFieldTextColor(t.theme.inputTextColor)}
 	t.input.SetBorder(true).SetTitle(titleInput).SetTitleAlign(tview.AlignLeft)
-	t.input.SetAutocompleteUseTags(false)
-	t.input.SetAutocompleteFunc(t.handleAutocomplete)
-	t.input.SetAcceptanceFunc(func(text string, _ rune) bool {
-		if len(text) > client.MaxMsgLen && graphemeLen(text) > client.MaxMsgLen {
-			t.bell()
-			return false
-		}
-		return true
-	})
 
 	t.hints = tview.NewTextView().SetDynamicColors(true).SetTextAlign(tview.AlignLeft)
 	t.initScrollbars()

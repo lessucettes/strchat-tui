@@ -109,17 +109,22 @@ func (t *tui) selectConversation(s modelSnapshot, chat string) {
 		if !t.submit(client.UserAction{Type: "SELECT_GROUP_CHAT", View: view.Name, Chat: chat}) {
 			return
 		}
-		t.mu.Lock()
-		for _, current := range t.views {
-			if current.IsGroup && current.Name == view.Name && slices.Contains(current.Children, chat) {
-				t.groupFocus[view.Name] = chat
-				break
-			}
-		}
-		t.mu.Unlock()
+		t.rememberConversation(view.Name, chat)
 	}
 	t.infoReveal = true
 	t.render()
+}
+
+// Keep keyboard, mouse and command choices in the same optimistic overlay.
+func (t *tui) rememberConversation(group, chat string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, view := range t.views {
+		if view.IsGroup && view.Name == group && slices.Contains(view.Children, chat) {
+			t.groupFocus[group] = chat
+			break
+		}
+	}
 }
 
 // Reveal after layout has assigned the real rectangle, not using the previous

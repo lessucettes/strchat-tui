@@ -113,7 +113,7 @@ func (t *tui) handleTheme(arg string) {
 			b.WriteByte('\n')
 		}
 		b.WriteString("Usage: /theme <name|number> (alias: /t)")
-		t.applyEvent(client.DisplayEvent{Type: "INFO", Content: b.String()})
+		t.applyLocalEvent(client.DisplayEvent{Type: "INFO", Content: b.String()})
 		return
 	}
 	for i, entry := range themes {
@@ -123,7 +123,7 @@ func (t *tui) handleTheme(arg string) {
 		}
 	}
 	t.bell()
-	t.applyEvent(client.DisplayEvent{Type: "ERROR", Content: "Unknown theme: " + arg + ". Use /theme to list themes."})
+	t.applyLocalEvent(client.DisplayEvent{Type: "ERROR", Content: "Unknown theme: " + arg + ". Use /theme to list themes."})
 }
 
 // restoreTheme runs only on the event loop, for startup and successful saves.
@@ -164,9 +164,7 @@ func (t *tui) applyTheme() {
 		view.SetTextStyle(text)
 	}
 	t.chatList.SetMainTextStyle(text).SetSecondaryTextStyle(text).SetSelectedStyle(selected)
-	t.input.SetLabelStyle(text.Foreground(th.titleColor)).
-		SetFieldStyle(text.Foreground(th.inputTextColor).Background(th.inputBgColor)).
-		SetAutocompleteStyles(th.backgroundColor, text, selected)
+	t.applyInputTheme()
 	t.themeColors = th.scrollbackColors()
 	// Scrollback records keep canonical default-theme markup; only the widget
 	// window has to be recolored, so no history rewrite or cursor reset is
@@ -176,6 +174,16 @@ func (t *tui) applyTheme() {
 	t.detailsKeySet = false
 	t.updateFocusBorders()
 	t.updateHints()
+}
+
+// applyInputTheme also styles an editor freshly reset by /clear.
+func (t *tui) applyInputTheme() {
+	th := t.theme
+	text := tcell.StyleDefault.Foreground(th.textColor).Background(th.backgroundColor)
+	selected := tcell.StyleDefault.Foreground(th.backgroundColor).Background(th.titleColor)
+	t.input.SetLabelStyle(text.Foreground(th.titleColor)).
+		SetFieldStyle(text.Foreground(th.inputTextColor).Background(th.inputBgColor)).
+		SetAutocompleteStyles(th.backgroundColor, text, selected)
 }
 
 // scrollbackColors maps the model's fixed default-theme markup at render time.

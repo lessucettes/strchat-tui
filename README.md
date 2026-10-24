@@ -59,9 +59,11 @@ Useful commands:
 |---|---|
 | `/join <name> [name...]` | Join chats |
 | `/set <name>` | Activate a chat/group |
+| `/set <group> <member>` | Activate an existing group and select its sending destination |
 | `/set <name1> <name2>...` | Create and activate a local group of joined chats |
 | `/list`, `/del [name]` | List or leave chats |
 | `/nick [name]` | Set or clear a nickname |
+| `/clear` | Clear messages and known participants; keep Logs, chats and connections |
 | `/theme [name\|number]`, `/t` | List themes or switch and save colors |
 | `/scrollbar [0\|1\|2]`, `/sb` | Cycle or save scrollbar placement; repeat the current mode for help |
 | `/relay [url...]` | List or add explicit relays |
@@ -69,12 +71,30 @@ Useful commands:
 | `/pow <0..16>` | Set proof-of-work for the active chat/group; default 0 |
 | `/block`, `/unblock` | Manage blocked participants |
 | `/filter`, `/mute` | Include or hide matching text/regex |
-| `/help` | Full command reference and aliases |
+| `/help [category]`, `/h` | All command categories, or one category with aliases |
+
+Help is grouped into `chats`, `moderation`, `appearance`, `network`, and
+`general`. Use `/help` for the complete reference or `/help chats` for one
+section. Category names are case-insensitive; an unknown category shows the
+available names. Each entry lists its syntax, alias, and argument behavior.
 
 Use nickname completion to address a known participant with `@nick#suffix`.
 In a group, a leading mention sends to that participant's chat instead of the
 selected member. This is a **public reply, not a DM**. Completion uses full
 public keys when short identifiers collide; ambiguous recipients are rejected.
+
+`/clear` takes no arguments. It clears Messages (including scrollback),
+input history, participant/recipient suggestions and optional verification caches.
+Logs, including their history and scroll position, are preserved and continue
+receiving operational events during clear. Chats, groups, the selected sending
+destination, settings, session identities, relay connections and pending sends
+are preserved. Known participants return as
+new messages arrive. Bounded processed-event IDs are retained to suppress replay;
+subscriptions are not restarted. Clear is silent and does not wait for garbage
+collection or write the config. Live traffic continues and may refill the screen
+immediately; transport queues are not drained. It is not secure memory erasure
+and cannot delete public messages from relays or clear the terminal emulator's
+own scrollback.
 
 ## Keyboard controls
 
@@ -182,6 +202,11 @@ For example, join two chats and combine them:
 ```
 
 You can also mark chats with Space in Chats and press Enter to create a group.
+Use `/set <group-name> <member-chat>` (or `/s`) to activate an existing group
+and select its sending destination. The chat must already belong to that group;
+an invalid member leaves the current view and destination unchanged. A list of
+ordinary chat names still creates a group, as above.
+
 To choose where to send:
 
 1. Highlight the active group in Chats and press `Alt+N` to focus Info.

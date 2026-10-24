@@ -12,6 +12,8 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
+
+	"github.com/lessucettes/strchat-tui/internal/client"
 )
 
 // scrollbackCell is one compared screen cell.
@@ -123,6 +125,20 @@ func TestScrollbackMatchesReferenceTextView(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestScrollbackKeepsHelpHeadingVisibleAcrossRecords(t *testing.T) {
+	s := newSimTUI(t, 58, 10)
+	s.onLoop(func() {
+		s.ui.applyEvent(client.DisplayEvent{Type: "INFO", Content: "No chats joined. Use /join <chat> and /help. Public messages are not encrypted."})
+		s.ui.applyEvent(client.DisplayEvent{Type: "INFO", Content: "CATEGORY:\n" + strings.Repeat("  Command description.\n", 40)})
+		s.ui.render()
+		s.ui.outputView.ScrollToBeginning()
+	})
+	s.draw()
+	if !strings.Contains(s.text(), "CATEGORY:") {
+		t.Fatalf("oversized help record was omitted despite starting in the viewport:\n%s", s.text())
 	}
 }
 

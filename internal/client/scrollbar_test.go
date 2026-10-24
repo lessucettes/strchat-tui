@@ -274,15 +274,14 @@ func TestSetScrollbarSaveFailureKeepsLiveAndSavedState(t *testing.T) {
 
 func TestHelpPlacesScrollbarAfterTheme(t *testing.T) {
 	c, events := testClient(t)
-	c.getHelp()
+	c.getHelp("appearance")
 	ev := <-events
-	theme := strings.Index(ev.Content, "* /theme")
-	scrollbar := strings.Index(ev.Content, "* /scrollbar")
-	pow := strings.Index(ev.Content, "* /pow")
-	if theme < 0 || scrollbar < 0 || pow < 0 {
-		t.Fatalf("help is missing theme, scrollbar, or pow: %q", ev.Content)
+	theme := strings.Index(ev.Content, "/theme ")
+	scrollbar := strings.Index(ev.Content, "/scrollbar ")
+	if theme < 0 || scrollbar < 0 {
+		t.Fatalf("help is missing theme or scrollbar: %q", ev.Content)
 	}
-	if !(theme < scrollbar && scrollbar < pow) {
+	if theme >= scrollbar {
 		t.Fatalf("scrollbar help is not immediately after theme: %q", ev.Content)
 	}
 	if !strings.Contains(ev.Content, "(Alias: /sb)") {
