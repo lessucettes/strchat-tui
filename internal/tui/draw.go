@@ -652,7 +652,7 @@ func hintsText(s hintsState) string {
 			}
 			text = fmt.Sprintf("%s | %s↑/↓[-]: %s | %sTab/Shift+Tab[-]: Cycle Focus | %s", quit, s.highlight, navigation, s.highlight, base)
 		case focusChats:
-			text = fmt.Sprintf("%s | %s↑/↓[-]: Scroll | %sSpace[-]: Select | %sEnter[-]: Activate | %sDel[-]: Delete | %sTab/Shift+Tab[-]: Cycle Focus | %s", quit, s.highlight, s.highlight, s.highlight, s.highlight, s.highlight, base)
+			text = fmt.Sprintf("%s | %s↑/↓[-]: Highlight | %sSpace[-]: Select | %sEnter[-]: Activate | %sDel[-]: Delete | %sTab/Shift+Tab[-]: Cycle Focus | %s", quit, s.highlight, s.highlight, s.highlight, s.highlight, s.highlight, base)
 		case focusLogs:
 			text = fmt.Sprintf("%s | %s`[-]: Maximize | %s↑/↓[-]: Scroll | %sTab/Shift+Tab[-]: Cycle Focus | %s", quit, s.highlight, s.highlight, s.highlight, base)
 		default:

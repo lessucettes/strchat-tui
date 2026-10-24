@@ -130,8 +130,8 @@ pane ends the drag. Scrolling Chats may move its local preview highlight, but
 does not activate a chat; scrolling Info does not change the sending destination.
 Mouse movement without a held button is not reported.
 The compact one-row Logs pane has no scrollbar; use Up/Down or the wheel, or
-maximize it for a full-height track. Logs and Chats show Up/Down scrolling in
-their contextual hints.
+maximize it for a full-height track. The contextual hints label Up/Down as
+Scroll in Logs and Highlight in Chats; highlighting does not activate a chat.
 
 ## Local groups
 
