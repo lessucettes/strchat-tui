@@ -21,11 +21,11 @@ func TestContextHintsRetainExistingBindings(t *testing.T) {
 					case focusInput:
 						want = append(want, "Enter", "Send", "Ctrl+P/N", "History")
 					case focusChats:
-						want = append(want, "Space", "Select", "Enter", "Activate", "Del", "Delete")
+						want = append(want, "↑/↓", "Scroll", "Space", "Select", "Enter", "Activate", "Del", "Delete")
 					case focusMessages:
 						want = append(want, "`", "Maximize", "↑/↓", "Scroll")
 					case focusLogs:
-						want = append(want, "`", "Maximize")
+						want = append(want, "`", "Maximize", "↑/↓", "Scroll")
 					case focusInfo:
 						want = append(want, "↑/↓")
 						if group {

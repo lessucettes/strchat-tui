@@ -68,6 +68,7 @@ type tui struct {
 	activeViewIndex int
 	chatNicks       map[string]string
 	themeName       string
+	scrollbarMode   client.ScrollbarPosition
 	relays          []client.RelayInfo
 	stateRev        int64
 	relaysRev       int64
@@ -116,6 +117,14 @@ type tui struct {
 	lastBell             time.Time
 	theme                *theme
 	themeColors          *strings.Replacer
+	scrollbarPosition    client.ScrollbarPosition
+	scrollbars           [4]*scrollbarPane
+	scrollbarDrag        *scrollbarPane
+	scrollbarGrab        int
+	scrollbarOrigin      int64
+	scrollbarPress       bool
+	mouseScreen          tcell.Screen
+	mouseFlags           tcell.MouseFlags
 
 	// Widgets.
 	mainFlex              *tview.Flex
@@ -161,6 +170,7 @@ func New(actions chan<- client.UserAction, events <-chan client.DisplayEvent) *t
 		outputSynced:      -1,
 		logsSynced:        -1,
 		theme:             defaultTheme,
+		scrollbarMode:     client.ScrollbarRight,
 	}
 	t.setupViews()
 	t.setupHandlers()
@@ -336,10 +346,8 @@ func (t *tui) wake() {
 // stopped) and releases the first-draw signal used by the supervisor.
 func (t *tui) captureScreen(screen tcell.Screen) {
 	t.screen.Store(&screen)
+	t.updateMouseReporting(screen)
 	t.screenOnce.Do(func() {
-		// tview.EnableMouse requests motion too. Only clicks and wheel
-		// events are needed; unsupported terminals ignore this request.
-		screen.EnableMouse(tcell.MouseButtonEvents)
 		close(t.screenReady)
 	})
 }
@@ -372,6 +380,13 @@ func (t *tui) applyEvent(ev client.DisplayEvent) {
 		t.themeName = ev.Content
 		t.mu.Unlock()
 		t.dirty.Store(true)
+	case "SCROLLBAR_UPDATE":
+		if position, ok := ev.Payload.(client.ScrollbarPosition); ok {
+			t.mu.Lock()
+			t.scrollbarMode = position
+			t.mu.Unlock()
+			t.dirty.Store(true)
+		}
 	}
 }
 
@@ -505,6 +520,7 @@ type modelSnapshot struct {
 	activeIndex   int
 	chatNicks     map[string]string
 	themeName     string
+	scrollbarMode client.ScrollbarPosition
 	relays        []client.RelayInfo
 	stateRev      int64
 	relaysRev     int64
@@ -528,6 +544,7 @@ func (t *tui) snapshot() modelSnapshot {
 		activeIndex:   t.activeViewIndex,
 		chatNicks:     t.chatNicks, // immutable after the collector clones it
 		themeName:     t.themeName,
+		scrollbarMode: t.scrollbarMode,
 		relays:        slices.Clone(t.relays),
 		stateRev:      t.stateRev,
 		relaysRev:     t.relaysRev,
@@ -718,19 +735,20 @@ func (t *tui) initViews() {
 	})
 
 	t.hints = tview.NewTextView().SetDynamicColors(true).SetTextAlign(tview.AlignLeft)
+	t.initScrollbars()
 }
 
 // initLayout composes the containers and installs the size-adaptive hook.
 func (t *tui) initLayout() {
 	t.sidebarFlex = tview.NewFlex().
 		SetDirection(tview.FlexRow).
-		AddItem(t.chatList, 0, 1, true).
-		AddItem(t.detailsView, 0, 1, false)
+		AddItem(t.withScrollbar(t.chatList), 0, 1, true).
+		AddItem(t.withScrollbar(t.detailsView), 0, 1, false)
 
 	t.sidebarFlexHorizontal = tview.NewFlex().
 		SetDirection(tview.FlexColumn).
-		AddItem(t.chatList, 0, 1, true).
-		AddItem(t.detailsView, 0, 1, false)
+		AddItem(t.withScrollbar(t.chatList), 0, 1, true).
+		AddItem(t.withScrollbar(t.detailsView), 0, 1, false)
 
 	t.contentGrid = tview.NewGrid().SetBorders(false)
 	t.bottomFlex = tview.NewFlex().SetDirection(tview.FlexRow)
@@ -739,12 +757,12 @@ func (t *tui) initLayout() {
 
 	t.maximizedLogsFlex = tview.NewFlex().
 		SetDirection(tview.FlexRow).
-		AddItem(t.logsView, 0, 1, true).
+		AddItem(t.withScrollbar(t.logsView), 0, 1, true).
 		AddItem(t.hints, 1, 0, false)
 
 	t.maximizedOutputFlex = tview.NewFlex().
 		SetDirection(tview.FlexRow).
-		AddItem(t.outputPane, 0, 1, true).
+		AddItem(t.withScrollbar(t.outputPane), 0, 1, true).
 		AddItem(t.hints, 1, 0, false)
 
 	// BeforeDraw is the only per-draw hook tview offers. It runs while tview

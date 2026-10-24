@@ -350,6 +350,7 @@ func (c *client) getHelp() {
 		"* /del [name] - Deletes a chat/group. If no name, deletes the active chat/group. (Alias: /d)\n" +
 		"* /nick [new_nick] - Sets or clears your nickname. (Alias: /n)\n" +
 		"* /theme [name|number] - Lists themes or switches and saves the theme. (Alias: /t)\n" +
+		"* /scrollbar [0|1|2] - Cycles silently without args; sets 0 off, 1 right (default), 2 left. Same mode shows help. (Alias: /sb)\n" +
 		"* /pow [number] - Sets Proof-of-Work difficulty for the active chat/group. 0 to disable. (Alias: /p)\n" +
 		"* /relay [<num>|url1...] - List, remove (#), or add anchor relays. (Alias: /r)\n" +
 		"* /block [@nick] - Blocks a user. Without nick, lists blocked users. (Alias: /b)\n" +

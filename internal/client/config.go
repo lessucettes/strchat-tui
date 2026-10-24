@@ -31,15 +31,16 @@ type filter struct {
 
 // config is the main structure of the configuration file.
 type config struct {
-	Nick           string        `json:"nick,omitempty"`
-	Theme          string        `json:"theme,omitempty"`
-	Views          []View        `json:"views"`
-	ActiveViewName string        `json:"active_view_name"`
-	AnchorRelays   []string      `json:"anchor_relays,omitempty"`
-	BlockedUsers   []blockedUser `json:"blocked_users,omitempty"`
-	Filters        []filter      `json:"filters,omitempty"`
-	Mutes          []filter      `json:"mutes,omitempty"`
-	path           string        `json:"-"`
+	Nick           string            `json:"nick,omitempty"`
+	Theme          string            `json:"theme,omitempty"`
+	Scrollbar      ScrollbarPosition `json:"scrollbar"`
+	Views          []View            `json:"views"`
+	ActiveViewName string            `json:"active_view_name"`
+	AnchorRelays   []string          `json:"anchor_relays,omitempty"`
+	BlockedUsers   []blockedUser     `json:"blocked_users,omitempty"`
+	Filters        []filter          `json:"filters,omitempty"`
+	Mutes          []filter          `json:"mutes,omitempty"`
+	path           string            `json:"-"`
 }
 
 // Windows uses the containing directory's ACL; Unix platforms use owner-only modes.
@@ -63,7 +64,7 @@ func loadConfig() (*config, error) {
 // file is replaced by a fresh default configuration. A malformed file is
 // reported as an error; error messages never include file contents.
 func loadConfigFrom(path string) (*config, error) {
-	conf := &config{path: path}
+	conf := &config{path: path, Scrollbar: ScrollbarRight}
 
 	file, err := os.Open(path)
 	if err != nil {
@@ -115,6 +116,9 @@ const maxConfigPoW = maxPoW
 // validate checks the configuration for malformed values. Error messages must
 // not echo raw file contents.
 func (c *config) validate() error {
+	if !c.Scrollbar.valid() {
+		return fmt.Errorf("config: scrollbar position %d is outside the supported range 0..2", c.Scrollbar)
+	}
 	for i, relay := range c.AnchorRelays {
 		if _, err := normalizeRelayURL(relay); err != nil {
 			return fmt.Errorf("config: invalid relay URL at index %d: %w", i+1, err)
@@ -188,6 +192,7 @@ func (c *config) save() error {
 func createDefaultConfig(path string) (*config, error) {
 	conf := &config{
 		Theme:          DefaultTheme,
+		Scrollbar:      ScrollbarRight,
 		Views:          []View{},
 		ActiveViewName: "",
 		AnchorRelays:   []string{},

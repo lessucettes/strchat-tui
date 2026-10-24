@@ -114,20 +114,20 @@ func (t *tui) rebuildLayout(plan layoutPlan) {
 	case modeFull:
 		t.contentGrid.SetRows(0)
 		t.contentGrid.SetColumns(0, 30)
-		t.contentGrid.AddItem(t.outputPane, 0, 0, 1, 1, 0, 0, false)
+		t.contentGrid.AddItem(t.withScrollbar(t.outputPane), 0, 0, 1, 1, 0, 0, false)
 		t.contentGrid.AddItem(t.sidebarFlex, 0, 1, 1, 1, 0, 0, false)
 	case modeNarrow:
 		t.contentGrid.SetRows(0, narrowSidebarRows)
 		t.contentGrid.SetColumns(0)
-		t.contentGrid.AddItem(t.outputPane, 0, 0, 1, 1, 0, 0, false)
+		t.contentGrid.AddItem(t.withScrollbar(t.outputPane), 0, 0, 1, 1, 0, 0, false)
 		t.contentGrid.AddItem(t.sidebarFlexHorizontal, 1, 0, 1, 1, 0, 0, false)
 	case modeTiny:
 		t.contentGrid.SetRows(0)
 		t.contentGrid.SetColumns(0)
 		if t.infoTemporary {
-			t.contentGrid.AddItem(t.detailsView, 0, 0, 1, 1, 0, 0, false)
+			t.contentGrid.AddItem(t.withScrollbar(t.detailsView), 0, 0, 1, 1, 0, 0, false)
 		} else if plan.output {
-			t.contentGrid.AddItem(t.outputPane, 0, 0, 1, 1, 0, 0, false)
+			t.contentGrid.AddItem(t.withScrollbar(t.outputPane), 0, 0, 1, 1, 0, 0, false)
 		}
 	}
 
@@ -139,7 +139,7 @@ func (t *tui) rebuildLayout(plan layoutPlan) {
 
 	t.mainFlex.Clear()
 	if plan.logs {
-		t.mainFlex.AddItem(t.logsView, logsHeight, 0, false)
+		t.mainFlex.AddItem(t.withScrollbar(t.logsView), logsHeight, 0, false)
 	}
 	t.mainFlex.AddItem(t.contentGrid, 0, 1, false)
 	height := bottomHeight
@@ -342,6 +342,7 @@ func (t *tui) render() {
 	if t.restoreTheme(s.themeName) {
 		s = t.snapshot() // Theme changes invalidate both scrollback cursors.
 	}
+	t.restoreScrollbar(s.scrollbarMode)
 	view := activeView(s)
 	t.outputPane.enabled = view != nil && view.IsGroup
 	t.outputPane.focus = t.conversationChat(s)
@@ -370,7 +371,6 @@ func (t *tui) render() {
 	t.updateFocusBorders()
 	t.renderHints(s)
 }
-
 
 // renderChatList rebuilds the chat list only when client state or the local
 // selection changed: rebuilding clears the widget, so it must stay rare.
@@ -450,6 +450,11 @@ func (t *tui) renderDetails(s modelSnapshot) {
 		index = -1
 	}
 	key := detailsPaneKey{stateRev: s.stateRev, relaysRev: s.relaysRev, index: index, chat: t.conversationChat(s)}
+	if index >= 0 && s.views[index].IsGroup {
+		// Group Info contains members, not relay status. Background relay
+		// updates must not rebuild it and rewind the user's scroll position.
+		key.relaysRev = 0
+	}
 	if key == t.detailsKey && t.detailsKeySet {
 		return
 	}
@@ -471,7 +476,7 @@ func (t *tui) renderDetails(s modelSnapshot) {
 				fmt.Fprintf(&b, " - %s\n", sanitizeLineForDisplay(child))
 			}
 		}
-		fmt.Fprint(t.detailsView, b.String())
+		fmt.Fprint(t.detailsView, strings.TrimSuffix(b.String(), "\n"))
 		return
 	}
 
@@ -493,7 +498,7 @@ func (t *tui) renderDetails(s modelSnapshot) {
 		host := strings.TrimPrefix(strings.TrimPrefix(r.URL, "wss://"), "ws://")
 		b.WriteString(fmt.Sprintf(" %s%s[-] %s\n", colorTag(statusColor), symbol, sanitizeLineForDisplay(host)))
 	}
-	fmt.Fprint(t.detailsView, b.String())
+	fmt.Fprint(t.detailsView, strings.TrimSuffix(b.String(), "\n"))
 }
 
 // renderCompletion forwards a completed nickname list to the input field.
@@ -647,9 +652,9 @@ func hintsText(s hintsState) string {
 			}
 			text = fmt.Sprintf("%s | %s↑/↓[-]: %s | %sTab/Shift+Tab[-]: Cycle Focus | %s", quit, s.highlight, navigation, s.highlight, base)
 		case focusChats:
-			text = fmt.Sprintf("%s | %sSpace[-]: Select | %sEnter[-]: Activate | %sDel[-]: Delete | %sTab/Shift+Tab[-]: Cycle Focus | %s", quit, s.highlight, s.highlight, s.highlight, s.highlight, base)
+			text = fmt.Sprintf("%s | %s↑/↓[-]: Scroll | %sSpace[-]: Select | %sEnter[-]: Activate | %sDel[-]: Delete | %sTab/Shift+Tab[-]: Cycle Focus | %s", quit, s.highlight, s.highlight, s.highlight, s.highlight, s.highlight, base)
 		case focusLogs:
-			text = fmt.Sprintf("%s | %s`[-]: Maximize | %sTab/Shift+Tab[-]: Cycle Focus | %s", quit, s.highlight, s.highlight, base)
+			text = fmt.Sprintf("%s | %s`[-]: Maximize | %s↑/↓[-]: Scroll | %sTab/Shift+Tab[-]: Cycle Focus | %s", quit, s.highlight, s.highlight, s.highlight, base)
 		default:
 			text = quit + " | " + base
 		}

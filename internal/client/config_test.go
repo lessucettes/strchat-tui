@@ -93,6 +93,9 @@ func TestLoadConfigFromCreatesSecretFreeDefault(t *testing.T) {
 	if conf.Theme != DefaultTheme {
 		t.Errorf("default theme = %q, want %q", conf.Theme, DefaultTheme)
 	}
+	if conf.Scrollbar != ScrollbarRight {
+		t.Errorf("default scrollbar = %v, want right", conf.Scrollbar)
+	}
 	if conf.Nick != "" || len(conf.Views) != 0 || conf.ActiveViewName != "" {
 		t.Errorf("default config is not empty: %+v", conf)
 	}

@@ -13,6 +13,9 @@ func (t *tui) setupMouse() {
 		if event == nil {
 			return nil, action
 		}
+		if t.scrollbarPress && t.captureScrollbar(event, action) {
+			return nil, action
+		}
 		if action == tview.MouseLeftUp && completionPress {
 			completionPress = false
 			return nil, action
@@ -34,6 +37,9 @@ func (t *tui) setupMouse() {
 					return nil, action
 				}
 			}
+		}
+		if t.captureScrollbar(event, action) {
+			return nil, action
 		}
 		if action == tview.MouseLeftDown {
 			x, y := event.Position()

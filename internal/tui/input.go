@@ -370,6 +370,8 @@ func (t *tui) handleCommand(text string) {
 		t.submit(client.UserAction{Type: "GET_HELP"})
 	case "/theme", "/t":
 		t.handleTheme(payload)
+	case "/scrollbar", "/sb":
+		t.submit(client.UserAction{Type: "SET_SCROLLBAR", Payload: payload})
 	default:
 		t.bell()
 		t.applyEvent(client.DisplayEvent{Type: "ERROR", Content: "Unknown command: " + command + ". Use /help to list commands."})

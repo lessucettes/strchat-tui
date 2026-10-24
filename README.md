@@ -63,6 +63,7 @@ Useful commands:
 | `/list`, `/del [name]` | List or leave chats |
 | `/nick [name]` | Set or clear a nickname |
 | `/theme [name\|number]`, `/t` | List themes or switch and save colors |
+| `/scrollbar [0\|1\|2]`, `/sb` | Cycle or save scrollbar placement; repeat the current mode for help |
 | `/relay [url...]` | List or add explicit relays |
 | `/relay <number>` | Remove a configured relay |
 | `/pow <0..16>` | Set proof-of-work for the active chat/group; default 0 |
@@ -109,6 +110,28 @@ focus; moving the pointer alone does nothing.
 In tmux, mouse events are available when its `mouse` option is enabled. The
 client does not change tmux or system settings. For terminal text selection,
 use your terminal's mouse override (usually Shift while dragging).
+
+### Scrollbars
+
+Scrollbars use the right border by default. `/scrollbar 1` selects the right
+border of Messages, Logs, Chats and Info; `/scrollbar 2` uses the left border,
+and `/scrollbar 0` turns them off. `/sb` is an alias. Without arguments, either
+command silently cycles through `0` (off), `1` (right), `2` (left), and back to
+`0`. The setting is saved and restored at startup, including an explicit off
+selection. Repeating the current mode, such as `/sb 1` when right is already
+selected, shows the current mode and command help without saving again.
+
+A bar appears only when the pane has more text or entries than fit vertically.
+It occupies the existing border, leaving text width and wrapping unchanged.
+The thumb represents the retained history, including wrapped lines, rather
+than only the fragment currently rendered. Click the track above or below the
+thumb to move one page, or drag the thumb without Shift. Releasing outside the
+pane ends the drag. Scrolling Chats may move its local preview highlight, but
+does not activate a chat; scrolling Info does not change the sending destination.
+Mouse movement without a held button is not reported.
+The compact one-row Logs pane has no scrollbar; use Up/Down or the wheel, or
+maximize it for a full-height track. Logs and Chats show Up/Down scrolling in
+their contextual hints.
 
 ## Local groups
 
@@ -281,8 +304,9 @@ Configuration is saved in the OS user-config directory under
 `~/.config/strchat-tui/config.json` when XDG_CONFIG_HOME is unset.
 
 The file stores joined chats/groups, selected group destinations, relays,
-nickname, theme, filters and mutes, but no private keys. These settings can
-still reveal personal information, including joined geographic channels.
+nickname, theme, scrollbar placement, filters and mutes, but no private keys.
+These settings can still reveal personal information, including joined
+geographic channels.
 
 Each chat has an independent signing identity kept only in memory. Sending to
 the same chat separately or through any local group uses the same identity.
