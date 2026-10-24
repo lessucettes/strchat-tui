@@ -55,7 +55,7 @@ func TestNetworkFailureCooldownSurvivesViewSwitches(t *testing.T) {
 		c.relayTiming.minimum = 30 * time.Second
 		c.relayTiming.maximum = 30 * time.Second
 	})
-	h.waitForEvent("cooldown after a real failed dial", contentPred("waiting for retry cooldown"))
+	h.waitForEvent("cooldown after a real failed dial", contentPred("No relay connection"))
 	for range 3 {
 		h.send(UserAction{Type: "ACTIVATE_VIEW", Payload: "other"})
 		h.send(UserAction{Type: "ACTIVATE_VIEW", Payload: "lobby"})

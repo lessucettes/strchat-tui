@@ -263,7 +263,7 @@ func formatInfo(content string, color tcell.Color) string {
 	return fmt.Sprintf("%s-- %s[-]", colorTag(color), sanitizeForDisplay(content))
 }
 
-// formatLogLine renders a STATUS/ERROR event for the log view.
+// formatLogLine renders an operational INFO/WARN/ERROR line for the log view.
 func formatLogLine(level, content string, color tcell.Color, timestamp string) string {
 	content = truncateRunes(strings.TrimSpace(content), maxPayloadRunes)
 	return fmt.Sprintf("%s[%s] %s: %s[-]", colorTag(color), timestamp, sanitizeLineForDisplay(level), sanitizeForDisplay(content))
@@ -271,6 +271,5 @@ func formatLogLine(level, content string, color tcell.Color, timestamp string) s
 
 // formatAutoLogLine renders a line captured from the standard logger.
 func formatAutoLogLine(timestamp, message string, color tcell.Color) string {
-	message = truncateRunes(strings.TrimSpace(message), maxPayloadRunes)
-	return fmt.Sprintf("%s[%s] %s[-]", colorTag(color), timestamp, sanitizeForDisplay(message))
+	return formatLogLine("INFO", message, color, timestamp)
 }

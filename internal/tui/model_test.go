@@ -209,7 +209,7 @@ func TestFormatInfoAndLogLines(t *testing.T) {
 		t.Fatalf("formatLogLine = %q, want %q", logLine, want)
 	}
 	auto := formatAutoLogLine("15:04:05", "msg [y]", tcell.ColorGray)
-	if want := colorTag(tcell.ColorGray) + "[15:04:05] " + tview.Escape("msg [y]") + "[-]"; auto != want {
+	if want := colorTag(tcell.ColorGray) + "[15:04:05] INFO: " + tview.Escape("msg [y]") + "[-]"; auto != want {
 		t.Fatalf("formatAutoLogLine = %q, want %q", auto, want)
 	}
 }

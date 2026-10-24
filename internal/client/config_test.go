@@ -1,11 +1,13 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -76,6 +78,27 @@ func requireNoContentEcho(t *testing.T, err error, marker string) {
 	t.Helper()
 	if strings.Contains(err.Error(), marker) {
 		t.Fatalf("error message echoes file content: %q", err.Error())
+	}
+}
+
+func TestConfigSaveFailureIsReportedOnce(t *testing.T) {
+	c, events := testClient(t)
+	c.config.path = t.TempDir() // A file cannot replace this directory.
+	var captured bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&captured)
+	defer log.SetOutput(previous)
+	c.saveConfig()
+	select {
+	case event := <-events:
+		if event.Type != "ERROR" || !strings.Contains(event.Content, "Failed to save configuration") {
+			t.Fatalf("save failure was not reported clearly: %+v", event)
+		}
+	default:
+		t.Fatal("save failure was not reported")
+	}
+	if captured.Len() != 0 || len(events) != 0 {
+		t.Fatal("save failure was also written to the standard logger or reported twice")
 	}
 }
 

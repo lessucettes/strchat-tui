@@ -360,7 +360,7 @@ func (t *tui) applyEvent(ev client.DisplayEvent) {
 		t.applyNewMessage(ev)
 	case "INFO":
 		t.appendOutput(formatInfo(ev.Content, defaultTheme.titleColor))
-	case "STATUS", "ERROR":
+	case "STATUS", "WARN", "ERROR":
 		t.applyLog(ev)
 	case "STATE_UPDATE":
 		t.applyStateUpdate(ev)
@@ -429,13 +429,17 @@ func (t *tui) applyNewMessage(ev client.DisplayEvent) {
 	t.dirty.Store(true)
 }
 
-// applyLog appends a STATUS/ERROR line to the log scrollback.
+// applyLog renders operational events with a severity, distinct from INFO
+// events, which carry command output for the message view.
 func (t *tui) applyLog(ev client.DisplayEvent) {
-	color := defaultTheme.logWarnColor
-	if ev.Type == "ERROR" {
-		color = defaultTheme.logErrorColor
+	level, color := "INFO", defaultTheme.logInfoColor
+	switch ev.Type {
+	case "WARN":
+		level, color = "WARN", defaultTheme.logWarnColor
+	case "ERROR":
+		level, color = "ERROR", defaultTheme.logErrorColor
 	}
-	t.appendLogLine(formatLogLine(ev.Type, ev.Content, color, time.Now().Format("15:04:05")))
+	t.appendLogLine(formatLogLine(level, ev.Content, color, time.Now().Format("15:04:05")))
 }
 
 // applyStateUpdate replaces the chat/group state.
@@ -606,7 +610,7 @@ func (t *tui) submit(action client.UserAction) bool {
 		t.clearBackpressure()
 		return true
 	default:
-		t.noteBackpressure(action.Type)
+		t.noteBackpressure()
 		if action.Type != "REQUEST_NICK_COMPLETION" && action.Type != "QUIT" {
 			t.bell()
 		}
@@ -616,7 +620,7 @@ func (t *tui) submit(action client.UserAction) bool {
 
 // noteBackpressure records a dropped action. The first drop of a burst is
 // logged once; the hint line carries the running state.
-func (t *tui) noteBackpressure(actionType string) {
+func (t *tui) noteBackpressure() {
 	t.mu.Lock()
 	first := !t.dropNotice
 	t.dropped++
@@ -624,7 +628,7 @@ func (t *tui) noteBackpressure(actionType string) {
 	t.mu.Unlock()
 	if first {
 		t.appendLogLine(formatLogLine("WARN",
-			fmt.Sprintf("client queue full: dropped %q (client is not keeping up)", sanitizeLineForDisplay(actionType)),
+			"Client input queue full; input was not accepted. Retry shortly.",
 			defaultTheme.logWarnColor, time.Now().Format("15:04:05")))
 	}
 	t.updateHints()
@@ -640,8 +644,8 @@ func (t *tui) clearBackpressure() {
 		return
 	}
 	if dropped > 0 {
-		t.appendLogLine(formatLogLine("STATUS",
-			fmt.Sprintf("client queue recovered: %d input(s) were dropped", dropped),
+		t.appendLogLine(formatLogLine("INFO",
+			fmt.Sprintf("Client input queue recovered; %d input(s) were not accepted.", dropped),
 			defaultTheme.logInfoColor, time.Now().Format("15:04:05")))
 	}
 	t.updateHints()

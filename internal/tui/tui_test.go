@@ -466,6 +466,12 @@ drain:
 	if dropped := onLoopValue(s, func() int { return s.ui.dropped }); dropped != 0 {
 		t.Fatalf("dropped = %d after recovery, want 0", dropped)
 	}
+	s.draw() // Recovery is appended to the model before the next frame renders it.
+	if !s.matches(func() bool {
+		return strings.Contains(s.ui.logsView.GetText(true), "INFO: Client input queue recovered")
+	}) {
+		t.Fatal("queue recovery must be an INFO, not a warning or technical STATUS")
+	}
 }
 
 func TestSubmitIsNonBlocking(t *testing.T) {
@@ -717,10 +723,31 @@ func TestAutocompleteTreatsNicknameMarkupAsLiteral(t *testing.T) {
 
 func TestErrorsSurfaceInLogView(t *testing.T) {
 	s := newSimTUI(t, 120, 40)
-	s.events <- client.DisplayEvent{Type: "ERROR", Content: "boom [x]"}
+	for _, tc := range []struct {
+		kind, level, content string
+		color                tcell.Color
+	}{
+		{"STATUS", "INFO", "connected [x]", defaultTheme.logInfoColor},
+		{"WARN", "WARN", "retrying [x]", defaultTheme.logWarnColor},
+		{"ERROR", "ERROR", "boom [x]", defaultTheme.logErrorColor},
+	} {
+		s.events <- client.DisplayEvent{Type: tc.kind, Content: tc.content}
+		waitFor(t, 5*time.Second, func() bool {
+			return s.matches(func() bool {
+				return strings.Contains(s.ui.logsView.GetText(true), tc.level+": "+tc.content)
+			})
+		})
+		if !s.matches(func() bool { return strings.Contains(s.ui.logsView.GetText(false), colorTag(tc.color)) }) {
+			t.Errorf("%s has the wrong severity color", tc.kind)
+		}
+	}
+	s.events <- client.DisplayEvent{Type: "INFO", Content: "command reply"}
 	waitFor(t, 5*time.Second, func() bool {
-		return s.matches(func() bool { return strings.Contains(s.ui.logsView.GetText(true), "boom [x]") })
+		return s.matches(func() bool { return strings.Contains(s.ui.outputView.GetText(true), "command reply") })
 	})
+	if s.matches(func() bool { return strings.Contains(s.ui.logsView.GetText(true), "command reply") }) {
+		t.Fatal("command output was duplicated into Logs")
+	}
 }
 
 // --- lifecycle -------------------------------------------------------------

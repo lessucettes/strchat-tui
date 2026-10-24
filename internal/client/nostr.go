@@ -422,15 +422,18 @@ func executePublish(ctx context.Context, job publishJob) publishResult {
 			failure = err.Error()
 		}
 	}
-	if result.accepted > 0 {
-		result.kind = "STATUS"
+	if result.accepted == 0 {
+		if failure == "" {
+			failure = "Relays are unavailable or busy."
+		}
+		result.message = fmt.Sprintf("Event %s acknowledged by 0/%d relays for %s. %s No automatic resend.", safeSuffix(event.ID, 4), len(job.relays), job.chat, failure)
+		return result
 	}
+	result.kind = "STATUS"
 	result.message = fmt.Sprintf("Event %s acknowledged by %d/%d relays for %s.", safeSuffix(event.ID, 4), result.accepted, len(job.relays), job.chat)
 	if result.accepted < len(job.relays) {
+		result.kind = "WARN"
 		result.message += " Delivery to other relays is unconfirmed; no automatic resend."
-		if failure != "" {
-			result.message += " " + failure
-		}
 	}
 	return result
 }

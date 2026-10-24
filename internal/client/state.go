@@ -2,7 +2,6 @@ package client
 
 import (
 	"fmt"
-	"log"
 	"slices"
 	"sort"
 	"strconv"
@@ -529,7 +528,6 @@ func (c *client) sendStateUpdate() {
 
 func (c *client) saveConfig() {
 	if err := c.config.save(); err != nil {
-		log.Printf("Error saving config: %v", err)
 		c.emit(DisplayEvent{
 			Type:    "ERROR",
 			Content: fmt.Sprintf("Failed to save configuration: %v", err),

@@ -150,9 +150,35 @@ func TestPublishKeepsAcknowledgementsReceivedBeforeCancellation(t *testing.T) {
 		result := executePublish(ctx, publishJob{event: *signedEvent(t, "accepted before deadline"), key: strings.Repeat("0", 63) + "1", relays: []*managedRelay{slow, healthy}})
 		<-done
 		cancel()
-		if result.accepted != 1 {
-			t.Fatalf("lost a received acknowledgement behind an unresponsive relay: %d", result.accepted)
+		if result.accepted != 1 || result.kind != "WARN" {
+			t.Fatalf("partial acknowledgement must be preserved and reported as WARN: accepted=%d kind=%s", result.accepted, result.kind)
 		}
+		if strings.Contains(result.message, context.Canceled.Error()) || !strings.Contains(result.message, "no automatic resend") {
+			t.Fatalf("partial acknowledgement needs a concise warning without a transport error: %s", result.message)
+		}
+	}
+}
+
+func TestPublishWithoutAcknowledgementExplainsFailure(t *testing.T) {
+	for _, stopped := range []bool{false, true} {
+		name := "busy"
+		if stopped {
+			name = "stopped"
+		}
+		t.Run(name, func(t *testing.T) {
+			worker := &managedRelay{publish: make(chan relayPublish, 1), done: make(chan struct{})}
+			worker.publish <- relayPublish{} // No capacity for this send.
+			if stopped {
+				close(worker.done)
+			}
+			result := executePublish(context.Background(), publishJob{
+				event: *signedEvent(t, "no acknowledgement"), key: strings.Repeat("0", 63) + "1",
+				chat: "lobby", relays: []*managedRelay{worker},
+			})
+			if result.kind != "ERROR" || result.accepted != 0 || !strings.Contains(result.message, "acknowledged by 0/1") || !strings.Contains(result.message, "unavailable or busy") || !strings.Contains(result.message, "No automatic resend") || strings.Contains(result.message, "other relays") {
+				t.Fatalf("missing clear failure reason when %s: %+v", name, result)
+			}
+		})
 	}
 }
 

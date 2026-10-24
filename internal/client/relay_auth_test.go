@@ -322,7 +322,7 @@ func TestRelayAuthSubscriptionFailuresAreBoundedAndVisible(t *testing.T) {
 			})
 			h := startRelayHarness(t, relayTestConfig(t, ts.url), nil)
 			h.waitForEvent("visible authentication/access failure", func(event DisplayEvent) bool {
-				return event.Type == "ERROR" && (strings.Contains(event.Content, "restricted:") || strings.Contains(event.Content, "timed out") || strings.Contains(event.Content, "still requires authentication"))
+				return event.Type == "WARN" && (strings.Contains(event.Content, "restricted:") || strings.Contains(event.Content, "timed out") || strings.Contains(event.Content, "still requires authentication"))
 			})
 			ts.waitClosed(1, transportWaitSlow)
 			// The old reconnect loop retries in 250-500ms. A policy/auth failure
@@ -412,7 +412,7 @@ func TestRelayAuthRejectsChallengeAmplification(t *testing.T) {
 			})
 			h := startRelayHarness(t, relayTestConfig(t, ts.url), nil)
 			h.waitForEvent("challenge abuse refused before signing", func(event DisplayEvent) bool {
-				return event.Type == "ERROR" && strings.Contains(event.Content, wantError)
+				return event.Type == "WARN" && strings.Contains(event.Content, wantError)
 			})
 			ts.waitClosed(1, transportWaitSlow)
 			if got := len(proofs); got != allowed {

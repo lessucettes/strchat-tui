@@ -99,6 +99,26 @@ Input history holds the last 100 submitted lines for the current run only.
 Moving forward past the newest entry restores your unfinished draft; history
 is not saved to disk. Pane titles and the footer show contextual shortcuts.
 
+### Logs
+
+Logs shows operational events, not a stream of protocol diagnostics:
+
+- `INFO`: normal activity, relay connectivity and recovery, accepted messages,
+  and confirmations of operational changes.
+- `WARN`: degraded or missing connectivity, restricted relay access, partial
+  relay acknowledgements, or an input queue that is temporarily full.
+- `ERROR`: an operation could not complete, such as sending a message or saving
+  settings. The message explains what failed or what to retry.
+
+Connection summaries are reported on meaningful state changes, rather than on
+every retry, ping or latency update. Automatic retries continue without filling
+the log. Command help and lists stay in Messages. Info provides live relay
+details when a chat is highlighted.
+
+A relay acknowledgement confirms relay acceptance, not that another participant
+received the message. A connected relay is not a guarantee of subscription or
+authentication acceptance. Unconfirmed sends are not automatically resent.
+
 ### Mouse
 
 Mouse-capable terminals support left-clicking a pane to focus it, clicking a

@@ -11,10 +11,11 @@ import (
 // Retry history belongs to the client loop, not to a particular socket/view.
 // The bounded cache survives view switches but is never written to disk.
 type relayRetry struct {
-	until time.Time
-	delay time.Duration
-	since nostr.Timestamp
-	chats []string
+	until       time.Time
+	delay       time.Duration
+	since       nostr.Timestamp
+	chats       []string
+	lastProblem string // bounded warning history survives cooldown retirement
 }
 
 type relayTiming struct {
@@ -138,6 +139,9 @@ func (c *client) selectRelaySubscriptions(chats []string, now time.Time) (map[st
 	for url, worker := range c.relays {
 		if worker.connected && !worker.connectedAt.Add(c.relayTiming.stable).After(now) {
 			c.relayRetries.Remove(url)
+			// A stable connection ends the previous outage, so a later
+			// identical auth/access failure is new information and may warn.
+			worker.lastProblem = ""
 		}
 	}
 	for chat := range c.geoPlans {
@@ -224,8 +228,10 @@ func (c *client) updateAllSubscriptions() {
 	chats = slices.Compact(chats)
 	desired, notice := c.selectRelaySubscriptions(chats, time.Now())
 	c.updateRelaySubscriptions(desired)
-	if notice != "" && (notice != c.lastRelayNotice || viewName != c.lastRelayNoticeView) {
-		c.emit(DisplayEvent{Type: "STATUS", Content: notice})
+	health := c.logRelayHealth(viewName, chats)
+	if event, log := plannerLogEvent(notice, health); log &&
+		(notice != c.lastRelayNotice || viewName != c.lastRelayNoticeView) {
+		c.emit(event)
 	}
 	c.lastRelayNotice = notice
 	c.lastRelayNoticeView = viewName

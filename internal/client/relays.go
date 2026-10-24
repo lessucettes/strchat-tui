@@ -48,6 +48,7 @@ type managedRelay struct {
 	latency     time.Duration
 	connectedAt time.Time
 	retry       relayRetry // immutable retry snapshot passed to the worker
+	lastProblem string     // owner-only dedup of relay-side failure warnings
 
 }
 
@@ -134,6 +135,7 @@ func (c *client) updateRelaySubscriptions(desired map[string][]string) {
 			ctx, cancel := context.WithCancel(c.ctx)
 			worker := &managedRelay{url: url, cancel: cancel, done: make(chan struct{}), chats: chats, keys: subscription.keys, updates: make(chan relaySubscription, 1), publish: make(chan relayPublish, 1)}
 			worker.retry, _ = c.relayRetries.Peek(url)
+			worker.lastProblem = worker.retry.lastProblem
 			c.relays[url] = worker
 			c.wg.Go(func() { defer close(worker.done); c.runRelay(ctx, worker, subscription) })
 		}
@@ -372,6 +374,7 @@ func (c *client) serveRelayWithPing(ctx context.Context, worker *managedRelay, c
 	c.relayStatus(ctx, worker, true, latency)
 	var auth relayAuth
 	var subWait, subRetried, authReported bool
+	reportedProblem := ""
 	authTimer := time.NewTimer(time.Hour)
 	authTimer.Stop()
 	defer authTimer.Stop()
@@ -409,9 +412,20 @@ func (c *client) serveRelayWithPing(ctx context.Context, worker *managedRelay, c
 		pendingWait, pendingSent, publishRetried = false, false, false
 		auth.prune(sub.keys)
 	}
+	// A rejection can be observed both by the OK handler and by failAuth when
+	// resume observes the same attempt. Report each distinct failure once per
+	// connection; the owner deduplicates repeats across cooldown reconnects.
+	reportProblem := func(err error) {
+		text := relayProblemText(err)
+		if text == reportedProblem {
+			return
+		}
+		reportedProblem = text
+		c.relayProblem(ctx, worker, err)
+	}
 	failAuth := func(err error) (relaySubscription, bool) {
 		terminalErr = err
-		c.relayProblem(ctx, worker, err)
+		reportProblem(err)
 		return sub, true
 	}
 	// Only explicit rejections are retried, once for this challenge/request.
@@ -551,7 +565,7 @@ func (c *client) serveRelayWithPing(ctx context.Context, worker *managedRelay, c
 				if !changed {
 					continue
 				}
-				subRetried, authReported = false, false
+				subRetried, authReported, reportedProblem = false, false, ""
 				if err := startAuth(); err != nil {
 					return failAuth(fmt.Errorf("relay authentication failed: %w", err))
 				}
@@ -609,7 +623,7 @@ func (c *client) serveRelayWithPing(ctx context.Context, worker *managedRelay, c
 				}
 				if pubkey, matched := auth.acknowledge(id, accepted, reason); matched {
 					if !accepted && !authReported {
-						c.relayProblem(ctx, worker, auth.attempts[pubkey].err)
+						reportProblem(auth.attempts[pubkey].err)
 						authReported = true
 					}
 				} else if pending != nil && !pendingWait && id == pending.event.ID {
@@ -634,9 +648,13 @@ func (c *client) serveRelayWithPing(ctx context.Context, worker *managedRelay, c
 
 func (c *client) relayProblem(ctx context.Context, worker *managedRelay, err error) {
 	select {
-	case c.incoming <- relayEvent{worker: worker, problem: truncateString(sanitizeString(err.Error()), 240)}:
+	case c.incoming <- relayEvent{worker: worker, problem: relayProblemText(err)}:
 	case <-ctx.Done():
 	}
+}
+
+func relayProblemText(err error) string {
+	return truncateString(sanitizeString(err.Error()), 240)
 }
 
 func (c *client) sendRelaysUpdate() {

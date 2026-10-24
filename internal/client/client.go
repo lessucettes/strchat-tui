@@ -34,6 +34,7 @@ type client struct {
 	nextRelayRetry                 time.Time
 	lastRelayNotice                string
 	lastRelayNoticeView            string
+	relayHealth                    relayHealthLog
 	incoming                       chan relayEvent
 	outgoing                       chan publishJob
 	results                        chan publishResult
@@ -139,7 +140,10 @@ func (c *client) Run() {
 				continue
 			}
 			if incoming.problem != "" {
-				c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Relay %s: %s", worker.url, incoming.problem)})
+				// Authentication/access failures are relay warnings, not a
+				// failed user action. logRelayProblem suppresses repeats of
+				// the same failure within one outage.
+				c.logRelayProblem(worker, incoming.problem)
 				continue
 			}
 			if incoming.event != nil {
@@ -151,6 +155,7 @@ func (c *client) Run() {
 					worker.connectedAt = time.Now()
 				}
 				if incoming.retry.delay > 0 {
+					incoming.retry.lastProblem = worker.lastProblem
 					c.relayRetries.Add(worker.url, incoming.retry)
 				}
 				if incoming.connected || incoming.retry.delay > 0 {

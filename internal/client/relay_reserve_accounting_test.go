@@ -56,7 +56,7 @@ func TestRelayCoverageNoticeIsRepeatedForAnotherView(t *testing.T) {
 		c.updateAllSubscriptions()
 		warnings := 0
 		for len(events) > 0 {
-			if event := <-events; strings.Contains(event.Content, "waiting for retry cooldown") {
+			if event := <-events; event.Type == "WARN" && strings.Contains(event.Content, "No relay connection") {
 				warnings++
 			}
 		}
