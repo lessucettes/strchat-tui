@@ -438,7 +438,7 @@ func TestActionBackpressureIsVisibleAndNonBlocking(t *testing.T) {
 	if hints := onLoopValue(s, func() string { return s.ui.hints.GetText(true) }); !strings.Contains(hints, "client busy") {
 		t.Fatalf("hint line does not show backpressure: %q", hints)
 	}
-	if logText := onLoopValue(s, func() string { return s.ui.logsView.GetText(true) }); !strings.Contains(logText, "queue full") {
+	if logText := onLoopValue(s, func() string { return s.ui.logsView.GetText(true) }); !strings.Contains(logText, "queue is full") {
 		t.Fatalf("log does not record the drop: %q", logText)
 	}
 

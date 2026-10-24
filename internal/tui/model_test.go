@@ -209,8 +209,14 @@ func TestFormatInfoAndLogLines(t *testing.T) {
 		t.Fatalf("formatLogLine = %q, want %q", logLine, want)
 	}
 	auto := formatAutoLogLine("15:04:05", "msg [y]", tcell.ColorGray)
-	if want := colorTag(tcell.ColorGray) + "[15:04:05] INFO: " + tview.Escape("msg [y]") + "[-]"; auto != want {
+	if want := colorTag(tcell.ColorGray) + "[15:04:05] INFO: " + tview.Escape(`Diagnostic output: "msg [y]".`) + "[-]"; auto != want {
 		t.Fatalf("formatAutoLogLine = %q, want %q", auto, want)
+	}
+	// A relay's rejection must not forge another entry or inject markup, while
+	// identifiers and original reason text keep their case.
+	forged := formatLogLine("WARN", "Relay wss://Example.org/Path: denied\n[00:00:00] INFO: [green]accepted", tcell.ColorYellow, "15:04:05")
+	if strings.Contains(forged, "\n") || strings.Contains(forged, "[green]") || !strings.Contains(forged, "Example.org/Path") {
+		t.Fatalf("log line lost literal context or allowed an injected entry: %q", forged)
 	}
 }
 

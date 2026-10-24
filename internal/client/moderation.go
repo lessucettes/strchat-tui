@@ -27,7 +27,7 @@ func (c *client) blockUser(payload string) {
 	}
 
 	if pkToBlock == "" {
-		c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Could not find user matching '%s' to block.", payload)})
+		c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Could not find user matching %q to block.", payload)})
 		return
 	}
 
@@ -71,7 +71,7 @@ func (c *client) unblockUser(payload string) {
 	}
 
 	if idxToRemove == -1 {
-		c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Could not find a blocked user matching '%s'.", payload)})
+		c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Could not find a blocked user matching %q.", payload)})
 		return
 	}
 
@@ -125,7 +125,7 @@ func (c *client) addFilter(p string) {
 	c.config.Filters = append(c.config.Filters, newFilter)
 	c.saveConfig()
 	c.rebuildRegexCaches()
-	c.emit(DisplayEvent{Type: "STATUS", Content: "Added and enabled filter: " + p})
+	c.emit(DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Added and enabled filter %q.", p)})
 }
 
 func (c *client) toggleFilter(idx int) {
@@ -180,7 +180,7 @@ func (c *client) removeFilter(p string) {
 	c.config.Filters = append(c.config.Filters[:idx-1], c.config.Filters[idx:]...)
 	c.saveConfig()
 	c.rebuildRegexCaches()
-	c.emit(DisplayEvent{Type: "STATUS", Content: "Removed filter: " + removed})
+	c.emit(DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Removed filter %q.", removed)})
 }
 
 func (c *client) clearFilters() {
@@ -209,7 +209,7 @@ func (c *client) addMute(p string) {
 	c.config.Mutes = append(c.config.Mutes, newMute)
 	c.saveConfig()
 	c.rebuildRegexCaches()
-	c.emit(DisplayEvent{Type: "STATUS", Content: "Muted and enabled: " + p})
+	c.emit(DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Added and enabled mute %q.", p)})
 }
 
 func (c *client) toggleMute(idx int) {
@@ -263,7 +263,7 @@ func (c *client) removeMute(p string) {
 	c.config.Mutes = append(c.config.Mutes[:idx-1], c.config.Mutes[idx:]...)
 	c.saveConfig()
 	c.rebuildRegexCaches()
-	c.emit(DisplayEvent{Type: "STATUS", Content: "Removed mute: " + removed})
+	c.emit(DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Removed mute %q.", removed)})
 }
 
 func (c *client) clearMutes() {

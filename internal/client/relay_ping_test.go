@@ -135,7 +135,7 @@ func startRelayPingServe(t *testing.T, c *client, peer *relayPingPeer, pongWait 
 	result := &relayPingServeResult{done: make(chan struct{})}
 	ticks := make(chan time.Time)
 	go func() {
-		_, ok := c.serveRelayWithPing(ctx, worker, conn, sub, 0, ticks, pongWait)
+		_, ok, _ := c.serveRelayWithPing(ctx, worker, conn, sub, 0, ticks, pongWait)
 		result.ok.Store(ok)
 		close(result.done)
 	}()
@@ -341,7 +341,7 @@ func startRelayPingStubServe(t *testing.T, c *client, conn *relayPingStub, pongW
 	result := &relayPingServeResult{done: make(chan struct{})}
 	ticks := make(chan time.Time)
 	go func() {
-		_, ok := c.serveRelayWithPing(ctx, worker, conn, sub, 0, ticks, pongWait)
+		_, ok, _ := c.serveRelayWithPing(ctx, worker, conn, sub, 0, ticks, pongWait)
 		result.ok.Store(ok)
 		close(result.done)
 	}()

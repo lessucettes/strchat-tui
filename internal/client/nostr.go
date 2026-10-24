@@ -254,12 +254,12 @@ func (c *client) publishMessageInView(message, viewName, defaultChat, expectedCh
 	}
 	session, ok := c.chatKeys[chat]
 	if !ok || session.privKey == "" {
-		c.emit(DisplayEvent{Type: "ERROR", Content: "No signing identity for the destination chat."})
+		c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Chat %q: No signing identity is available. The message was not sent.", chat)})
 		return
 	}
 	signer, err := session.signingIdentity()
 	if err != nil {
-		c.emit(DisplayEvent{Type: "ERROR", Content: "No valid signing identity."})
+		c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Chat %q: The signing identity is invalid. The message was not sent.", chat)})
 		return
 	}
 	if session.signer == nil {
@@ -288,13 +288,13 @@ func (c *client) publishMessageInView(message, viewName, defaultChat, expectedCh
 		}
 	}
 	if len(job.relays) == 0 {
-		c.emit(DisplayEvent{Type: "ERROR", Content: "No connected relay for this chat. Message was not queued; retry after reconnect."})
+		c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Chat %q: No connected relay. Message was not queued; retry after reconnect.", chat)})
 		return
 	}
 	select {
 	case c.outgoing <- job:
 	default:
-		c.emit(DisplayEvent{Type: "ERROR", Content: "Send queue is full. Message was not queued; retry later."})
+		c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Chat %q: Send queue is full. Message was not queued; retry later.", chat)})
 	}
 }
 
@@ -316,6 +316,7 @@ func (c *client) publishLoop() {
 
 func executePublish(ctx context.Context, job publishJob) publishResult {
 	result := publishResult{kind: "ERROR"}
+	scope := fmt.Sprintf("Chat %q: ", job.chat)
 	// Mining and publishing share one deadline and one worker, not one CPU loop per
 	// keystroke. Only explicit auth-required rejections permit a bounded retry
 	// of the same signed event on the same socket, within this deadline.
@@ -330,7 +331,7 @@ func executePublish(ctx context.Context, job publishJob) publishResult {
 		var err error
 		signer, err = newSessionSigner(job.key)
 		if err != nil {
-			result.message = "Failed to sign message."
+			result.message = scope + "Failed to sign message. The message was not sent."
 			return result
 		}
 	}
@@ -343,13 +344,13 @@ func executePublish(ctx context.Context, job publishJob) publishResult {
 			var err error
 			miner, err = newMiningHasher(&event)
 			if err != nil {
-				result.message = "Failed to prepare proof-of-work."
+				result.message = scope + "Failed to prepare proof-of-work. The message was not sent."
 				return result
 			}
 		}
 		for nonce := uint64(0); ; nonce++ {
 			if nonce&1023 == 0 && ctx.Err() != nil {
-				result.message = "Proof-of-work timed out or was cancelled; message not sent."
+				result.message = scope + fmt.Sprintf("Proof-of-work did not finish. The message was not sent. Reason: %q.", ctx.Err())
 				return result
 			}
 			var digest [32]byte
@@ -357,7 +358,7 @@ func executePublish(ctx context.Context, job publishJob) publishResult {
 				var err error
 				digest, err = miner.digest(nonce)
 				if err != nil {
-					result.message = "Failed to compute proof-of-work."
+					result.message = scope + "Failed to compute proof-of-work. The message was not sent."
 					return result
 				}
 			} else {
@@ -372,7 +373,7 @@ func executePublish(ctx context.Context, job publishJob) publishResult {
 	}
 
 	if err := signer.sign(&event); err != nil {
-		result.message = "Failed to sign message."
+		result.message = scope + "Failed to sign message. The message was not sent."
 		return result
 	}
 	result.event = event
@@ -381,6 +382,7 @@ func executePublish(ctx context.Context, job publishJob) publishResult {
 	type relayAnswer struct {
 		result <-chan error
 		done   <-chan struct{}
+		url    string
 	}
 	answers := make([]relayAnswer, 0, len(job.relays))
 	for _, worker := range job.relays {
@@ -393,7 +395,7 @@ func executePublish(ctx context.Context, job publishJob) publishResult {
 		request := relayPublish{ctx: ctx, event: event, key: job.key, result: answer}
 		select {
 		case worker.publish <- request:
-			answers = append(answers, relayAnswer{result: answer, done: worker.done})
+			answers = append(answers, relayAnswer{result: answer, done: worker.done, url: worker.url})
 		case <-worker.done:
 		default: // Worker already has pending work; count as unacknowledged.
 		}
@@ -419,21 +421,24 @@ func executePublish(ctx context.Context, job publishJob) publishResult {
 		if err == nil {
 			result.accepted++
 		} else if failure == "" {
-			failure = err.Error()
+			failure = relayProblemText(err)
+			if answer.url != "" {
+				failure = fmt.Sprintf("Relay %s: %s", answer.url, failure)
+			}
 		}
 	}
 	if result.accepted == 0 {
 		if failure == "" {
-			failure = "Relays are unavailable or busy."
+			failure = "Relays are unavailable or busy"
 		}
-		result.message = fmt.Sprintf("Event %s acknowledged by 0/%d relays for %s. %s No automatic resend.", safeSuffix(event.ID, 4), len(job.relays), job.chat, failure)
+		result.message = fmt.Sprintf("Chat %q: Event %s acknowledged by 0/%d relays. Reason: %q. No automatic resend.", job.chat, safeSuffix(event.ID, 4), len(job.relays), failure)
 		return result
 	}
 	result.kind = "STATUS"
-	result.message = fmt.Sprintf("Event %s acknowledged by %d/%d relays for %s.", safeSuffix(event.ID, 4), result.accepted, len(job.relays), job.chat)
+	result.message = fmt.Sprintf("Chat %q: Event %s acknowledged by %d/%d relays.", job.chat, safeSuffix(event.ID, 4), result.accepted, len(job.relays))
 	if result.accepted < len(job.relays) {
 		result.kind = "WARN"
-		result.message += " Delivery to other relays is unconfirmed; no automatic resend."
+		result.message += " Other relay acknowledgements are unconfirmed. No automatic resend."
 	}
 	return result
 }

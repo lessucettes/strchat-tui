@@ -446,7 +446,7 @@ func (t *tui) applyLog(ev client.DisplayEvent) {
 func (t *tui) applyStateUpdate(ev client.DisplayEvent) {
 	state, ok := ev.Payload.(client.StateUpdate)
 	if !ok {
-		t.appendLogLine(formatLogLine("ERROR", "invalid STATE_UPDATE payload", defaultTheme.logErrorColor, time.Now().Format("15:04:05")))
+		t.appendLogLine(formatLogLine("ERROR", "Cannot refresh chats. The client supplied an invalid state update.", defaultTheme.logErrorColor, time.Now().Format("15:04:05")))
 		return
 	}
 	t.mu.Lock()
@@ -468,7 +468,7 @@ func (t *tui) applyStateUpdate(ev client.DisplayEvent) {
 func (t *tui) applyRelaysUpdate(ev client.DisplayEvent) {
 	relays, ok := ev.Payload.([]client.RelayInfo)
 	if !ok {
-		t.appendLogLine(formatLogLine("ERROR", "invalid RELAYS_UPDATE payload", defaultTheme.logErrorColor, time.Now().Format("15:04:05")))
+		t.appendLogLine(formatLogLine("ERROR", "Cannot refresh relay details. The client supplied an invalid relay update.", defaultTheme.logErrorColor, time.Now().Format("15:04:05")))
 		return
 	}
 	t.mu.Lock()
@@ -628,7 +628,7 @@ func (t *tui) noteBackpressure() {
 	t.mu.Unlock()
 	if first {
 		t.appendLogLine(formatLogLine("WARN",
-			"Client input queue full; input was not accepted. Retry shortly.",
+			"Client input queue is full. Some requests were not accepted; retry if needed.",
 			defaultTheme.logWarnColor, time.Now().Format("15:04:05")))
 	}
 	t.updateHints()
@@ -645,7 +645,7 @@ func (t *tui) clearBackpressure() {
 	}
 	if dropped > 0 {
 		t.appendLogLine(formatLogLine("INFO",
-			fmt.Sprintf("Client input queue recovered; %d input(s) were not accepted.", dropped),
+			"Client input queue recovered. Retry any action that was not accepted.",
 			defaultTheme.logInfoColor, time.Now().Format("15:04:05")))
 	}
 	t.updateHints()

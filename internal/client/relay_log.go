@@ -41,6 +41,7 @@ type relayHealthReport struct {
 	total    int
 	covered  int
 	degraded bool
+	missing  []string
 }
 
 // computeRelayHealth classifies a view without side effects. Missing coverage
@@ -71,6 +72,12 @@ func computeRelayHealth(in relayHealthInput) relayHealthReport {
 		report.class = relayHealthHealthy
 		return report
 	}
+	for chat := range active {
+		if _, ok := covered[chat]; !ok {
+			report.missing = append(report.missing, chat)
+		}
+	}
+	slices.Sort(report.missing)
 	if in.failed != nil {
 		for chat := range active {
 			if _, ok := covered[chat]; ok {
@@ -120,11 +127,13 @@ func computeRelayHealth(in relayHealthInput) relayHealthReport {
 }
 
 // relayHealthLog is the owner's bounded dedup state. It stores only the last
-// view and class, so no per-URL or per-view history accumulates.
+// view, class and diagnostic detail, not per-URL or per-view history.
 type relayHealthLog struct {
 	initialized bool
 	view        string
 	class       relayHealthClass
+	missing     string
+	cause       string
 }
 
 func (l *relayHealthLog) transition(view string, class relayHealthClass) (emit bool, previous relayHealthClass, switched bool) {
@@ -153,20 +162,33 @@ func relayHealthMessage(report relayHealthReport, previous relayHealthClass, swi
 		return "STATUS", "No active chat. Use /join to start chatting."
 	case relayHealthHealthy:
 		if !switched && (previous == relayHealthPartial || previous == relayHealthOffline) {
-			return "STATUS", "Recovered: relay connections restored for all active chats."
+			return "STATUS", "Relay connections restored for all active chats."
 		}
-		return "STATUS", "Connected: all active chats have a relay connection."
-	case relayHealthPartial:
-		return "WARN", "Partial relay coverage: some active chats have no relay connection; retrying automatically."
-	case relayHealthOffline:
-		return "WARN", "No relay connection; retrying automatically."
+		return "STATUS", "Connected to relays for all active chats."
+	case relayHealthPartial, relayHealthOffline:
+		if report.class == relayHealthOffline && report.total == 1 {
+			return "WARN", "No relay connection. Retrying automatically."
+		}
+		names := make([]string, 0, min(3, len(report.missing)))
+		for _, chat := range report.missing[:min(3, len(report.missing))] {
+			names = append(names, fmt.Sprintf("%q", chat))
+		}
+		affected := strings.Join(names, ", ")
+		if len(report.missing) > len(names) {
+			affected += fmt.Sprintf(" and %d more", len(report.missing)-len(names))
+		}
+		status := "Partial connectivity."
+		if report.class == relayHealthOffline {
+			status = "No relay connection."
+		}
+		return "WARN", status + " Chats without a relay connection: " + affected + ". Retrying automatically."
 	default:
 		return "STATUS", "Connecting to relays."
 	}
 }
 
-// logRelayHealth emits at most one line per view/class transition. It only
-// reads owner state and writes an event; it never touches sockets or widgets.
+// logRelayHealth reports a changed view, connection state, affected chat set or
+// diagnostic example. It never touches sockets or widgets.
 func (c *client) logRelayHealth(viewName string, chats []string) relayHealthReport {
 	relays := make([]relayHealthRelay, 0, len(c.relays))
 	for _, worker := range c.relays {
@@ -181,14 +203,61 @@ func (c *client) logRelayHealth(viewName string, chats []string) relayHealthRepo
 			return ok && retry.delay > 0
 		},
 	})
-	if emit, previous, switched := c.relayHealth.transition(viewName, report.class); emit {
+	if report.class == relayHealthConnecting && c.relayHealth.view == viewName &&
+		(c.relayHealth.class == relayHealthHealthy || c.relayHealth.class == relayHealthOffline || c.relayHealth.class == relayHealthPartial) {
+		// Once coverage has been established or an outage reported, a missing
+		// route is degradation, not a new initial connection phase. A fresh
+		// attempt alone neither restores coverage nor ends an outage.
+		report.degraded = true
+		report.class = relayHealthOffline
+		if report.covered > 0 {
+			report.class = relayHealthPartial
+		}
+	}
+	emit, previous, switched := c.relayHealth.transition(viewName, report.class)
+	stateChanged := emit
+	missing, cause := "", ""
+	affectedChanged, causeChanged := false, false
+	if report.degraded {
+		cause = c.relayFailureExample(report.missing)
+		missing = strings.Join(report.missing, "\x00")
+		affectedChanged = missing != c.relayHealth.missing
+		causeChanged = cause != "" && cause != c.relayHealth.cause
+		// A newly affected chat or a changed known cause is useful even if
+		// the broad class stays partial/offline. Identical retries are not.
+		emit = emit || affectedChanged || causeChanged
+	}
+	c.relayHealth.missing, c.relayHealth.cause = missing, cause
+	if emit {
 		eventType, content := relayHealthMessage(report, previous, switched)
+		if !stateChanged && !affectedChanged && causeChanged {
+			content = "Connection failure changed. " + cause
+		} else if cause != "" {
+			content += " " + cause
+		}
 		if viewName != "" {
-			content = truncateString(sanitizeString(viewName), 48) + ": " + content
+			content = c.viewLogScope(viewName) + content
 		}
 		c.emit(DisplayEvent{Type: eventType, Content: content})
 	}
 	return report
+}
+
+// Use one deterministic, relevant example instead of dumping every failed
+// address. The existing retry cache retains its bounded cause across workers.
+func (c *client) relayFailureExample(chats []string) string {
+	for _, chat := range chats {
+		for _, url := range c.relayPlanFor(chat).pool {
+			if worker := c.relays[url]; worker != nil && worker.connected {
+				continue
+			}
+			retry, _ := c.relayRetries.Peek(url)
+			if retry.failure != "" && retry.failure != retry.lastProblem {
+				return fmt.Sprintf("Example failure at relay %s. Reason: %q.", url, retry.failure)
+			}
+		}
+	}
+	return ""
 }
 
 // logRelayProblem owns cross-reconnect dedup for relay-side auth/access
@@ -207,21 +276,25 @@ func (c *client) logRelayProblem(worker *managedRelay, problem string) {
 	worker.lastProblem = problem
 	retry.lastProblem = problem
 	c.relayRetries.Add(worker.url, retry)
-	c.emit(DisplayEvent{Type: "WARN", Content: fmt.Sprintf("Relay %s: %s", worker.url, problem)})
+	c.emit(DisplayEvent{Type: "WARN", Content: fmt.Sprintf("Relay %s: Request failed. Reason: %q.", worker.url, problem)})
 }
 
-// plannerLogEvent levels the selector's fixed notices. The no-eligible notice
-// is redundant when the health summary already warned about the same outage;
-// without failure evidence it remains the only warning for the user.
+func (c *client) viewLogScope(viewName string) string {
+	kind := "Chat"
+	if view := c.getActiveView(); view != nil && view.Name == viewName && view.IsGroup {
+		kind = "Group"
+	}
+	return fmt.Sprintf("%s %q: ", kind, truncateString(sanitizeString(viewName), 48))
+}
+
+// Planner churn is not a user-visible outage. Report only actionable limits
+// or missing configuration not already explained by the connectivity summary.
 func plannerLogEvent(notice string, health relayHealthReport) (DisplayEvent, bool) {
-	if notice == "" {
-		return DisplayEvent{}, false
+	if strings.HasPrefix(notice, "Warning: the ") {
+		return DisplayEvent{Type: "WARN", Content: fmt.Sprintf("Relay connection limit (%d) reached. Chat coverage may be reduced. Use fewer relays or a smaller group.", maxActiveRelays)}, true
 	}
-	if strings.HasPrefix(notice, "Warning: no eligible relay") && health.degraded {
-		return DisplayEvent{}, false
+	if strings.HasPrefix(notice, "Warning: no eligible relay") && !health.degraded {
+		return DisplayEvent{Type: "WARN", Content: "No relay connection is available for an active chat. Check the relay settings; unavailable relays will be retried automatically."}, true
 	}
-	if strings.HasPrefix(notice, "Warning:") {
-		return DisplayEvent{Type: "WARN", Content: strings.TrimPrefix(notice, "Warning: ")}, true
-	}
-	return DisplayEvent{Type: "STATUS", Content: notice}, true
+	return DisplayEvent{}, false
 }

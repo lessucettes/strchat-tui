@@ -153,7 +153,7 @@ func TestPublishKeepsAcknowledgementsReceivedBeforeCancellation(t *testing.T) {
 		if result.accepted != 1 || result.kind != "WARN" {
 			t.Fatalf("partial acknowledgement must be preserved and reported as WARN: accepted=%d kind=%s", result.accepted, result.kind)
 		}
-		if strings.Contains(result.message, context.Canceled.Error()) || !strings.Contains(result.message, "no automatic resend") {
+		if strings.Contains(result.message, context.Canceled.Error()) || !strings.Contains(result.message, "No automatic resend") {
 			t.Fatalf("partial acknowledgement needs a concise warning without a transport error: %s", result.message)
 		}
 	}

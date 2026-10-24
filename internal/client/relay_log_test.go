@@ -1,6 +1,8 @@
 package client
 
 import (
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -15,12 +17,133 @@ func relayLogEvents(events chan DisplayEvent) []DisplayEvent {
 	for {
 		select {
 		case event := <-events:
-			if event.Type == "STATUS" || event.Type == "WARN" {
+			if event.Type == "STATUS" || event.Type == "WARN" || event.Type == "ERROR" {
 				out = append(out, event)
 			}
 		default:
 			return out
 		}
+	}
+}
+
+func TestGeoRetryPlanningDoesNotLogWithoutConnectivityChange(t *testing.T) {
+	c, events := testClient(t)
+	t.Cleanup(c.shutdown)
+	chat, healthy := "u4pruy", "ws://127.0.0.1:13100"
+	c.config.AnchorRelays = []string{healthy}
+	c.config.Views = []View{{Name: chat}}
+	c.config.ActiveViewName = chat
+	list := make([]string, defaultRelayCount+1)
+	for i := range list {
+		list[i] = fmt.Sprintf("ws://127.0.0.1:%d", 13101+i)
+	}
+	c.geoPlans[chat] = [][]string{list, slices.Clone(list)}
+	until := time.Now().Add(time.Hour)
+	// The planner alternates exhausted, reserve, and normal selection while
+	// the chat remains connected through an anchor. None is a user outage.
+	for i, phase := range []string{"normal", "exhausted", "reserve", "normal", "exhausted", "reserve", "exhausted"} {
+		for _, url := range append(slices.Clone(list), healthy) {
+			if c.relays[url] == nil {
+				c.relays[url] = &managedRelay{url: url, cancel: func() {}, updates: make(chan relaySubscription, 1)}
+			}
+			c.relayRetries.Remove(url)
+		}
+		c.relays[healthy].connected = true
+		c.relays[healthy].connectedAt = time.Now()
+		if phase != "normal" {
+			for _, url := range list[:defaultRelayCount] {
+				c.relayRetries.Add(url, relayRetry{until: until, delay: time.Minute})
+			}
+		}
+		if phase == "exhausted" {
+			c.relayRetries.Add(list[defaultRelayCount], relayRetry{until: until, delay: time.Minute})
+		}
+		c.updateAllSubscriptions()
+		got := relayLogEvents(events)
+		if i == 0 {
+			if len(got) != 1 || got[0].Type != "STATUS" || !strings.Contains(got[0].Content, "Connected") {
+				t.Fatalf("initial connection events = %+v", got)
+			}
+		} else if len(got) != 0 {
+			t.Fatalf("planner phase %s logged without a connectivity change: %+v", phase, got)
+		}
+		for _, worker := range c.relays {
+			if worker.done != nil {
+				t.Fatal("selection-only regression started a real network worker")
+			}
+		}
+	}
+}
+
+func TestRelayHealthDoesNotRestartConnectingAfterEstablishedCoverage(t *testing.T) {
+	for _, loseAll := range []bool{false, true} {
+		t.Run(fmt.Sprintf("lose_all_%t", loseAll), func(t *testing.T) {
+			c, events := testClient(t)
+			const group = "Group-240dec"
+			chats := []string{"u4pruy", "9q8yyk"}
+			urls := []string{"ws://127.0.0.1:13201", "ws://127.0.0.1:13202"}
+			c.config.Views = []View{{Name: group, IsGroup: true, Children: chats}}
+			c.config.ActiveViewName = group
+			for i, chat := range chats {
+				c.geoPlans[chat] = [][]string{{urls[i]}}
+				c.relays[urls[i]] = &managedRelay{url: urls[i], chats: []string{chat}}
+			}
+			c.logRelayHealth(group, chats)
+			for _, worker := range c.relays {
+				worker.connected = true
+			}
+			c.logRelayHealth(group, chats)
+			c.relays[urls[1]].connected = false
+			if loseAll {
+				c.relays[urls[0]].connected = false
+			}
+			// No retry failure snapshot yet: other attempts may still be in
+			// flight, but this view has already established full coverage.
+			for range 3 {
+				c.logRelayHealth(group, chats)
+			}
+			for _, worker := range c.relays {
+				worker.connected = true
+			}
+			c.logRelayHealth(group, chats)
+			c.logRelayHealth(group, chats)
+			got := relayLogEvents(events)
+			want := []string{"STATUS", "STATUS", "WARN", "STATUS"}
+			if len(got) != len(want) {
+				t.Fatalf("connection/loss/recovery events = %+v, want exactly four transitions", got)
+			}
+			for i, kind := range want {
+				if got[i].Type != kind {
+					t.Fatalf("event %d = %+v, want %s", i, got[i], kind)
+				}
+			}
+			loss := "Partial connectivity."
+			if loseAll {
+				loss = "No relay connection."
+			}
+			if !strings.Contains(got[2].Content, loss) {
+				t.Fatalf("loss of coverage = %+v, want %s", got[2], loss)
+			}
+			if !strings.Contains(got[0].Content, "Connecting") || !strings.Contains(got[1].Content, "Connected") ||
+				!strings.Contains(got[2].Content, fmt.Sprintf("%q", chats[1])) || !strings.Contains(got[3].Content, "restored") {
+				t.Fatalf("transitions lost the initial connection, affected chat or recovery: %+v", got)
+			}
+			if loseAll && !strings.Contains(got[2].Content, fmt.Sprintf("%q", chats[0])) {
+				t.Fatalf("complete outage omitted an affected chat: %+v", got[2])
+			}
+
+			// A different view still has its own initial connection phase.
+			c.config.Views = append(c.config.Views, View{Name: "other", IsGroup: true, Children: chats})
+			c.config.ActiveViewName = "other"
+			for _, worker := range c.relays {
+				worker.connected = false
+			}
+			c.logRelayHealth("other", chats)
+			got = relayLogEvents(events)
+			if len(got) != 1 || got[0].Type != "STATUS" || !strings.Contains(got[0].Content, "Connecting") {
+				t.Fatalf("a new view inherited the previous view's outage: %+v", got)
+			}
+		})
 	}
 }
 
@@ -45,7 +168,7 @@ func TestRelayHealthLogsTransitionsWithoutRedundantChurn(t *testing.T) {
 	}
 	c.updateAllSubscriptions()
 	got = relayLogEvents(events)
-	if len(got) != 1 || got[0].Type != "STATUS" || !strings.Contains(got[0].Content, "Connected") || !strings.Contains(got[0].Content, "relay connection") {
+	if len(got) != 1 || got[0].Type != "STATUS" || !strings.Contains(got[0].Content, "Connected") || !strings.HasPrefix(got[0].Content, `Chat "lobby": `) {
 		t.Fatalf("full coverage events = %+v, want one honest STATUS", got)
 	}
 
@@ -84,7 +207,7 @@ func TestRelayHealthLogsTransitionsWithoutRedundantChurn(t *testing.T) {
 	}
 	c.updateAllSubscriptions()
 	got = relayLogEvents(events)
-	if len(got) != 1 || got[0].Type != "WARN" || !strings.Contains(got[0].Content, "retrying automatically") {
+	if len(got) != 1 || got[0].Type != "WARN" || !strings.Contains(got[0].Content, "Retrying automatically") {
 		t.Fatalf("outage events = %+v, want one cooldown WARN", got)
 	}
 
@@ -108,7 +231,7 @@ func TestRelayHealthLogsTransitionsWithoutRedundantChurn(t *testing.T) {
 		c.updateAllSubscriptions()
 		got = relayLogEvents(events)
 		if i == 0 {
-			if len(got) != 1 || got[0].Type != "STATUS" || !strings.Contains(got[0].Content, "Recovered") {
+			if len(got) != 1 || got[0].Type != "STATUS" || !strings.Contains(got[0].Content, "restored") {
 				t.Fatalf("recovery events = %+v, want one STATUS recovery", got)
 			}
 			continue
@@ -128,6 +251,8 @@ func TestRelayHealthLogsTransitionsWithoutRedundantChurn(t *testing.T) {
 
 func TestRelayHealthGroupPartialCoverageWarnsOnlyOnTransition(t *testing.T) {
 	c, events := testClient(t)
+	c.config.Views = []View{{Name: "group", IsGroup: true, Children: []string{"alpha", "beta"}}}
+	c.config.ActiveViewName = "group"
 	alpha, beta := "ws://127.0.0.1:13011", "ws://127.0.0.1:13012"
 	c.config.AnchorRelays = []string{beta}
 	c.relays[alpha] = &managedRelay{url: alpha, connected: true, chats: []string{"alpha"}}
@@ -146,12 +271,31 @@ func TestRelayHealthGroupPartialCoverageWarnsOnlyOnTransition(t *testing.T) {
 	c.relayRetries.Add(beta, relayRetry{until: time.Now().Add(time.Minute), delay: time.Minute})
 	c.logRelayHealth("group", chats)
 	got = relayLogEvents(events)
-	if len(got) != 1 || got[0].Type != "WARN" || !strings.Contains(got[0].Content, "Partial") {
+	if len(got) != 1 || got[0].Type != "WARN" || !strings.Contains(got[0].Content, `"beta"`) || !strings.HasPrefix(got[0].Content, `Group "group": Partial`) {
 		t.Fatalf("degraded group events = %+v, want one partial WARN", got)
 	}
 	c.logRelayHealth("group", chats)
 	if got := relayLogEvents(events); len(got) != 0 {
 		t.Fatalf("unchanged partial coverage logged %+v", got)
+	}
+	// Starting a fresh reserve attempt does not end the existing outage.
+	reserve := "ws://127.0.0.1:13014"
+	c.relays[reserve] = &managedRelay{url: reserve, chats: []string{"beta"}}
+	c.logRelayHealth("group", chats)
+	if got := relayLogEvents(events); len(got) != 0 {
+		t.Fatalf("a dialing reserve falsely changed the outage state: %+v", got)
+	}
+	// Another chat losing coverage is new information even though the overall
+	// class stays partial. Name the affected chats instead of a stale count.
+	gamma := "ws://127.0.0.1:13013"
+	chats = append(chats, "gamma")
+	c.config.Views[0].Children = slices.Clone(chats)
+	c.relays[gamma] = &managedRelay{url: gamma, chats: []string{"gamma"}}
+	c.relayRetries.Add(gamma, relayRetry{delay: time.Minute})
+	c.logRelayHealth("group", chats)
+	got = relayLogEvents(events)
+	if len(got) != 1 || got[0].Type != "WARN" || !strings.Contains(got[0].Content, `"beta"`) || !strings.Contains(got[0].Content, `"gamma"`) {
+		t.Fatalf("changed affected chats were not reported: %+v", got)
 	}
 
 	// Switching views announces the state of the new view even when its class
@@ -163,10 +307,28 @@ func TestRelayHealthGroupPartialCoverageWarnsOnlyOnTransition(t *testing.T) {
 	}
 
 	c.relays[beta].connected = true
+	c.relays[gamma].connected = true
 	c.logRelayHealth("other", chats)
 	got = relayLogEvents(events)
-	if len(got) != 1 || got[0].Type != "STATUS" || !strings.Contains(got[0].Content, "Recovered") {
+	if len(got) != 1 || got[0].Type != "STATUS" || !strings.Contains(got[0].Content, "restored") {
 		t.Fatalf("group recovery events = %+v, want one STATUS recovery", got)
+	}
+
+	for _, url := range []string{alpha, beta, gamma} {
+		c.relays[url].connected = false
+		c.relayRetries.Add(url, relayRetry{delay: time.Minute})
+	}
+	c.logRelayHealth("group", chats)
+	got = relayLogEvents(events)
+	if len(got) != 1 || got[0].Type != "WARN" || !strings.Contains(got[0].Content, `"alpha", "beta", "gamma"`) {
+		t.Fatalf("complete group outage did not name affected chats: %+v", got)
+	}
+	chats = chats[:2]
+	c.config.Views[0].Children = slices.Clone(chats)
+	c.logRelayHealth("group", chats)
+	got = relayLogEvents(events)
+	if len(got) != 1 || got[0].Type != "WARN" || !strings.Contains(got[0].Content, `"alpha", "beta"`) || strings.Contains(got[0].Content, `"gamma"`) {
+		t.Fatalf("changed offline membership repeated a stale or uninformative summary: %+v", got)
 	}
 }
 
@@ -315,8 +477,8 @@ func TestPlannerNoticeLevels(t *testing.T) {
 		wantLog  bool
 	}{
 		{"safety limit", "Warning: the 256-relay safety limit reduces chat coverage.", healthy, "WARN", true},
-		{"exhausted reserve", "Warning: geographic relay coverage is incomplete; reserve exhausted or cooling down.", healthy, "WARN", true},
-		{"reserve transition", "Trying geographic reserve relays; primary recovery continues.", healthy, "STATUS", true},
+		{"exhausted reserve", "Warning: geographic relay coverage is incomplete; reserve exhausted or cooling down.", healthy, "", false},
+		{"reserve transition", "Trying geographic reserve relays; primary recovery continues.", healthy, "", false},
 		{"no eligible covered by health", "Warning: no eligible relay for an active chat; waiting for retry cooldown.", degraded, "", false},
 		{"no eligible without health evidence", "Warning: no eligible relay for an active chat; waiting for retry cooldown.", healthy, "WARN", true},
 	} {

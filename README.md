@@ -115,6 +115,21 @@ every retry, ping or latency update. Automatic retries continue without filling
 the log. Command help and lists stay in Messages. Info provides live relay
 details when a chat is highlighted.
 
+Entries use `[HH:MM:SS] LEVEL: Message.` with sentence case and consistent
+`Chat "name":`, `Group "name":`, or `Relay <url>:` context where relevant.
+Failures identify the affected operation, its consequences, the known reason,
+and any next step. Original reasons are quoted without changing their case;
+chat names and addresses retain their case too. Log entries cannot introduce
+extra lines through relay-supplied text.
+
+A repeated attempt is not a new incident. New entries explain a changed
+connection state, affected chat, known failure cause, or operation result.
+Choosing a geographic reserve or retrying a primary relay is not itself a
+warning that the chat is unavailable. When connectivity is lost, the summary
+includes a relevant example failure when known, rather than listing every
+failed address. A newly different example cause is reported without repeating
+an unchanged outage on every attempt.
+
 A relay acknowledgement confirms relay acceptance, not that another participant
 received the message. A connected relay is not a guarantee of subscription or
 authentication acceptance. Unconfirmed sends are not automatically resent.

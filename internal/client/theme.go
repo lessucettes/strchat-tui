@@ -22,7 +22,7 @@ func (c *client) setTheme(name string) {
 	next := *c.config
 	next.Theme = name
 	if err := next.save(); err != nil {
-		c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Failed to save theme: %v", err)})
+		c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Failed to save theme. The previous theme is unchanged. Reason: %q.", err)})
 		return
 	}
 	c.config.Theme = name

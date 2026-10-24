@@ -41,6 +41,43 @@ func TestFastRelayRefusalsArePaced(t *testing.T) {
 	c.Stop()
 }
 
+func TestOutageReportsChangedCauseButNotRepeatedConnectionAttempts(t *testing.T) {
+	var calls, status atomic.Int32
+	status.Store(http.StatusServiceUnavailable)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		http.Error(w, "unavailable", int(status.Load()))
+	}))
+	t.Cleanup(server.Close)
+	url := "ws" + strings.TrimPrefix(server.URL, "http")
+	h := startRelayHarness(t, relayTestConfig(t, url), func(c *client) {
+		c.relayTiming.minimum = 20 * time.Millisecond
+		c.relayTiming.maximum = 40 * time.Millisecond
+		c.relayTiming.dialGap = 0
+	})
+	h.waitForEvent("first outage cause", func(event DisplayEvent) bool {
+		return event.Type == "WARN" && strings.Contains(event.Content, "HTTP status 503")
+	})
+	h.waitForEvent("repeated real connection attempts", func(DisplayEvent) bool { return calls.Load() >= 3 })
+	h.assertNoEventsFrom(h.mark(), 100*time.Millisecond, "quiet retries with the same cause", func(event DisplayEvent) bool {
+		return event.Type == "WARN" || event.Type == "ERROR" || event.Type == "STATUS"
+	})
+	status.Store(http.StatusForbidden)
+	changed := h.waitForEvent("changed outage cause", func(event DisplayEvent) bool {
+		return event.Type == "WARN" && strings.Contains(event.Content, "HTTP status 403") && strings.Contains(event.Content, url)
+	})
+	if !strings.Contains(changed.Content, "Connection failure changed.") || strings.Contains(changed.Content, "Retrying automatically") {
+		t.Fatalf("changed cause repeated the initial outage boilerplate: %s", changed.Content)
+	}
+	h.assertNoEventsFrom(h.mark(), 100*time.Millisecond, "quiet retries after the changed cause", func(event DisplayEvent) bool {
+		return event.Type == "WARN" || event.Type == "ERROR" || event.Type == "STATUS"
+	})
+	if got := h.countType("WARN"); got != 2 || h.countType("ERROR") != 0 {
+		t.Fatalf("want one warning per distinct cause, got %d warnings: %s", got, h.dump(20))
+	}
+	h.stopWithin(time.Second)
+}
+
 func TestNetworkFailureCooldownSurvivesViewSwitches(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -55,7 +92,10 @@ func TestNetworkFailureCooldownSurvivesViewSwitches(t *testing.T) {
 		c.relayTiming.minimum = 30 * time.Second
 		c.relayTiming.maximum = 30 * time.Second
 	})
-	h.waitForEvent("cooldown after a real failed dial", contentPred("No relay connection"))
+	event := h.waitForEvent("cooldown after a real failed dial", contentPred("No relay connection"))
+	if event.Type != "WARN" || !strings.Contains(event.Content, url) || !strings.Contains(event.Content, "503") || !strings.Contains(event.Content, "Reason:") {
+		t.Fatalf("outage warning lost the failed endpoint and handshake cause: %s", event.Content)
+	}
 	for range 3 {
 		h.send(UserAction{Type: "ACTIVATE_VIEW", Payload: "other"})
 		h.send(UserAction{Type: "ACTIVATE_VIEW", Payload: "lobby"})

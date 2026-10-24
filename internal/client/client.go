@@ -282,7 +282,7 @@ func (c *client) manageAnchors(payload string) {
 		}
 		url, err := normalizeRelayURL(raw)
 		if err != nil {
-			c.emit(DisplayEvent{Type: "ERROR", Content: err.Error()})
+			c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Cannot add relay. Reason: %q.", err)})
 			continue
 		}
 		if existing[url] {

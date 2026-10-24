@@ -25,13 +25,13 @@ outer:
 		if !isGeohashName(name) {
 			normalizedName, err := normalizeAndValidateChatName(name)
 			if err != nil {
-				c.emit(DisplayEvent{Type: "ERROR", Content: err.Error()})
+				c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Cannot join chat. Reason: %q.", err)})
 				continue outer
 			}
 			if utf8.RuneCountInString(normalizedName) > maxChatNameLen {
 				c.emit(DisplayEvent{
 					Type:    "ERROR",
-					Content: fmt.Sprintf("Chat name '%s' is too long (max %d chars).", normalizedName, maxChatNameLen),
+					Content: fmt.Sprintf("Chat %q: Name is too long. Use at most %d characters.", normalizedName, maxChatNameLen),
 				})
 				continue outer
 			}
@@ -61,7 +61,7 @@ outer:
 	case len(existingChats) > 0:
 		var content string
 		if len(existingChats) == 1 {
-			content = fmt.Sprintf("You are already in the '%s' chat.", existingChats[0])
+			content = fmt.Sprintf("Chat %q: Already joined.", existingChats[0])
 		} else {
 			content = fmt.Sprintf("You are already in all specified chats: %s.", strings.Join(existingChats, ", "))
 		}
@@ -103,7 +103,7 @@ func (c *client) createGroup(payload string) {
 	if len(notFoundChats) > 0 {
 		c.emit(DisplayEvent{
 			Type:    "ERROR",
-			Content: fmt.Sprintf("Cannot create group. The following chats were not found: %s", strings.Join(notFoundChats, ", ")),
+			Content: fmt.Sprintf("Cannot create group. Chats not found: %q.", strings.Join(notFoundChats, ", ")),
 		})
 		return
 	}
@@ -119,7 +119,7 @@ func (c *client) createGroup(payload string) {
 
 	for _, view := range c.config.Views {
 		if view.Name == name {
-			c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Group with these chats already exists: '%s'", name)})
+			c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Group %q: A group with these chats already exists.", name)})
 			return
 		}
 	}
@@ -144,7 +144,7 @@ func (c *client) selectGroupChat(group, chat string) {
 		}
 		view.SelectedChat = chat
 		if err := c.config.save(); err != nil {
-			c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Failed to save group chat selection; it will only be remembered for this session: %v", err)})
+			c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Group %q: Failed to save conversation selection. The current selection remains active but may not survive restart. Reason: %q.", group, err)})
 		}
 		c.sendStateUpdate()
 		return
@@ -233,16 +233,16 @@ func (c *client) deleteView(viewName string) {
 	}
 
 	if viewToDelete == nil {
-		c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Chat or group '%s' not found.", viewName)})
+		c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Chat or group %q not found.", viewName)})
 		return
 	}
 
 	if viewToDelete.IsGroup {
 		c.deleteGroup(viewName)
-		c.emit(DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Group '%s' deleted.", viewName)})
+		c.emit(DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Group %q: Deleted.", viewName)})
 	} else {
 		c.leaveChat(viewName)
-		c.emit(DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Left chat '%s'.", viewName)})
+		c.emit(DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Chat %q: Left the chat.", viewName)})
 	}
 }
 
@@ -255,10 +255,10 @@ func (c *client) setNick(nick string) {
 	if nick != "" {
 		c.emit(DisplayEvent{
 			Type:    "STATUS",
-			Content: fmt.Sprintf("Nick set to: %s", nick),
+			Content: fmt.Sprintf("Nickname set to %q.", nick),
 		})
 	} else {
-		c.emit(DisplayEvent{Type: "STATUS", Content: "Nick has been cleared."})
+		c.emit(DisplayEvent{Type: "STATUS", Content: "Nickname cleared. Each chat now uses its session nickname."})
 	}
 	for name, session := range c.chatKeys {
 		session.nick = nick
@@ -275,7 +275,7 @@ func (c *client) setNick(nick string) {
 func (c *client) setPoW(difficultyStr string) {
 	difficulty, err := strconv.Atoi(strings.TrimSpace(difficultyStr))
 	if err != nil {
-		c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Invalid PoW difficulty: '%s'. Must be a number.", difficultyStr)})
+		c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Invalid PoW difficulty %q. Enter a number.", difficultyStr)})
 		return
 	}
 
@@ -304,9 +304,9 @@ func (c *client) setPoW(difficultyStr string) {
 	c.sendStateUpdate()
 
 	if difficulty > 0 {
-		c.emit(DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("PoW difficulty for %s set to %d.", activeView.Name, difficulty)})
+		c.emit(DisplayEvent{Type: "STATUS", Content: c.viewLogScope(activeView.Name) + fmt.Sprintf("PoW difficulty set to %d.", difficulty)})
 	} else {
-		c.emit(DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("PoW disabled for %s.", activeView.Name)})
+		c.emit(DisplayEvent{Type: "STATUS", Content: c.viewLogScope(activeView.Name) + "PoW disabled."})
 	}
 }
 
@@ -465,7 +465,7 @@ func (c *client) setActiveView(name string) {
 	if !viewExists {
 		c.emit(DisplayEvent{
 			Type:    "ERROR",
-			Content: fmt.Sprintf("Chat or group '%s' not found.", name),
+			Content: fmt.Sprintf("Chat or group %q not found.", name),
 		})
 		return
 	}
@@ -530,7 +530,7 @@ func (c *client) saveConfig() {
 	if err := c.config.save(); err != nil {
 		c.emit(DisplayEvent{
 			Type:    "ERROR",
-			Content: fmt.Sprintf("Failed to save configuration: %v", err),
+			Content: fmt.Sprintf("Failed to save configuration. Settings may not survive restart. Reason: %q.", err),
 		})
 	}
 }

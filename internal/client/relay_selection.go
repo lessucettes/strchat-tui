@@ -16,6 +16,7 @@ type relayRetry struct {
 	since       nostr.Timestamp
 	chats       []string
 	lastProblem string // bounded warning history survives cooldown retirement
+	failure     string // bounded diagnostic cause, not a retry policy input
 }
 
 type relayTiming struct {
@@ -231,6 +232,9 @@ func (c *client) updateAllSubscriptions() {
 	health := c.logRelayHealth(viewName, chats)
 	if event, log := plannerLogEvent(notice, health); log &&
 		(notice != c.lastRelayNotice || viewName != c.lastRelayNoticeView) {
+		if viewName != "" {
+			event.Content = c.viewLogScope(viewName) + event.Content
+		}
 		c.emit(event)
 	}
 	c.lastRelayNotice = notice

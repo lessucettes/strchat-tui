@@ -65,7 +65,7 @@ func TestGroupSelectionSaveFailureIsVisibleAndSessionOnly(t *testing.T) {
 	found := false
 	for len(events) > 0 {
 		ev := <-events
-		if ev.Type == "ERROR" && strings.Contains(ev.Content, "only be remembered for this session") {
+		if ev.Type == "ERROR" && strings.Contains(ev.Content, "current selection remains active") && strings.Contains(ev.Content, "may not survive restart") && strings.Contains(ev.Content, "Reason:") {
 			found = true
 		}
 	}

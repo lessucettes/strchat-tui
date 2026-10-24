@@ -27,7 +27,7 @@ func TestExhaustedGeoReserveReportsIncompleteCoverage(t *testing.T) {
 	var warnings int
 	for len(events) > 0 {
 		event := <-events
-		if strings.Contains(event.Content, "coverage") && strings.Contains(event.Content, "reserve") {
+		if event.Type == "WARN" && strings.Contains(event.Content, "No relay connection") {
 			warnings++
 		}
 	}
@@ -36,7 +36,7 @@ func TestExhaustedGeoReserveReportsIncompleteCoverage(t *testing.T) {
 	}
 	c.updateAllSubscriptions()
 	for len(events) > 0 {
-		if event := <-events; strings.Contains(event.Content, "coverage") {
+		if event := <-events; event.Type == "WARN" {
 			t.Fatal("unchanged coverage warning was repeated")
 		}
 	}

@@ -37,7 +37,7 @@ func TestThemeWaitsForSuccessfulSave(t *testing.T) {
 	}
 	ui.handleCommand("/theme blue-gray") // Queue remains full.
 	ui.render()
-	if ui.theme != defaultTheme || !strings.Contains(strings.Join(ui.snapshot().logs.lines, "\n"), "queue full") {
+	if ui.theme != defaultTheme || !strings.Contains(strings.Join(ui.snapshot().logs.lines, "\n"), "queue is full") {
 		t.Fatal("queue backpressure was hidden or changed the theme")
 	}
 }

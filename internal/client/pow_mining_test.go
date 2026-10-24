@@ -64,7 +64,7 @@ func TestExecutePublishMinedProofMatchesSignedEvent(t *testing.T) {
 	cancel()
 	ev := miningTestEvent(t, false)
 	result := executePublish(ctx, publishJob{event: ev, key: performanceTestKey, signer: signer, difficulty: 16})
-	if result.event.ID != "" || !strings.Contains(result.message, "cancelled") {
+	if result.kind != "ERROR" || result.event.ID != "" || !strings.Contains(result.message, context.Canceled.Error()) {
 		t.Fatalf("cancelled mining returned %+v", result)
 	}
 }

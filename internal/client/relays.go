@@ -222,7 +222,7 @@ func (c *client) runRelay(ctx context.Context, worker *managedRelay, subscriptio
 			connectedAt := time.Now()
 			subscription.since = since
 			var authFailed bool
-			subscription, authFailed = c.serveRelay(ctx, worker, conn, subscription, latency)
+			subscription, authFailed, err = c.serveRelay(ctx, worker, conn, subscription, latency)
 			since = subscription.since
 			conn.CloseNow()
 			if authFailed {
@@ -241,6 +241,9 @@ func (c *client) runRelay(ctx context.Context, worker *managedRelay, subscriptio
 		pause := delay/2 + time.Duration(rand.Int64N(int64(delay/2)+1))
 		delay = min(delay*2, c.relayTiming.maximum)
 		retry := relayRetry{until: time.Now().Add(pause), delay: delay, since: since, chats: slices.Clone(subscription.chats)}
+		if err != nil {
+			retry.failure = relayProblemText(err)
+		}
 		select {
 		case c.incoming <- relayEvent{worker: worker, retry: retry}:
 		case <-ctx.Done():
@@ -286,7 +289,7 @@ func subscribe(ctx context.Context, conn relayConn, chats []string, since nostr.
 
 // One reader, one bounded queue, no goroutine per frame. The websocket library
 // handles control frames while Read is active; Ping has a bounded pong deadline.
-func (c *client) serveRelay(ctx context.Context, worker *managedRelay, conn relayConn, sub relaySubscription, latency time.Duration) (relaySubscription, bool) {
+func (c *client) serveRelay(ctx context.Context, worker *managedRelay, conn relayConn, sub relaySubscription, latency time.Duration) (relaySubscription, bool, error) {
 	ticker := time.NewTicker(relayPingInterval)
 	defer ticker.Stop()
 	return c.serveRelayWithPing(ctx, worker, conn, sub, latency, ticker.C, relayPongWait)
@@ -298,7 +301,7 @@ func (c *client) serveRelay(ctx context.Context, worker *managedRelay, conn rela
 // asynchronously so the serve loop keeps draining the reader even while a pong
 // is outstanding; a missed pong is only fatal when the reader itself is idle,
 // because otherwise the pong is queued behind data we have not drained yet.
-func (c *client) serveRelayWithPing(ctx context.Context, worker *managedRelay, conn relayConn, sub relaySubscription, latency time.Duration, ticks <-chan time.Time, pongWait time.Duration) (relaySubscription, bool) {
+func (c *client) serveRelayWithPing(ctx context.Context, worker *managedRelay, conn relayConn, sub relaySubscription, latency time.Duration, ticks <-chan time.Time, pongWait time.Duration) (relaySubscription, bool, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	// Bind lifetime cancellation once for the whole connection. Closing the
 	// socket unblocks the reader and any stalled writer; no per-frame context
@@ -316,12 +319,14 @@ func (c *client) serveRelayWithPing(ctx context.Context, worker *managedRelay, c
 	// then queued behind data we have not drained yet.
 	var readRevision atomic.Uint64
 	var readerBlocked atomic.Bool
+	var readErr error // Published before the reader closes frames.
 	go func() {
 		defer close(readerDone)
 		defer close(frames)
 		for {
 			kind, data, err := conn.Read(ctx)
 			if err != nil {
+				readErr = err
 				return
 			}
 			readRevision.Add(1)
@@ -368,8 +373,8 @@ func (c *client) serveRelayWithPing(ctx context.Context, worker *managedRelay, c
 			pending.result <- terminalErr
 		}
 	}()
-	if subscribe(ctx, conn, sub.chats, sub.since) != nil {
-		return sub, false
+	if err := subscribe(ctx, conn, sub.chats, sub.since); err != nil {
+		return sub, false, err
 	}
 	c.relayStatus(ctx, worker, true, latency)
 	var auth relayAuth
@@ -423,10 +428,10 @@ func (c *client) serveRelayWithPing(ctx context.Context, worker *managedRelay, c
 		reportedProblem = text
 		c.relayProblem(ctx, worker, err)
 	}
-	failAuth := func(err error) (relaySubscription, bool) {
+	failAuth := func(err error) (relaySubscription, bool, error) {
 		terminalErr = err
 		reportProblem(err)
-		return sub, true
+		return sub, true, err
 	}
 	// Only explicit rejections are retried, once for this challenge/request.
 	// An AUTH OK is not an acknowledgement of the pending chat EVENT.
@@ -479,7 +484,7 @@ func (c *client) serveRelayWithPing(ctx context.Context, worker *managedRelay, c
 	for {
 		select {
 		case <-ctx.Done():
-			return sub, false
+			return sub, false, ctx.Err()
 		case <-authC:
 			return failAuth(errors.New("relay authentication timed out waiting for a challenge or AUTH acknowledgement"))
 		case <-pendingDone:
@@ -505,7 +510,7 @@ func (c *client) serveRelayWithPing(ctx context.Context, worker *managedRelay, c
 			// exact pong is behind frames we have not drained, and treating
 			// the timeout as remote death would be self-inflicted.
 			if probe.err != nil && ctx.Err() == nil && readRevision.Load() == probe.revision && len(frames) == 0 && !readerBlocked.Load() {
-				return sub, false
+				return sub, false, probe.err
 			}
 		case update := <-worker.updates:
 			sub = update
@@ -516,8 +521,8 @@ func (c *client) serveRelayWithPing(ctx context.Context, worker *managedRelay, c
 				if err := startAuth(); err != nil {
 					return failAuth(err)
 				}
-			} else if subscribe(ctx, conn, sub.chats, sub.since) != nil {
-				return sub, false
+			} else if err := subscribe(ctx, conn, sub.chats, sub.since); err != nil {
+				return sub, false, err
 			}
 		case request := <-worker.publish:
 			if request.ctx.Err() != nil {
@@ -537,13 +542,13 @@ func (c *client) serveRelayWithPing(ctx context.Context, worker *managedRelay, c
 				}
 			} else if err := writeFrame(request.ctx, conn, []any{"EVENT", request.event}); err != nil {
 				finishPending(err)
-				return sub, false
+				return sub, false, err
 			} else {
 				pendingSent = true
 			}
 		case data, ok := <-frames:
 			if !ok {
-				return sub, false
+				return sub, false, readErr
 			}
 			parts, count := splitRelayEnvelope(data)
 			if count < 2 {
@@ -583,7 +588,7 @@ func (c *client) serveRelayWithPing(ctx context.Context, worker *managedRelay, c
 				select {
 				case c.incoming <- relayEvent{worker: worker, event: &event}:
 				case <-ctx.Done():
-					return sub, false
+					return sub, false, ctx.Err()
 				}
 			case "EOSE":
 				var hints []string
@@ -610,7 +615,7 @@ func (c *client) serveRelayWithPing(ctx context.Context, worker *managedRelay, c
 				} else if strings.HasPrefix(reason, "restricted:") {
 					return failAuth(relayRejection("relay access restricted", reason))
 				} else {
-					return sub, false
+					return sub, false, relayRejection("relay closed the chat subscription", reason)
 				}
 			case "OK":
 				if count != 4 {
