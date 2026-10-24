@@ -115,8 +115,12 @@ type relayDialSettings struct {
 }
 
 func relayDialSettingsFor(httpClient *http.Client) (relayDialSettings, error) {
+	return relayDialSettingsWithResolver(httpClient, termuxResolver())
+}
+
+func relayDialSettingsWithResolver(httpClient *http.Client, resolver *net.Resolver) (relayDialSettings, error) {
 	settings := relayDialSettings{
-		dialContext: (&net.Dialer{KeepAlive: 30 * time.Second}).DialContext,
+		dialContext: newRelayDialer(0, resolver).DialContext,
 		proxy:       http.ProxyFromEnvironment,
 	}
 	if httpClient == nil || httpClient.Transport == nil {
@@ -127,6 +131,8 @@ func relayDialSettingsFor(httpClient *http.Client) (relayDialSettings, error) {
 		return settings, errors.New("relay HTTP transport does not support websocket dialing")
 	}
 	if transport.DialContext != nil {
+		// A caller-supplied dial function owns DNS and routing. In particular,
+		// do not resolve relay names before passing them to a custom transport.
 		settings.dialContext = transport.DialContext
 	}
 	// nil means the transport was deliberately configured without a proxy;

@@ -19,6 +19,10 @@ type Options struct {
 const socksConnectTimeout = time.Minute
 
 func newRelayHTTPClient(address string) (*http.Client, error) {
+	return newRelayHTTPClientWithResolver(address, termuxResolver())
+}
+
+func newRelayHTTPClientWithResolver(address string, resolver *net.Resolver) (*http.Client, error) {
 	if address == "" {
 		return nil, nil
 	}
@@ -49,6 +53,9 @@ func newRelayHTTPClient(address string) (*http.Client, error) {
 		return nil, errors.New("SOCKS5 proxy port must be in the range 1..65535")
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if dialer := newRelayDialer(30*time.Second, resolver); dialer.Resolver != nil {
+		transport.DialContext = dialer.DialContext
+	}
 	// Go's SOCKS5 transport forwards destination names to the proxy. An explicit
 	// ProxyURL also overrides environment proxies and their loopback bypasses.
 	transport.Proxy = http.ProxyURL(proxy)
