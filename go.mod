@@ -7,6 +7,7 @@ replace gitlab.com/yawning/secp256k1-voi => ./third_party/secp256k1-voi
 
 require (
 	github.com/btcsuite/btcd/btcec/v2 v2.5.0
+	github.com/clipperhouse/uax29 v1.16.0
 	github.com/coder/websocket v1.8.15
 	github.com/gdamore/tcell/v2 v2.13.10
 	github.com/gorilla/websocket v1.5.3

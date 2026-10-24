@@ -9,6 +9,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/clipperhouse/uax29/graphemes"
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/rivo/uniseg"
 )
@@ -81,7 +82,39 @@ func safeSuffix(s string, n int) string {
 	return s[len(s)-n:]
 }
 
+// truncateString uses Unicode 15.0 grapheme boundaries, matching uniseg v0.4.7.
+// Only boundary positions are needed here, not uniseg's width/line-break data.
 func truncateString(s string, maxClusters int) string {
+	// Every cluster occupies at least one byte. Most messages need no scan.
+	if len(s) <= maxClusters || s == "" {
+		return s
+	}
+	if !utf8.ValidString(s) {
+		return truncateStringUniseg(s, maxClusters)
+	}
+	count := 0
+	if s[0] >= ' ' && s[0] <= '~' {
+		// Leave the last ASCII byte: a following mark may extend its cluster.
+		for count < maxClusters && count+1 < len(s) && s[count+1] >= ' ' && s[count+1] <= '~' {
+			count++
+		}
+	}
+	prefix, end := count, count
+	it := graphemes.NewStringSegmenter(s[prefix:])
+	for count < maxClusters && it.Next() {
+		end = prefix + it.End()
+		count++
+	}
+	if it.Err() != nil {
+		return truncateStringUniseg(s, maxClusters)
+	}
+	if end == len(s) {
+		return s
+	}
+	return s[:end] + "..."
+}
+
+func truncateStringUniseg(s string, maxClusters int) string {
 	// Every cluster occupies at least one byte. Most messages need no scan.
 	if len(s) <= maxClusters || s == "" {
 		return s
