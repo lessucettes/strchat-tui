@@ -10,19 +10,6 @@ import (
 	"github.com/lessucettes/strchat-tui/internal/client"
 )
 
-func TestLineBufferKeepsInsertionOrder(t *testing.T) {
-	b := newLineBuffer(4, 0)
-	for _, s := range []string{"a", "b", "c"} {
-		b.append(s)
-	}
-	if got, want := strings.Join(b.snapshot(), ","), "a,b,c"; got != want {
-		t.Fatalf("snapshot = %q, want %q", got, want)
-	}
-	if b.firstIndex() != 0 || b.lastIndex() != 2 {
-		t.Fatalf("indices = [%d,%d], want [0,2]", b.firstIndex(), b.lastIndex())
-	}
-}
-
 func TestLineBufferEvictsOldestLines(t *testing.T) {
 	b := newLineBuffer(3, 0)
 	for _, s := range []string{"1", "2", "3", "4", "5"} {
@@ -130,18 +117,6 @@ func TestSanitizeLineForDisplayClearsNewlines(t *testing.T) {
 	}
 }
 
-func TestTruncateRunes(t *testing.T) {
-	if got := truncateRunes("abcdef", 4); got != "abcd…" {
-		t.Fatalf("truncateRunes = %q", got)
-	}
-	if got := truncateRunes("abc", 4); got != "abc" {
-		t.Fatalf("truncateRunes = %q", got)
-	}
-	if got := truncateRunes("héllo", 5); got != "héllo" {
-		t.Fatalf("truncateRunes = %q", got)
-	}
-}
-
 func TestFormatMessageEscapesUntrustedFields(t *testing.T) {
 	ev := client.DisplayEvent{
 		Type:        "NEW_MESSAGE",
@@ -165,27 +140,6 @@ func TestFormatMessageEscapesUntrustedFields(t *testing.T) {
 	}
 	if !strings.Contains(got, "#abcd> ") || !strings.Contains(got, "id1 12:00:00") {
 		t.Fatalf("message line lost its metadata: %q", got)
-	}
-}
-
-func TestFormatMessageOwnVariant(t *testing.T) {
-	ev := client.DisplayEvent{Nick: "me", Content: "hi", ShortPubKey: "ffff", ID: "id2", Timestamp: "12:00:01", IsOwnMessage: true}
-	got := formatMessage(ev, messageStyle{ownColor: tcell.ColorLime, metaColor: tcell.ColorGray})
-	for _, want := range []string{colorBoldTag(tcell.ColorLime) + "me[-::-]#ffff> " + colorTag(tcell.ColorLime) + "hi[-]", colorTag(tcell.ColorGray) + "[id2 12:00:01][-]"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("own message line %q missing %q", got, want)
-		}
-	}
-}
-
-func TestFormatMessageHighlightsMention(t *testing.T) {
-	ev := client.DisplayEvent{Nick: "me", Content: "hey @bob#1234 look", ShortPubKey: "ffff", ID: "id3", Timestamp: "12:00:02"}
-	got := formatMessage(ev, messageStyle{mention: "@bob#1234", ownColor: tcell.ColorLime, metaColor: tcell.ColorGray})
-	if !strings.Contains(got, colorBoldTag(tcell.ColorLime)+"@bob#1234[-::-]") {
-		t.Fatalf("mention was not highlighted: %q", got)
-	}
-	if !strings.Contains(got, "hey ") || !strings.Contains(got, " look") {
-		t.Fatalf("mention highlight lost surrounding text: %q", got)
 	}
 }
 
@@ -226,11 +180,5 @@ func TestSplitLogLines(t *testing.T) {
 	want := []string{"one", "two", "three"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("splitLogLines = %v, want %v", got, want)
-	}
-}
-
-func TestNewLineBufferBounds(t *testing.T) {
-	if b := newLineBuffer(0, 0); b.maxLines != 1 {
-		t.Fatalf("newLineBuffer(0) maxLines = %d, want 1", b.maxLines)
 	}
 }

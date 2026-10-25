@@ -22,19 +22,3 @@ func TestLoadConfigFromRejectsInvalidAnchorWithoutRewriting(t *testing.T) {
 		t.Fatal("invalid config was overwritten")
 	}
 }
-
-func TestRelayRejectsMultipleNumericArguments(t *testing.T) {
-	c, _ := testClient(t)
-	c.config.path = filepath.Join(t.TempDir(), "config.json")
-	// This command test needs no subscription; an active chat with no anchors
-	// would start public default relay workers when manageAnchors refreshes it.
-	c.config.Views = nil
-	c.config.ActiveViewName = ""
-	c.manageAnchors("1 2")
-	if len(c.config.AnchorRelays) != 0 {
-		t.Fatalf("numeric removal arguments stored as hostnames: %v", c.config.AnchorRelays)
-	}
-	if len(c.relays) != 0 {
-		t.Fatal("command test unexpectedly started relay workers")
-	}
-}

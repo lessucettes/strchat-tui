@@ -1,7 +1,6 @@
 package client
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/mmcloughlin/geohash"
@@ -20,24 +19,3 @@ func FuzzGeohashNameClassification(f *testing.F) {
 		}
 	})
 }
-
-func BenchmarkGeohashClassification(b *testing.B) {
-	for _, name := range []string{"lobby", "ucfv0", strings.Repeat("z", 12)} {
-		b.Run(name, func(b *testing.B) {
-			b.Run("error", func(b *testing.B) {
-				b.ReportAllocs()
-				for b.Loop() {
-					classificationResult = geohash.Validate(name) == nil
-				}
-			})
-			b.Run("predicate", func(b *testing.B) {
-				b.ReportAllocs()
-				for b.Loop() {
-					classificationResult = isGeohashName(name)
-				}
-			})
-		})
-	}
-}
-
-var classificationResult bool

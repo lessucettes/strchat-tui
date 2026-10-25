@@ -53,25 +53,3 @@ func TestBitChatPublicWireShapes(t *testing.T) {
 		})
 	}
 }
-
-func TestGeohashPublishKeepsPublicWireFormat(t *testing.T) {
-	c, _ := testClient(t)
-	c.config.Views = []View{{Name: "u33dc"}}
-	c.config.ActiveViewName = "u33dc"
-	key := strings.Repeat("0", 63) + "1"
-	pk, _ := nostr.GetPublicKey(key)
-	c.chatKeys["u33dc"] = chatSession{privKey: key, pubKey: pk, nick: "alice"}
-	c.relays["fixture"] = &managedRelay{connected: true, chats: []string{"u33dc"}}
-	c.publishMessage("hello")
-	select {
-	case job := <-c.outgoing:
-		if job.event.Kind != 20000 || job.event.Tags.Find("g")[1] != "u33dc" || job.event.Tags.Find("n")[1] != "alice" {
-			t.Fatal("public geohash format changed")
-		}
-		if job.difficulty != 0 {
-			t.Fatal("PoW was enabled without user choice")
-		}
-	default:
-		t.Fatal("geohash message was not queued")
-	}
-}

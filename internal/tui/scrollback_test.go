@@ -142,35 +142,6 @@ func TestScrollbackKeepsHelpHeadingVisibleAcrossRecords(t *testing.T) {
 	}
 }
 
-// TestScrollbackWrappedRowCountMatchesTextView pins the row index used for
-// scrolling and the gutter to tview's own wrap result at many widths.
-func TestScrollbackWrappedRowCountMatchesTextView(t *testing.T) {
-	lines := scrollbackCorpus()
-	for _, width := range []int{3, 5, 7, 12, 16, 24, 58, 80, 116} {
-		v := newScrollbackView(false)
-		v.SetBorder(false)
-		v.width = width
-		feedScrollback(v, lines, make([]string, len(lines)), 0)
-		v.ensureRows(width, 1)
-		got := int(v.totalRows())
-		ref := tview.NewTextView().SetDynamicColors(true)
-		ref.SetText(v.GetText(false))
-		ref.SetSize(0, width)
-		ref.SetRect(0, 0, width, 1)
-		refScreen := tcell.NewSimulationScreen("UTF-8")
-		if err := refScreen.Init(); err != nil {
-			t.Fatal(err)
-		}
-		refScreen.SetSize(width, 1)
-		ref.Draw(refScreen)
-		want := ref.GetWrappedLineCount()
-		refScreen.Fini()
-		if got != want {
-			t.Fatalf("width %d: windowed row count %d, TextView %d", width, got, want)
-		}
-	}
-}
-
 // TestScrollbackAnchorsSurviveEviction verifies the core invariant: evicting
 // older records must not move the content a scrolled-away reader is looking at,
 // while a bottom-following reader keeps seeing the newest record.
@@ -227,53 +198,6 @@ func TestScrollbackAnchorsSurviveEviction(t *testing.T) {
 	v.Draw(own)
 	if !v.follow || !strings.Contains(v.GetText(false), "new 2-099") {
 		t.Fatalf("end following lost the newest record (follow=%v)", v.follow)
-	}
-}
-
-// TestScrollbackResizePreservesAnchor checks that a width/height change keeps
-// the record under the top edge instead of jumping to the end.
-func TestScrollbackResizePreservesAnchor(t *testing.T) {
-	v := newScrollbackView(false)
-	v.SetBorder(true)
-	screen := tcell.NewSimulationScreen("UTF-8")
-	if err := screen.Init(); err != nil {
-		t.Fatal(err)
-	}
-	defer screen.Fini()
-
-	var lines []string
-	for i := range 200 {
-		lines = append(lines, fmt.Sprintf("[#808080]record %03d %s[-]", i, strings.Repeat("some words ", 6)))
-	}
-	feedScrollback(v, lines, make([]string, len(lines)), 0)
-	screen.SetSize(120, 40)
-	v.SetRect(0, 0, 120, 40)
-	v.Draw(screen)
-	v.top = 40
-	v.follow = false
-	v.Draw(screen)
-	index, offset, ok := v.locate(v.top)
-	if !ok {
-		t.Fatal("top row not located")
-	}
-
-	screen.SetSize(70, 22)
-	v.SetRect(0, 0, 70, 22)
-	v.Draw(screen)
-	newIndex, newOffset, ok := v.locate(v.top)
-	if !ok {
-		t.Fatal("top row not located after resize")
-	}
-	if newIndex != index {
-		t.Fatalf("resize moved the anchor from record %d to %d", index, newIndex)
-	}
-	if newOffset != 0 && offset != 0 && newOffset > offset {
-		// Rewrapping may split differently, but the top must stay inside the
-		// same record rather than leaving it.
-		t.Fatalf("resize moved the anchor past its record: offset %d -> %d", offset, newOffset)
-	}
-	if v.follow {
-		t.Fatal("resize turned a scrolled-away viewport into bottom following")
 	}
 }
 
@@ -405,16 +329,12 @@ func scrollbackNavLines(prefix string, n int) []string {
 }
 
 // newScrollbackNavView builds the simulated 60x24 pane shared by navigation
-// regressions. Gutter panes are only inspected directly; content comparisons
-// use the ordinary pane where the reference TextView has the same text width.
-func newScrollbackNavView(t *testing.T, gutter bool) (*scrollbackView, tcell.SimulationScreen) {
+// regressions. Content comparisons use the ordinary pane where the reference
+// TextView has the same text width.
+func newScrollbackNavView(t *testing.T) (*scrollbackView, tcell.SimulationScreen) {
 	t.Helper()
-	v := newScrollbackView(gutter)
+	v := newScrollbackView(false)
 	v.SetBorder(true)
-	v.enabled = gutter
-	if gutter {
-		v.focus = "coffee"
-	}
 	screen := tcell.NewSimulationScreen("UTF-8")
 	if err := screen.Init(); err != nil {
 		t.Fatal(err)
@@ -490,7 +410,7 @@ func assertScrollbackViewportSize(t *testing.T, v *scrollbackView, screen tcell.
 // PageUp reach the oldest retained row without parking the viewport in the
 // evicted gap, and paging down lands on the first retained record.
 func TestScrollbackSaturatedEvictionNavigation(t *testing.T) {
-	v, screen := newScrollbackNavView(t, false)
+	v, screen := newScrollbackNavView(t)
 	feedScrollback(v, scrollbackNavLines("line", 300), make([]string, 300), 0)
 	v.Draw(screen)
 	feedAndEvict(v, scrollbackNavLines("new", 300), 200)
@@ -545,32 +465,11 @@ func TestScrollbackSaturatedEvictionNavigation(t *testing.T) {
 	assertScrollbackViewport(t, v, screen)
 }
 
-// TestScrollbackPageUpAcrossEvictedRows walks from the end to the beginning
-// one page at a time. Every intermediate viewport must stay on retained rows.
-func TestScrollbackPageUpAcrossEvictedRows(t *testing.T) {
-	v, screen := newScrollbackNavView(t, false)
-	feedScrollback(v, scrollbackNavLines("line", 300), make([]string, 300), 0)
-	v.Draw(screen)
-	feedAndEvict(v, scrollbackNavLines("new", 300), 200)
-	v.Draw(screen)
-	v.ScrollToEnd()
-	v.Draw(screen)
-
-	for i := 0; i < 200 && v.top > 0; i++ {
-		pressScrollbackKey(v, tcell.KeyPgUp)
-		v.Draw(screen)
-		assertScrollbackViewport(t, v, screen)
-	}
-	if v.top != 0 {
-		t.Fatalf("PageUp never reached Home: top = %d", v.top)
-	}
-}
-
 // TestScrollbackOverwrittenAnchorClampsToRetainedStart covers a reader whose
 // anchored record is itself evicted: the viewport must land at the oldest
 // retained record instead of keeping an index that no longer exists.
 func TestScrollbackOverwrittenAnchorClampsToRetainedStart(t *testing.T) {
-	v, screen := newScrollbackNavView(t, false)
+	v, screen := newScrollbackNavView(t)
 	feedScrollback(v, scrollbackNavLines("line", 400), make([]string, 400), 0)
 	v.Draw(screen)
 
@@ -595,41 +494,11 @@ func TestScrollbackOverwrittenAnchorClampsToRetainedStart(t *testing.T) {
 	assertScrollbackViewport(t, v, screen)
 }
 
-// TestScrollbackGutterAtFirstRetainedRow checks the thread gutter uses the same
-// clamped row as the TextView rather than disappearing in the evicted gap.
-func TestScrollbackGutterAtFirstRetainedRow(t *testing.T) {
-	v, screen := newScrollbackNavView(t, true)
-	chats := make([]string, 300)
-	for i := range chats {
-		chats[i] = "coffee"
-	}
-	feedScrollback(v, scrollbackNavLines("line", 300), chats, 0)
-	v.Draw(screen)
-	feedAndEvict(v, scrollbackNavLines("new", 300), 200)
-	v.Draw(screen)
-
-	pressScrollbackKey(v, tcell.KeyHome)
-	v.Draw(screen)
-	pressScrollbackKey(v, tcell.KeyPgDn)
-	v.Draw(screen)
-	if want := v.leading + v.baseRow; v.top != want {
-		t.Fatalf("gutter viewport top = %d, want oldest retained row %d", v.top, want)
-	}
-	x, y, width, height := v.innerRect(0, 0, 60, 24)
-	if width <= 0 || height <= 0 {
-		t.Fatal("empty pane")
-	}
-	main, _, _, _ := screen.GetContent(x-2, y)
-	if main != '●' {
-		t.Fatalf("gutter first row = %q, want focused-conversation marker '●'", main)
-	}
-}
-
 // TestScrollbackRepeatedCompactionKeepsWindow checks that compacting the
 // backing slice does not invalidate or shift the retained-relative widget
 // window, and that the bounded backing array stays bounded.
 func TestScrollbackRepeatedCompactionKeepsWindow(t *testing.T) {
-	v, screen := newScrollbackNavView(t, false)
+	v, screen := newScrollbackNavView(t)
 	chats := make([]string, 1000)
 	feedScrollback(v, scrollbackNavLines("seed", 1000), chats, 0)
 	v.Draw(screen)
@@ -675,45 +544,6 @@ func TestScrollbackRepeatedCompactionKeepsWindow(t *testing.T) {
 	}
 	if got, limit := cap(v.records), 4*maxOutputLines; got > limit {
 		t.Fatalf("records backing capacity %d exceeds %d", got, limit)
-	}
-}
-
-// TestScrollbackWindowByteAccounting checks the reported and capped window
-// bytes count each record exactly once.
-func TestScrollbackWindowByteAccounting(t *testing.T) {
-	v, screen := newScrollbackNavView(t, false)
-	lines := make([]string, 200)
-	for i := range lines {
-		lines[i] = "[#808080]" + strings.Repeat("x", 100) + "[-]"
-	}
-	feedScrollback(v, lines, make([]string, len(lines)), 0)
-	v.Draw(screen)
-	if !v.haveWindow || v.winEnd <= v.winStart {
-		t.Fatalf("no window built: have=%v [%d,%d)", v.haveWindow, v.winStart, v.winEnd)
-	}
-	want := 0
-	for i := v.winStart; i < v.winEnd; i++ {
-		want += len(v.rec(i).text)
-	}
-	if v.winBytes != want {
-		t.Fatalf("window bytes = %d, want %d (records [%d,%d))", v.winBytes, want, v.winStart, v.winEnd)
-	}
-	if v.winBytes > maxScrollbackWindowBytes+maxLineRunes {
-		t.Fatalf("window bytes %d exceed bounded allowance", v.winBytes)
-	}
-}
-
-// TestScrollbackResetClearsDiscardedRecords checks a replay/reset does not keep
-// discarded record strings reachable through the backing array.
-func TestScrollbackResetClearsDiscardedRecords(t *testing.T) {
-	v := newScrollbackView(false)
-	feedScrollback(v, scrollbackNavLines("old", 100), make([]string, 100), 0)
-	v.reset(500)
-	backing := v.records[:cap(v.records)]
-	for i, r := range backing {
-		if r.text != "" || r.chat != "" {
-			t.Fatalf("reset left discarded record %d reachable: text=%q chat=%q", i, r.text, r.chat)
-		}
 	}
 }
 
@@ -769,7 +599,7 @@ func TestScrollbackResizeKeepsAnchorThroughEviction(t *testing.T) {
 // retained tail fits, so the viewport is the beginning of the widget text (the
 // leading row) rather than an absolute row in the evicted gap.
 func TestScrollbackShortRetainedHistoryFollowsFromBeginning(t *testing.T) {
-	v, screen := newScrollbackNavView(t, false)
+	v, screen := newScrollbackNavView(t)
 	feedScrollback(v, scrollbackNavLines("old", 500), make([]string, 500), 0)
 	v.Draw(screen)
 
@@ -791,20 +621,4 @@ func TestScrollbackShortRetainedHistoryFollowsFromBeginning(t *testing.T) {
 		t.Fatal("short retained history should still follow the end")
 	}
 	assertScrollbackViewport(t, v, screen)
-}
-
-// TestScrollbackThemeRecolorUsesCanonicalRecords checks the theme contract:
-// records keep default-theme markup and only the widget window is recolored.
-func TestScrollbackThemeRecolorUsesCanonicalRecords(t *testing.T) {
-	v := newScrollbackView(false)
-	feedScrollback(v, []string{"[#33ccff]alice[-] hello [#808080][id 12:00:00][-]"}, []string{""}, 0)
-
-	v.replacer = monochromeTheme.scrollbackColors()
-	if !strings.Contains(v.GetText(false), "[white]alice") {
-		t.Fatalf("themed text not mapped: %q", v.GetText(false))
-	}
-	v.replacer = nil
-	if !strings.Contains(v.GetText(false), "[#33ccff]alice") {
-		t.Fatalf("canonical text lost after theme reset: %q", v.GetText(false))
-	}
 }

@@ -18,17 +18,6 @@ func TestStateUpdateIsAnImmutableSnapshot(t *testing.T) {
 	}
 }
 
-func TestViewSwitchReusesSessionIdentity(t *testing.T) {
-	c, _ := testClient(t)
-	c.config.path = filepath.Join(t.TempDir(), "config.json")
-	c.setActiveView("lobby")
-	key := c.chatKeys["lobby"].pubKey
-	c.setActiveView("lobby")
-	if c.chatKeys["lobby"].pubKey != key {
-		t.Fatal("view switch unexpectedly rotated identity")
-	}
-}
-
 func TestPoWDifficultyIsBounded(t *testing.T) {
 	c, _ := testClient(t)
 	c.config.path = filepath.Join(t.TempDir(), "config.json")

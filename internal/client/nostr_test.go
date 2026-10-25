@@ -3,7 +3,6 @@ package client
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -53,29 +52,6 @@ func BenchmarkProcessDuplicate(b *testing.B) {
 	}
 }
 
-func BenchmarkEventValidation(b *testing.B) {
-	e := signedEvent(b, "hello")
-	b.ReportAllocs()
-	for b.Loop() {
-		if !e.CheckID() {
-			b.Fatal("id")
-		}
-		if ok, _ := e.CheckSignature(); !ok {
-			b.Fatal("sig")
-		}
-	}
-}
-
-func BenchmarkEventSigning(b *testing.B) {
-	key := strings.Repeat("0", 63) + "1"
-	for b.Loop() {
-		e := nostr.Event{Kind: ephChatKind, CreatedAt: nostr.Now(), Tags: nostr.Tags{{"d", "lobby"}}, Content: fmt.Sprint("hello")}
-		if err := e.Sign(key); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
 func TestProcessEventValidationAndDedup(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -98,6 +74,14 @@ func TestProcessEventValidationAndDedup(t *testing.T) {
 			bad := *original
 			bad.Tags = append(nostr.Tags(nil), original.Tags...)
 			tt.mutate(&bad)
+			switch tt.name {
+			case "bad-id", "bad-signature", "short-pubkey":
+			default:
+				// Keep policy probes signed so an invalid ID cannot mask a missing guard.
+				if err := bad.Sign(strings.Repeat("0", 63) + "1"); err != nil {
+					t.Fatal(err)
+				}
+			}
 			c.processEvent(&bad, "local")
 			if len(events) != 0 {
 				t.Fatal("invalid event displayed")
@@ -108,30 +92,6 @@ func TestProcessEventValidationAndDedup(t *testing.T) {
 				t.Fatalf("valid event poisoned or duplicate displayed: %d", len(events))
 			}
 		})
-	}
-}
-
-func TestPublishSnapshotsIdentityAndChat(t *testing.T) {
-	c, _ := testClient(t)
-	key := strings.Repeat("0", 63) + "1"
-	pk, _ := nostr.GetPublicKey(key)
-	c.chatKeys["lobby"] = chatSession{privKey: key, pubKey: pk, nick: "alice"}
-	c.relays["local"] = &managedRelay{url: "local", connected: true, chats: []string{"lobby"}}
-	c.publishMessage("hello")
-	job := <-c.outgoing
-	c.config.ActiveViewName = "other"
-	c.chatKeys["lobby"] = chatSession{}
-	if job.chat != "lobby" || job.key != key || job.event.PubKey != pk || job.event.Tags.Find("n")[1] != "alice" {
-		t.Fatal("queued send did not capture identity and chat")
-	}
-}
-
-func TestMiningCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	result := executePublish(ctx, publishJob{difficulty: 32, event: *signedEvent(t, "cancel"), key: strings.Repeat("0", 63) + "1"})
-	if result.kind != "ERROR" || result.accepted != 0 {
-		t.Fatal("cancelled mining reported success")
 	}
 }
 

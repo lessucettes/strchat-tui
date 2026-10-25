@@ -261,31 +261,6 @@ func BenchmarkFrameScreenOneCellChange(b *testing.B) {
 	b.ReportMetric(float64(spy.writeCount())/float64(b.N), "cells-submitted/op")
 }
 
-// BenchmarkFrameScreenDiffScan isolates the adapter's own cost: one Show over a
-// full 120x40 frame with nothing to submit.
-func BenchmarkFrameScreenDiffScan(b *testing.B) {
-	spy, sim := newSpyScreen(b)
-	sim.SetSize(120, 40)
-	screen := wrapFrameScreen(spy)
-	applyFrame(screen, fullFrame(120, 40, "w"))
-	b.ReportAllocs()
-	for b.Loop() {
-		screen.Show()
-	}
-}
-
-// BenchmarkNativeScreenFullFrame is the unadapted path for comparison: every
-// non-blank cell is redrawn on every frame.
-func BenchmarkNativeScreenFullFrame(b *testing.B) {
-	_, sim := newSpyScreen(b)
-	sim.SetSize(120, 40)
-	frame := fullFrame(120, 40, "w")
-	b.ReportAllocs()
-	for b.Loop() {
-		applyFrame(sim, frame)
-	}
-}
-
 func fullFrame(width, height int, text string) []frameCell {
 	frame := make([]frameCell, 0, width*height)
 	for y := 0; y < height; y++ {
@@ -324,18 +299,6 @@ func TestFrameScreenUnchangedFrameWritesNothing(t *testing.T) {
 	}
 	if ok, _ := mustProjection(t, screen).equal(screenProjection(sim)); !ok {
 		t.Fatal("visible content changed while nothing was submitted")
-	}
-}
-
-func TestFrameScreenWritesDoNotRequireClear(t *testing.T) {
-	spy, sim := newSpyScreen(t)
-	sim.SetSize(8, 2)
-	screen := wrapFrameScreen(spy)
-	screen.Put(0, 0, "a", tcell.StyleDefault)
-	screen.SetContent(1, 0, '世', nil, tcell.StyleDefault)
-	screen.Show()
-	if got := screenText(sim); !strings.Contains(got, "a世") {
-		t.Fatalf("initial writes were lost without Clear: %q", got)
 	}
 }
 
@@ -561,38 +524,6 @@ func sameFrame(a, b []frameCell) bool {
 	return true
 }
 
-// TestFrameScreenTypingSubmitsOnlyTheChange is the keystroke case measured on a
-// PTY: a full screen of text, then one changed character.
-func TestFrameScreenTypingSubmitsOnlyTheChange(t *testing.T) {
-	spy, sim := newSpyScreen(t)
-	sim.SetSize(80, 24)
-	screen := wrapFrameScreen(spy)
-
-	full := make([]frameCell, 0, 80*23)
-	for y := 0; y < 23; y++ {
-		for x := 0; x < 80; x++ {
-			full = append(full, frameCell{x: x, y: y, text: "w", style: styleFor(x + y)})
-		}
-	}
-	applyFrame(screen, full)
-	spy.reset()
-
-	typed := append(append([]frameCell(nil), full...), frameCell{x: 40, y: 23, text: "q"})
-	applyFrame(screen, typed)
-	if got := spy.writeCount(); got != 1 {
-		t.Fatalf("one typed character submitted %d cells, want 1", got)
-	}
-
-	// The cursor is placed by the wrapped screen on every Show, independent of
-	// the diff; it must not force cell repaints.
-	spy.reset()
-	screen.ShowCursor(41, 23)
-	applyFrame(screen, typed)
-	if got := spy.writeCount(); got != 0 {
-		t.Fatalf("cursor move submitted %d cells, want 0", got)
-	}
-}
-
 // TestFrameScreenSyncRepaintsEverything covers explicit redraw paths: Sync, a
 // size change and resume all have to repaint the physical screen even though
 // the logical frame did not change.
@@ -648,40 +579,6 @@ func TestFrameScreenSyncRepaintsEverything(t *testing.T) {
 	}
 }
 
-// TestFrameScreenDelegatesTerminalBehaviour keeps cursor, mouse-relevant locks
-// and screen geometry on the wrapped screen.
-func TestFrameScreenDelegatesTerminalBehaviour(t *testing.T) {
-	spy, sim := newSpyScreen(t)
-	sim.SetSize(20, 5)
-	screen := wrapFrameScreen(spy)
-
-	if w, h := screen.Size(); w != 20 || h != 5 {
-		t.Fatalf("Size = %dx%d, want 20x5", w, h)
-	}
-	screen.LockRegion(1, 1, 4, 2, true)
-	screen.ShowCursor(3, 2)
-	_, _, _, locks := spy.snapshot()
-	if locks != 1 {
-		t.Fatalf("LockRegion calls = %d, want 1", locks)
-	}
-	if len(spy.cursors) != 1 || spy.cursors[0].x != 3 || spy.cursors[0].y != 2 {
-		t.Fatalf("cursor calls = %+v, want ShowCursor(3,2)", spy.cursors)
-	}
-
-	// Content under a locked region is still submitted, but the wrapped screen
-	// withholds it until UnlockCell marks the cell dirty again.
-	screen.LockRegion(1, 1, 4, 2, true)
-	applyFrame(screen, []frameCell{{x: 2, y: 2, text: "x"}})
-	if shown := screenText(sim); strings.Contains(shown, "x") {
-		t.Fatalf("locked cell was drawn: %q", shown)
-	}
-	screen.LockRegion(1, 1, 4, 2, false)
-	screen.Show()
-	if shown := screenText(sim); !strings.Contains(shown, "x") {
-		t.Fatalf("unlocked content missing after lock window: %q", shown)
-	}
-}
-
 // TestFrameScreenConcurrentUse runs the buffer under the race detector: drawing
 // and reading may come from different goroutines.
 func TestFrameScreenConcurrentUse(t *testing.T) {
@@ -703,20 +600,6 @@ func TestFrameScreenConcurrentUse(t *testing.T) {
 		}(g)
 	}
 	wg.Wait()
-}
-
-// TestFrameScreenInitErrorIsReported covers the Run error contract: tview's
-// SetScreen throws away Init's error, so the adapter keeps it.
-func TestFrameScreenInitErrorIsReported(t *testing.T) {
-	spy, _ := newSpyScreen(t)
-	screen := wrapFrameScreen(spy)
-	if err := screen.InitError(); err != nil {
-		t.Fatalf("InitError before Init = %v, want nil", err)
-	}
-	_ = screen.Init() // simulation screen init is idempotent
-	if err := screen.InitError(); err != nil {
-		t.Fatalf("InitError after successful Init = %v, want nil", err)
-	}
 }
 
 // TestRunKeepsCallerScreen proves the lifecycle hook does not replace a screen

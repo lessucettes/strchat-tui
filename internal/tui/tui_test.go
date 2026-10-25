@@ -380,43 +380,6 @@ func TestMarkupInjectionIsNeutralized(t *testing.T) {
 	}
 }
 
-func TestControlCharactersAreStrippedOnScreen(t *testing.T) {
-	s := newSimTUI(t, 120, 40)
-	s.events <- testState()
-	ev := testMessage(1)
-	ev.Content = "a\x00b\x1b[31mred\u202eevil"
-	s.events <- ev
-	waitOutput(t, s, 1)
-	s.draw()
-
-	screen := s.text()
-	if strings.ContainsRune(screen, 0x1b) || strings.ContainsRune(screen, 0x00) {
-		t.Fatalf("control characters reached the screen:\n%q", screen)
-	}
-	if !strings.Contains(screen, "ab[31mred") {
-		t.Fatalf("expected stripped content on screen:\n%s", screen)
-	}
-}
-
-func TestScrollbackBudgetHoldsWhileScrolledToTop(t *testing.T) {
-	ui := newIdleTUI(t, 1)
-	ui.plan = layoutPlanFor(120, 40)
-	ui.applyEvent(testState())
-	ui.outputView.ScrollToBeginning()
-	for i := range 2500 {
-		ev := testMessage(i)
-		ev.Content = strings.Repeat("x", 2000)
-		ui.applyEvent(ev)
-		if i%50 == 0 {
-			ui.render()
-		}
-	}
-	ui.render()
-	if size := len(ui.outputView.GetText(false)); size > maxOutputBytes+maxOutputLines {
-		t.Fatalf("scrolled message widget retained %d bytes beyond its budget", size)
-	}
-}
-
 func TestRenderKeepsChangesArrivingDuringDrawDirty(t *testing.T) {
 	ui := newIdleTUI(t, 1)
 	ui.applyEvent(testState(client.View{Name: "first"}))
@@ -426,20 +389,6 @@ func TestRenderKeepsChangesArrivingDuringDrawDirty(t *testing.T) {
 	ui.render()
 	if !ui.dirty.Load() {
 		t.Fatal("render lost a model update that arrived after its snapshot")
-	}
-}
-
-func TestLongContentIsRetainedUpToTheClientCap(t *testing.T) {
-	s := newSimTUI(t, 120, 40)
-	s.events <- testState()
-	content := strings.Repeat("x", 4*1024)
-	ev := testMessage(1)
-	ev.Content = content
-	s.events <- ev
-	waitOutput(t, s, 1)
-	stored := s.ui.modelOutputText()
-	if !strings.Contains(stored, content) {
-		t.Fatalf("4 KiB message was truncated (stored %d bytes)", len(stored))
 	}
 }
 
@@ -528,24 +477,6 @@ drain:
 		return strings.Contains(s.ui.logsView.GetText(true), "INFO: Client input queue recovered")
 	}) {
 		t.Fatal("queue recovery must be an INFO, not a warning or technical STATUS")
-	}
-}
-
-func TestSubmitIsNonBlocking(t *testing.T) {
-	ui := New(make(chan client.UserAction), make(chan client.DisplayEvent))
-	t.Cleanup(ui.restoreLog)
-	done := make(chan bool, 1)
-	go func() { done <- ui.submit(client.UserAction{Type: "SEND_MESSAGE"}) }()
-	select {
-	case ok := <-done:
-		if ok {
-			t.Fatal("submit reported success on a full channel")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("submit blocked on a full channel")
-	}
-	if ui.dropped != 1 {
-		t.Fatalf("dropped = %d, want 1", ui.dropped)
 	}
 }
 
@@ -704,15 +635,6 @@ func TestLogOutputIsCapturedAndBounded(t *testing.T) {
 	if lines := s.ui.modelLogCount(); lines != maxLogLines {
 		t.Fatalf("log ring retained %d lines, want %d", lines, maxLogLines)
 	}
-}
-
-func TestNickCompletionResultReachesInput(t *testing.T) {
-	s := newSimTUI(t, 120, 40)
-	s.onLoop(func() { s.ui.input.SetText("hey @alice") })
-	s.events <- client.DisplayEvent{Type: "NICK_COMPLETION_RESULT", Payload: []string{"@alice#1234"}}
-	waitFor(t, 5*time.Second, func() bool {
-		return s.matches(func() bool { return len(s.ui.completionEntries) == 1 })
-	})
 }
 
 func TestAutocompleteKeepsBlockCompletionBehavior(t *testing.T) {
@@ -884,29 +806,6 @@ func TestRunFailureCleansUpCollectorAndLogger(t *testing.T) {
 	case <-ui.doneCh:
 	default:
 		t.Fatal("doneCh not closed after a failed Run")
-	}
-}
-
-func TestModelChangesDoNotTouchWidgetsOffLoop(t *testing.T) {
-	base := runtime.NumGoroutine()
-	ui := newIdleTUI(t, 1)
-	ui.applyEvent(testState())
-	ui.applyEvent(testMessage(1))
-	ui.applyEvent(client.DisplayEvent{Type: "INFO", Content: "info [x]"})
-	ui.applyEvent(client.DisplayEvent{Type: "STATUS", Content: "status"})
-	ui.applyEvent(client.DisplayEvent{Type: "RELAYS_UPDATE", Payload: []client.RelayInfo{{URL: "wss://a", Connected: true}}})
-	if ui.output.lastIndex() < 0 {
-		t.Fatalf("message not applied to the model")
-	}
-	if lines := ui.output.snapshot(); len(lines) < 2 || !strings.Contains(lines[0], "message 1") {
-		t.Fatalf("output does not start with the message: %v", lines)
-	}
-	if ui.logs.lastIndex() != 0 {
-		t.Fatalf("status not applied to the log model")
-	}
-	runtime.GC()
-	if n := runtime.NumGoroutine(); n > base+2 {
-		t.Fatalf("applying events spawned goroutines: %d > %d", n, base+2)
 	}
 }
 

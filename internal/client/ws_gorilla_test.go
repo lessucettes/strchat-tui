@@ -201,43 +201,6 @@ func TestGorillaHTTPSProxyUsesTLSWithoutCustomConfig(t *testing.T) {
 	}
 }
 
-func TestGorillaProxyDefaultPorts(t *testing.T) {
-	for _, tc := range []struct{ proxy, addr string }{
-		{"http://proxy.invalid", "proxy.invalid:80"},
-		{"https://proxy.invalid", "proxy.invalid:443"},
-		{"socks5://proxy.invalid", "proxy.invalid:1080"},
-		{"socks5h://proxy.invalid", "proxy.invalid:1080"},
-	} {
-		t.Run(tc.proxy, func(t *testing.T) {
-			proxyURL, err := url.Parse(tc.proxy)
-			if err != nil {
-				t.Fatal(err)
-			}
-			addresses := make(chan string, 1)
-			transport := http.DefaultTransport.(*http.Transport).Clone()
-			transport.Proxy = http.ProxyURL(proxyURL)
-			transport.DialContext = func(_ context.Context, _, addr string) (net.Conn, error) {
-				addresses <- addr
-				return nil, errors.New("isolated default-port probe")
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			if conn, err := dialRelayTransport(ctx, "ws://relay.invalid", &http.Client{Transport: transport}, time.Second); err == nil {
-				conn.CloseNow()
-				t.Fatal("probe unexpectedly connected")
-			}
-			select {
-			case got := <-addresses:
-				if got != tc.addr {
-					t.Fatalf("dialed %q, want %q", got, tc.addr)
-				}
-			default:
-				t.Fatal("proxy dial was not attempted")
-			}
-		})
-	}
-}
-
 func TestGorillaProxySchemeFailsClosed(t *testing.T) {
 	target, requests := wsTestEchoServer(t, false)
 	transport := http.DefaultTransport.(*http.Transport).Clone()

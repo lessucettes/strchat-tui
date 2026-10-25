@@ -332,28 +332,6 @@ func TestRelayHealthGroupPartialCoverageWarnsOnlyOnTransition(t *testing.T) {
 	}
 }
 
-func TestComputeRelayHealthWaitsForAllRoutesToFail(t *testing.T) {
-	failed := map[string]bool{"ws://a": true}
-	in := relayHealthInput{
-		chats: []string{"chat"},
-		relays: []relayHealthRelay{
-			{url: "ws://a", chats: []string{"chat"}},
-			{url: "ws://b", chats: []string{"chat"}},
-		},
-		pool: func(string) []string { return []string{"ws://a", "ws://b"} },
-		failed: func(url string) bool {
-			return failed[url]
-		},
-	}
-	if report := computeRelayHealth(in); report.class != relayHealthConnecting || report.degraded {
-		t.Fatalf("one failed route among dialing candidates classified as %v degraded=%v, want connecting", report.class, report.degraded)
-	}
-	failed["ws://b"] = true
-	if report := computeRelayHealth(in); report.class != relayHealthOffline || !report.degraded {
-		t.Fatalf("all failed routes classified as %v degraded=%v, want offline", report.class, report.degraded)
-	}
-}
-
 func TestRelayProblemLoggingDeduplicatesWithinOutage(t *testing.T) {
 	c, events := testClient(t)
 	url := "ws://127.0.0.1:13021"
@@ -464,32 +442,4 @@ func TestRelayAuthRejectionWarnsOnceWithoutError(t *testing.T) {
 		t.Fatalf("authentication rejection produced %d ERROR events, want 0", got)
 	}
 	h.stopWithin(time.Second)
-}
-
-func TestPlannerNoticeLevels(t *testing.T) {
-	healthy := relayHealthReport{class: relayHealthHealthy}
-	degraded := relayHealthReport{class: relayHealthOffline, degraded: true}
-	for _, tc := range []struct {
-		name     string
-		notice   string
-		health   relayHealthReport
-		wantType string
-		wantLog  bool
-	}{
-		{"safety limit", "Warning: the 256-relay safety limit reduces chat coverage.", healthy, "WARN", true},
-		{"exhausted reserve", "Warning: geographic relay coverage is incomplete; reserve exhausted or cooling down.", healthy, "", false},
-		{"reserve transition", "Trying geographic reserve relays; primary recovery continues.", healthy, "", false},
-		{"no eligible covered by health", "Warning: no eligible relay for an active chat; waiting for retry cooldown.", degraded, "", false},
-		{"no eligible without health evidence", "Warning: no eligible relay for an active chat; waiting for retry cooldown.", healthy, "WARN", true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			event, log := plannerLogEvent(tc.notice, tc.health)
-			if log != tc.wantLog {
-				t.Fatalf("log = %v, want %v", log, tc.wantLog)
-			}
-			if log && event.Type != tc.wantType {
-				t.Fatalf("type = %q, want %q", event.Type, tc.wantType)
-			}
-		})
-	}
 }

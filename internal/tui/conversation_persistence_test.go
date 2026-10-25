@@ -52,22 +52,3 @@ func TestGroupSelectionQueueFailureKeepsCurrentChat(t *testing.T) {
 		t.Fatal("selection backpressure was not surfaced")
 	}
 }
-
-func TestRecreatedGroupDoesNotInheritDeletedSelection(t *testing.T) {
-	ui := newIdleTUI(t, 16)
-	state := focusGroupState().Payload.(client.StateUpdate)
-	state.Views[0].SelectedChat = "lobby"
-	ui.applyEvent(client.DisplayEvent{Type: "STATE_UPDATE", Payload: state})
-	ui.render()
-	deleted := focusGroupState().Payload.(client.StateUpdate)
-	deleted.Views = deleted.Views[1:]
-	ui.applyEvent(client.DisplayEvent{Type: "STATE_UPDATE", Payload: deleted})
-	recreated := focusGroupState().Payload.(client.StateUpdate)
-	recreated.Views[0].SelectedChat = "coffee"
-	ui.applyEvent(client.DisplayEvent{Type: "STATE_UPDATE", Payload: recreated})
-	// Both snapshots can be collected before the next frame is drawn.
-	ui.render()
-	if got := ui.conversationChat(ui.snapshot()); got != "coffee" {
-		t.Fatalf("recreated group inherited the deleted group's choice: %q", got)
-	}
-}

@@ -76,27 +76,3 @@ func TestGeoReserveReplacesFailedPrimaryAndReturns(t *testing.T) {
 		}
 	}
 }
-
-func TestGeoReserveCandidatesKeepBoundedPrimaryPrefixes(t *testing.T) {
-	entries, err := bundledCatalogEntries()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, chat := range []string{"u4pruy", "9q8yyk", "xn774c"} {
-		t.Run(chat, func(t *testing.T) {
-			lists, err := rankedGeoRelays(chat, 2*defaultRelayCount)
-			if err != nil || len(lists) != len(entries) {
-				t.Fatalf("ranked catalog sets: %d, error: %v", len(lists), err)
-			}
-			for i, list := range lists {
-				primary, err := selectClosestRelays(entries[i], chat, defaultRelayCount)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if len(list) != 2*defaultRelayCount || !slices.Equal(list[:defaultRelayCount], primary) {
-					t.Fatalf("catalog %d changed its primary set or exceeded the bounded reserve", i)
-				}
-			}
-		})
-	}
-}

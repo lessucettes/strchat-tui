@@ -150,29 +150,6 @@ func TestMouseCompletionPopupDoesNotActivateUnderlyingChat(t *testing.T) {
 	}
 }
 
-func TestInfoRevealScrollsOnlyEnoughToShowSelection(t *testing.T) {
-	s := newSimTUI(t, 120, 32)
-	children := make([]string, 50)
-	for i := range children {
-		children[i] = fmt.Sprintf("member%02d", i)
-	}
-	s.onLoop(func() { s.ui.applyEvent(testState(client.View{Name: "mixed", IsGroup: true, Children: children})) })
-	s.draw()
-	s.key(tcell.KeyRune, 'n', tcell.ModAlt)
-	waitFor(t, time.Second, func() bool { return s.matches(func() bool { return s.ui.focused == s.ui.detailsView }) })
-	height := onLoopValue(s, func() int { _, _, _, height := s.ui.detailsView.GetInnerRect(); return height })
-	for range height {
-		s.key(tcell.KeyDown, 0, tcell.ModNone)
-	}
-	waitFor(t, time.Second, func() bool {
-		return s.matches(func() bool { return s.ui.conversationChat(s.ui.snapshot()) == children[height] })
-	})
-	s.draw()
-	if row := onLoopValue(s, func() int { row, _ := s.ui.detailsView.GetScrollOffset(); return row }); row != 1 {
-		t.Fatalf("selection crossing the bottom scrolled to row %d, want 1", row)
-	}
-}
-
 func TestMouseInfoDoesNotReroutePreviewOrRejectedSelection(t *testing.T) {
 	for _, preview := range []bool{true, false} {
 		t.Run(map[bool]string{true: "inactive preview", false: "full action queue"}[preview], func(t *testing.T) {

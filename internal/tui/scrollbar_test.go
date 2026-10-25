@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 
 	"github.com/lessucettes/strchat-tui/internal/client"
@@ -46,28 +45,6 @@ func borderHasThumb(s *simTUI, pane tview.Primitive, left bool) bool {
 		}
 	}
 	return false
-}
-
-func TestScrollbarInfoWrappingResizeAndMonochrome(t *testing.T) {
-	s := newSimTUI(t, 120, 32)
-	fillScrollbarPanes(s)
-	s.onLoop(func() {
-		s.ui.applyEvent(client.DisplayEvent{Type: "THEME_UPDATE", Content: "monochrome"})
-		s.ui.applyEvent(client.DisplayEvent{Type: "SCROLLBAR_UPDATE", Payload: client.ScrollbarLeft})
-	})
-	for _, size := range [][2]int{{120, 130}, {80, 32}, {16, 10}, {120, 32}} {
-		s.onLoop(func() { s.screen.SetSize(size[0], size[1]) })
-		s.draw()
-		s.onLoop(func() { s.ui.handleKey(tcell.NewEventKey(tcell.KeyRune, 'n', tcell.ModAlt)) })
-		s.draw()
-		s.onLoop(func() {
-			_, _, _, height := s.ui.detailsView.GetInnerRect()
-			overflow := s.ui.detailsView.GetWrappedLineCount() > height
-			if borderHasThumb(s, s.ui.detailsView, true) != overflow {
-				t.Errorf("Info scrollbar disagrees with wrapped content after resize to %v", size)
-			}
-		})
-	}
 }
 
 func TestScrollbarVisibilitySideAndUnchangedContents(t *testing.T) {

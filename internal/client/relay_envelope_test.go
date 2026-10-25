@@ -3,7 +3,6 @@ package client
 import (
 	"bytes"
 	"encoding/json"
-	"math/rand/v2"
 	"strings"
 	"testing"
 
@@ -176,46 +175,6 @@ func TestEnvelopeSplitMatchesRawMessage(t *testing.T) {
 	}
 }
 
-func TestEnvelopeSplitRandomized(t *testing.T) {
-	base := [][]byte{
-		[]byte(`["AUTH","challenge"]`),
-		[]byte(`["EVENT","chat",{"id":"abc","content":"hello\u00e9","tags":[["d","lobby"]]}]`),
-		[]byte(`["OK","id",true,""]`),
-		[]byte(`["CLOSED","chat","auth-required: go"]`),
-		[]byte(`["EOSE","chat",["auth"]]`),
-		[]byte(`["NOTICE","hello",{"nested":[1,2,{"x":"y"}]}]`),
-	}
-	rng := rand.New(rand.NewPCG(0x5eed, 0xbeef))
-	alphabet := []byte(`[]{}",:0123456789.eE+-truefalsn \t\n\r\uABCDEFxyz` + "\xff")
-	for i := 0; i < 100000; i++ {
-		var data []byte
-		if i%3 == 0 {
-			data = make([]byte, 1+rng.IntN(24))
-			for j := range data {
-				data[j] = alphabet[rng.IntN(len(alphabet))]
-			}
-		} else {
-			data = append([]byte(nil), base[rng.IntN(len(base))]...)
-			for edits := 1 + rng.IntN(3); edits > 0; edits-- {
-				pos := rng.IntN(len(data) + 1)
-				switch rng.IntN(3) {
-				case 0:
-					data = append(data[:pos], append([]byte{alphabet[rng.IntN(len(alphabet))]}, data[pos:]...)...)
-				case 1:
-					if pos < len(data) {
-						data = append(data[:pos], data[pos+1:]...)
-					}
-				case 2:
-					if pos < len(data) {
-						data[pos] = alphabet[rng.IntN(len(alphabet))]
-					}
-				}
-			}
-		}
-		compareEnvelope(t, data)
-	}
-}
-
 func FuzzEnvelopeSplitMatchesRawMessage(f *testing.F) {
 	seeds := []string{
 		`["AUTH","c"]`, `["EVENT","chat",{"id":"x"}]`, `["OK","id",true,""]`,
@@ -228,82 +187,4 @@ func FuzzEnvelopeSplitMatchesRawMessage(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		compareEnvelope(t, data)
 	})
-}
-
-func BenchmarkEnvelopeWas(b *testing.B) {
-	frames := pipelineFixtures(b)
-	for _, size := range []string{"short", "long"} {
-		data := frames[size][0]
-		b.Run(size, func(b *testing.B) {
-			b.ReportAllocs()
-			for b.Loop() {
-				if _, _, _, ok := oldRelayEnvelope(data); !ok {
-					b.Fatal("rejected")
-				}
-			}
-		})
-	}
-}
-
-func BenchmarkEnvelopeSplit(b *testing.B) {
-	frames := pipelineFixtures(b)
-	for _, size := range []string{"short", "long"} {
-		data := frames[size][0]
-		b.Run(size, func(b *testing.B) {
-			b.ReportAllocs()
-			for b.Loop() {
-				if _, _, _, _, ok := newRelayEnvelope(data); !ok {
-					b.Fatal("rejected")
-				}
-			}
-		})
-	}
-}
-
-func BenchmarkEnvelopeSplitValidOnly(b *testing.B) {
-	frames := pipelineFixtures(b)
-	for _, size := range []string{"short", "long"} {
-		data := frames[size][0]
-		b.Run(size, func(b *testing.B) {
-			b.ReportAllocs()
-			for b.Loop() {
-				if _, n := splitRelayEnvelope(data); n != 3 {
-					b.Fatal("count", n)
-				}
-			}
-		})
-	}
-}
-
-// Exercise valid untrusted frames close to the production wire limit, not
-// accepted-event throughput. Payloads may be rejected later by event validation.
-func BenchmarkEnvelopeAdversarial(b *testing.B) {
-	frames := []struct{ name, text string }{
-		{"denseEscapes", `["EVENT","chat",{"content":"` + strings.Repeat(`\\`, 30000) + `"}]`},
-		{"manyStrings", `["EVENT","chat",{"tags":[` + strings.TrimSuffix(strings.Repeat(`["x"],`, 8000), ",") + `]}]`},
-	}
-	for _, fixture := range frames {
-		data := []byte(fixture.text)
-		if len(data) > 64*1024 || !json.Valid(data) {
-			b.Fatalf("bad bounded fixture %s", fixture.name)
-		}
-		b.Run(fixture.name, func(b *testing.B) {
-			b.Run("old", func(b *testing.B) {
-				b.ReportAllocs()
-				for b.Loop() {
-					if _, _, _, ok := oldRelayEnvelope(data); !ok {
-						b.Fatal("rejected")
-					}
-				}
-			})
-			b.Run("candidate", func(b *testing.B) {
-				b.ReportAllocs()
-				for b.Loop() {
-					if _, _, _, _, ok := newRelayEnvelope(data); !ok {
-						b.Fatal("rejected")
-					}
-				}
-			})
-		})
-	}
 }

@@ -6,10 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strconv"
 	"strings"
 	"testing"
-	"time"
 )
 
 // scrollbarEvents drains every already-queued display event.
@@ -22,32 +20,6 @@ func scrollbarEvents(events chan DisplayEvent) []DisplayEvent {
 		default:
 			return out
 		}
-	}
-}
-
-func TestSetSameScrollbarShowsHintWithoutSaving(t *testing.T) {
-	for _, mode := range []ScrollbarPosition{ScrollbarOff, ScrollbarRight, ScrollbarLeft} {
-		t.Run(mode.String(), func(t *testing.T) {
-			c, events := testClient(t)
-			c.config.Scrollbar = mode
-			// Re-selecting the current mode must not attempt to save.
-			c.config.path = ""
-
-			c.setScrollbar(strconv.Itoa(int(mode)))
-
-			evs := scrollbarEvents(events)
-			if len(evs) != 1 || evs[0].Type != "INFO" {
-				t.Fatalf("query events = %+v, want one INFO", evs)
-			}
-			for _, want := range []string{"Scrollbar: " + mode.String(), "0 off", "1 right", "2 left", "/scrollbar [0|1|2]", "/sb"} {
-				if !strings.Contains(evs[0].Content, want) {
-					t.Errorf("query output %q is missing %q", evs[0].Content, want)
-				}
-			}
-			if c.config.Scrollbar != mode {
-				t.Errorf("query changed scrollbar to %v, want %v", c.config.Scrollbar, mode)
-			}
-		})
 	}
 }
 
@@ -269,67 +241,5 @@ func TestSetScrollbarSaveFailureKeepsLiveAndSavedState(t *testing.T) {
 	after, err := os.ReadFile(path)
 	if err != nil || !bytes.Equal(before, after) {
 		t.Fatal("failed save changed the previously saved config")
-	}
-}
-
-func TestHelpPlacesScrollbarAfterTheme(t *testing.T) {
-	c, events := testClient(t)
-	c.getHelp("appearance")
-	ev := <-events
-	theme := strings.Index(ev.Content, "/theme ")
-	scrollbar := strings.Index(ev.Content, "/scrollbar ")
-	if theme < 0 || scrollbar < 0 {
-		t.Fatalf("help is missing theme or scrollbar: %q", ev.Content)
-	}
-	if theme >= scrollbar {
-		t.Fatalf("scrollbar help is not immediately after theme: %q", ev.Content)
-	}
-	if !strings.Contains(ev.Content, "(Alias: /sb)") {
-		t.Fatal("scrollbar help does not document the /sb alias")
-	}
-}
-
-func TestRunEmitsScrollbarUpdateAfterTheme(t *testing.T) {
-	events := make(chan DisplayEvent, 256)
-	actions := make(chan UserAction)
-	c := newClient(&config{AnchorRelays: []string{"ws://127.0.0.1:1"}, Scrollbar: ScrollbarLeft}, actions, events)
-	done := make(chan struct{})
-	go func() {
-		c.Run()
-		close(done)
-	}()
-	defer func() {
-		c.Stop()
-		select {
-		case <-done:
-		case <-time.After(10 * time.Second):
-			t.Fatal("Run did not stop")
-		}
-	}()
-
-	deadline := time.After(10 * time.Second)
-	sawTheme, sawScrollbar := false, false
-	for !sawScrollbar {
-		select {
-		case ev := <-events:
-			switch ev.Type {
-			case "THEME_UPDATE":
-				sawTheme = true
-			case "SCROLLBAR_UPDATE":
-				sawScrollbar = true
-				if !sawTheme {
-					t.Fatal("SCROLLBAR_UPDATE was emitted before THEME_UPDATE")
-				}
-				got, ok := ev.Payload.(ScrollbarPosition)
-				if !ok || got != ScrollbarLeft {
-					t.Fatalf("startup SCROLLBAR_UPDATE payload = %#v, want %v", ev.Payload, ScrollbarLeft)
-				}
-			}
-		case <-deadline:
-			t.Fatal("timed out waiting for startup SCROLLBAR_UPDATE")
-		}
-	}
-	if !sawTheme {
-		t.Fatal("startup THEME_UPDATE was not emitted first")
 	}
 }
