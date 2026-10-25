@@ -140,6 +140,12 @@ func (c *client) updateRelaySubscriptions(desired map[string][]string) {
 			c.wg.Go(func() { defer close(worker.done); c.runRelay(ctx, worker, subscription) })
 		}
 	}
+	// Workers must start before a display write can block, but report the route
+	// before any connection status. Consume the notice so refreshes stay silent.
+	if c.proxyStartupNotice != "" {
+		c.emit(DisplayEvent{Type: "STATUS", Content: c.proxyStartupNotice})
+		c.proxyStartupNotice = ""
+	}
 	c.sendRelaysUpdate()
 }
 

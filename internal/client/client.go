@@ -17,6 +17,7 @@ import (
 type client struct {
 	config                         *config
 	relayHTTPClient                *http.Client
+	proxyStartupNotice             string
 	chatKeys                       map[string]chatSession
 	retiredKeys                    *lru.Cache[string, bool] // public keys only, for late echoes
 	actionsChan                    <-chan UserAction
@@ -59,6 +60,9 @@ func NewWithOptions(actions <-chan UserAction, events chan<- DisplayEvent, optio
 	}
 	c := newClient(cfg, actions, events)
 	c.relayHTTPClient = httpClient
+	if proxy := strings.TrimSpace(options.SOCKSProxy); proxy != "" {
+		c.proxyStartupNotice = fmt.Sprintf("Using SOCKS5 proxy %s for all relay connections. Direct fallback is disabled.", proxy)
+	}
 	return c, nil
 }
 

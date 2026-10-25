@@ -1686,6 +1686,7 @@ func TestRunShutdownWithBlockedConsumerIsBounded(t *testing.T) {
 		events <- DisplayEvent{Type: "NEW_MESSAGE", Content: "pre-filled two"}
 		actions := make(chan UserAction, 8)
 		c := newClient(relayTestConfig(t, ts.url), actions, events)
+		c.proxyStartupNotice = "Startup proxy routing notice."
 		done := make(chan struct{})
 		go func() { defer close(done); c.Run() }()
 		t.Cleanup(func() {
