@@ -13,10 +13,9 @@ import (
 type relayRetry struct {
 	until       time.Time
 	delay       time.Duration
-	since       nostr.Timestamp
-	chats       []string
-	lastProblem string // bounded warning history survives cooldown retirement
-	failure     string // bounded diagnostic cause, not a retry policy input
+	since       map[string]nostr.Timestamp // immutable per-chat recovery snapshot
+	lastProblem string                     // bounded warning history survives cooldown retirement
+	failure     string                     // bounded diagnostic cause, not a retry policy input
 }
 
 type relayTiming struct {
@@ -67,7 +66,8 @@ func (c *client) relayCovers(url string, now time.Time) bool {
 // longer rebuilds and re-normalizes the relay list for every (relay, chat) pair.
 func (c *client) subscriptionForRelay(url string, chats []string) relaySubscription {
 	c.syncRelayPlanning()
-	update := relaySubscription{chats: chats, since: nostr.Now(), keys: make(map[string]string, len(chats))}
+	update := relaySubscription{chats: chats, since: make(map[string]nostr.Timestamp, len(chats)), keys: make(map[string]string, len(chats))}
+	since := nostr.Now()
 	for _, chat := range chats {
 		if session, ok := c.chatKeys[chat]; ok {
 			update.keys[session.pubKey] = session.privKey
@@ -76,9 +76,12 @@ func (c *client) subscriptionForRelay(url string, chats []string) relaySubscript
 	for _, chat := range chats {
 		plan := c.relayPlanFor(chat)
 		if plan.geo && !plan.contains(url) {
-			update.since -= 30
+			since -= 30
 			break
 		}
+	}
+	for _, chat := range chats {
+		update.since[chat] = since
 	}
 	return update
 }

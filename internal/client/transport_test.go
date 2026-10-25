@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -902,6 +903,130 @@ func TestRelayClosedForOtherSubscriptionIsIgnored(t *testing.T) {
 	}
 	if got := ts.reqs.Load(); got != 1 {
 		t.Fatalf("relay saw %d REQ frames, want exactly 1", got)
+	}
+}
+
+func TestRelayRecoveryPreservesRetainedChatAfterGroupChange(t *testing.T) {
+	for _, change := range []string{"unchanged", "leave_other", "switch_group"} {
+		t.Run(change, func(t *testing.T) {
+			disconnect := make(chan struct{})
+			var once sync.Once
+			trigger := func() { once.Do(func() { close(disconnect) }) }
+			defer trigger()
+			history := make(chan *nostr.Event, 1)
+			ts := newRelayWSServer(t, func(ts *relayTestServer, conn *websocket.Conn, idx int) {
+				frame, ok := relayNextLabeledFrame(ts, conn, "REQ")
+				if !ok {
+					return
+				}
+				relayTestNoteREQ(ts, frame)
+				if idx == 1 {
+					select {
+					case <-disconnect:
+					case <-time.After(transportWaitSlow):
+					}
+					return // A real socket failure enters the owner's retry cooldown.
+				}
+				var missed *nostr.Event
+				select {
+				case missed = <-history:
+				case <-time.After(transportWaitOp):
+					ts.t.Error("no outage message supplied to relay")
+					return
+				}
+				var filters nostr.Filters
+				for _, raw := range frame[2:] {
+					var filter nostr.Filter
+					if err := json.Unmarshal(raw, &filter); err != nil {
+						ts.t.Errorf("decode recovery filter: %v", err)
+						return
+					}
+					filters = append(filters, filter)
+				}
+				// Unlike an unconditional replay, this relay honors the client's
+				// actual wire filters, including the recovery watermark.
+				if change == "switch_group" {
+					// Filter-only probe, not an event sent to the client.
+					oldNewcomer := nostr.Event{Kind: ephChatKind, CreatedAt: missed.CreatedAt, Tags: nostr.Tags{{"d", "fourth"}}}
+					if filters.Match(&oldNewcomer) {
+						ts.t.Error("newly joined fourth inherited another chat's recovery window")
+						return
+					}
+				}
+				if filters.Match(missed) && !relayWriteJSON(ts, conn, relayEventFrame("chat", missed)) {
+					return
+				}
+				live := freshChatEvent(ts, transportTestKey, "lobby", 1)
+				if live == nil || !filters.Match(live) {
+					ts.t.Error("recovered subscription does not cover live lobby traffic")
+					return
+				}
+				relayWriteJSON(ts, conn, relayEventFrame("chat", live))
+				relayReadUntilClosed(ts, conn)
+			})
+			cfg := relayTestConfig(t, ts.url)
+			cfg.Views = []View{{Name: "lobby"}, {Name: "other"}, {Name: "third"}, {Name: "fourth"},
+				{Name: "group", IsGroup: true, Children: []string{"lobby", "other", "third"}},
+				{Name: "next", IsGroup: true, Children: []string{"fourth", "lobby"}}}
+			cfg.ActiveViewName = "group"
+			h := startRelayHarness(t, cfg, func(c *client) {
+				// The earliest retry is three seconds away, leaving time to
+				// cross a Nostr timestamp boundary and process the user action.
+				c.relayTiming.minimum, c.relayTiming.maximum = 6*time.Second, 6*time.Second
+				c.relayTiming.dialGap = 0
+			})
+			ts.takeREQ()
+			h.waitRelayStatusCount(ts.url, true, 1)
+			trigger()
+			h.waitRelayList(nil, []string{ts.url})
+			missed := signedChatEvent(t, transportTestKey, ephChatKind, "lobby", "sent during outage", nostr.Now())
+			history <- missed
+			// Establish strict timestamp ordering, rather than relying on a
+			// lucky wall-clock boundary to expose an incorrectly reset since.
+			if !waitUntil(t, 2*time.Second, func() bool { return nostr.Now() > missed.CreatedAt }) {
+				t.Fatal("clock did not advance past the outage message")
+			}
+			wantChats := "lobby,other,third"
+			if change != "unchanged" {
+				wantView := "group"
+				wantChats = "lobby,third"
+				if change == "switch_group" {
+					wantView, wantChats = "next", "fourth,lobby"
+					h.send(UserAction{Type: "ACTIVATE_VIEW", Payload: wantView})
+				} else {
+					h.send(UserAction{Type: "LEAVE_CHAT", Payload: "other"})
+				}
+				h.waitForEvent("updated active group", func(event DisplayEvent) bool {
+					state, ok := event.Payload.(StateUpdate)
+					if !ok || state.ActiveViewIndex < 0 || state.ActiveViewIndex >= len(state.Views) {
+						return false
+					}
+					view := state.Views[state.ActiveViewIndex]
+					return view.Name == wantView && strings.Join(view.Children, ",") == wantChats
+				})
+			}
+			if ts.conns.Load() != 1 {
+				t.Fatal("fixture missed the cooldown: relay reconnected before the group action completed")
+			}
+			recovered := ts.waitREQContent("lobby")
+			chats := relayREQChats(t, recovered)
+			// Filters are grouped by watermark, not by chat name.
+			slices.Sort(chats)
+			if chats := strings.Join(chats, ","); chats != wantChats {
+				t.Fatalf("recovery subscribed to %q, want %q", chats, wantChats)
+			}
+			h.waitMessage("lobby-1") // FIFO barrier: replay, if requested, precedes this live message.
+			if nostr.Now()-missed.CreatedAt >= 30 {
+				t.Fatal("fixture exceeded the supported recovery window")
+			}
+			since, ok := relayREQSince(t, recovered)
+			if !ok {
+				t.Fatal("recovery REQ has no since filter")
+			}
+			if got := h.countMessages(missed.Content); got != 1 {
+				t.Fatalf("retained lobby lost outage message: displayed=%d, message timestamp=%d, recovery since=%d; live traffic recovered", got, missed.CreatedAt, since)
+			}
+		})
 	}
 }
 

@@ -81,7 +81,7 @@ func TestRelayRetrySnapshotsGrowToDefaultCeiling(t *testing.T) {
 		if report.retry.until.Before(start.Add(window/2)) || report.retry.until.After(time.Now().Add(window)) {
 			t.Fatalf("retry deadline is outside its jittered %s window", window)
 		}
-		if report.retry.since < nostr.Now()-30 {
+		if report.retry.since["lobby"] < nostr.Now()-30 {
 			t.Fatal("retry watermark lost its bounded reconnect overlap")
 		}
 		c.updateRelaySubscriptions(nil) // Cancel the timer instead of waiting minutes.

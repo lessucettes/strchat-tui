@@ -131,7 +131,7 @@ func startRelayPingServe(t *testing.T, c *client, peer *relayPingPeer, pongWait 
 		t.Fatal(err)
 	}
 	worker := &managedRelay{url: peer.url, updates: make(chan relaySubscription, 1), publish: make(chan relayPublish, 1)}
-	sub := relaySubscription{chats: []string{"lobby"}, since: nostr.Now()}
+	sub := relaySubscription{chats: []string{"lobby"}, since: map[string]nostr.Timestamp{"lobby": nostr.Now()}}
 	result := &relayPingServeResult{done: make(chan struct{})}
 	ticks := make(chan time.Time)
 	go func() {
@@ -337,7 +337,7 @@ func startRelayPingStubServe(t *testing.T, c *client, conn *relayPingStub, pongW
 	t.Helper()
 	ctx, cancel := context.WithCancel(c.ctx)
 	worker := &managedRelay{url: "stub", updates: make(chan relaySubscription, 1), publish: make(chan relayPublish, 1)}
-	sub := relaySubscription{chats: []string{"lobby"}, since: nostr.Now()}
+	sub := relaySubscription{chats: []string{"lobby"}, since: map[string]nostr.Timestamp{"lobby": nostr.Now()}}
 	result := &relayPingServeResult{done: make(chan struct{})}
 	ticks := make(chan time.Time)
 	go func() {
