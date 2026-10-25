@@ -36,49 +36,6 @@ func TestConversationSelectionSurvivesStateUpdatesByName(t *testing.T) {
 	}
 }
 
-func TestSetGroupConversationSharesInfoSelection(t *testing.T) {
-	ui := newIdleTUI(t, 16)
-	actions := make(chan client.UserAction, 16)
-	ui.actionsChan = actions
-	ui.applyEvent(focusGroupState())
-	ui.render()
-	ui.openInfo()
-	ui.handleInfoKeys(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
-	select {
-	case action := <-actions:
-		if action.Type != "SELECT_GROUP_CHAT" {
-			t.Fatalf("Info selection dispatched %+v", action)
-		}
-	default:
-		t.Fatal("Info selection was not dispatched")
-	}
-	ui.handleCommand("/s\tmixed\tlobby")
-	select {
-	case action := <-actions:
-		if action.Type != "ACTIVATE_VIEW" || action.Payload != "mixed" || action.Chat != "lobby" {
-			t.Fatalf("group command dispatched %+v", action)
-		}
-	default:
-		t.Fatal("group command was not dispatched")
-	}
-	state := focusGroupState().Payload.(client.StateUpdate)
-	state.Views[0].SelectedChat = "lobby"
-	ui.applyEvent(client.DisplayEvent{Type: "STATE_UPDATE", Payload: state})
-	if got := ui.conversationChat(ui.snapshot()); got != "lobby" {
-		t.Fatalf("old Info selection masked the command destination: %q", got)
-	}
-	ui.handleCommand("/set coffee lobby")
-	if action := <-actions; action.Type != "CREATE_GROUP" || action.Payload != "coffee,lobby" {
-		t.Fatalf("ordinary chat list no longer creates a group: %+v", action)
-	}
-	ui.handleCommand("/set mixed lobby coffee")
-	select {
-	case action := <-actions:
-		t.Fatalf("extra group arguments dispatched an action: %+v", action)
-	default:
-	}
-}
-
 func TestInactiveGroupInfoIsPreviewOnly(t *testing.T) {
 	ui := newIdleTUI(t, 16)
 	state := focusGroupState().Payload.(client.StateUpdate)

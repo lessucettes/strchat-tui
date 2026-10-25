@@ -10,11 +10,14 @@ import (
 
 func TestSelectGroupChatRejectsInvalidTargetsWithoutSaving(t *testing.T) {
 	c, events := testClient(t)
+	t.Cleanup(c.shutdown)
 	c.config.path = filepath.Join(t.TempDir(), "config.json")
+	c.config.AnchorRelays = []string{"ws://127.0.0.1:1"}
 	c.config.Views = []View{
 		{Name: "mixed", IsGroup: true, Children: []string{"coffee", "lobby"}},
-		{Name: "coffee"}, {Name: "lobby"},
+		{Name: "coffee"}, {Name: "lobby"}, {Name: "other"},
 	}
+	c.config.ActiveViewName = "lobby"
 	if err := c.config.save(); err != nil {
 		t.Fatal(err)
 	}
@@ -27,6 +30,9 @@ func TestSelectGroupChatRejectsInvalidTargetsWithoutSaving(t *testing.T) {
 		{Type: "SELECT_GROUP_CHAT", View: "coffee", Chat: "lobby"},
 		{Type: "SELECT_GROUP_CHAT", View: "mixed", Chat: "missing"},
 		{Type: "SELECT_GROUP_CHAT", View: "mixed"},
+		{Type: "ACTIVATE_VIEW", Payload: "missing", Chat: "coffee"},
+		{Type: "ACTIVATE_VIEW", Payload: "coffee", Chat: "lobby"},
+		{Type: "ACTIVATE_VIEW", Payload: "mixed", Chat: "other"},
 	} {
 		c.handleAction(action)
 		select {
@@ -41,7 +47,7 @@ func TestSelectGroupChatRejectsInvalidTargetsWithoutSaving(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !bytes.Equal(before, after) || c.config.Views[0].SelectedChat != "coffee" {
+		if !bytes.Equal(before, after) || c.config.ActiveViewName != "lobby" || c.config.Views[0].SelectedChat != "coffee" {
 			t.Fatal("invalid selection changed the configuration")
 		}
 	}

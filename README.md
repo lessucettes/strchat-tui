@@ -1,31 +1,27 @@
 # strchat-tui
 
 A keyboard-driven terminal client for **public Nostr chats**. Join geographic
-or named channels, combine chats in local groups, and connect directly or
+or named channels, combine them in local groups, and connect directly or
 through SOCKS5/Tor.
 
 Compatible with **BitChat** public geohash chats and **Nymchat** named chats
 when clients use the same channel and share a relay.
 
-**Messages are public and unencrypted.** Do not send secrets. Ephemeral events
-are not a guarantee that a relay or another participant will delete a message.
-
 ![strchat-tui switching rooms and themes](assets/demo.gif)
 
-## Installation
+- Local groups bring several chats into one feed; each message goes to one chat.
+- Public replies with nickname completion, filters, mute rules and themes.
+- Automatic relay reconnection, geographic reserves and NIP-42 authentication.
+- Runs on Linux, Windows, macOS and Android/Termux.
 
-Download the binary for your platform from
+**Messages are public and unencrypted.** Session keys and Tor do not guarantee
+anonymity, and ephemeral events do not guarantee deletion by relays or peers.
+
+## Install
+
+Download a binary and `SHA256SUMS` from
 [GitHub Releases](https://github.com/lessucettes/strchat-tui/releases/latest).
-
-| Target | Asset |
-|---|---|
-| Linux amd64 | `strchat-tui-linux` |
-| Android / Termux arm64 | `strchat-tui-android-arm64` |
-| macOS Apple silicon | `strchat-tui-macos-arm` |
-| macOS Intel | `strchat-tui-macos-intel` |
-| Windows amd64 | `strchat-tui.exe` |
-
-On Linux, download `SHA256SUMS` alongside the binary, then verify and run it:
+For Linux:
 
 ```sh
 sha256sum --ignore-missing -c SHA256SUMS &&
@@ -33,410 +29,70 @@ chmod +x strchat-tui-linux &&
 ./strchat-tui-linux
 ```
 
-On macOS and Android, also mark the downloaded file executable with `chmod +x`.
-Use `--version` (or `-v`) to print the version. To build from source, see
-[Development](#development).
+## Build
 
-## Quick start
+Requires **Go 1.27+**, with no C compiler. Build from a full repository checkout,
+including the local dependency in `third_party`:
+
+```sh
+git clone https://github.com/lessucettes/strchat-tui.git
+cd strchat-tui
+CGO_ENABLED=0 go build -tags purego -trimpath -o strchat-tui ./cmd/strchat-tui
+./strchat-tui
+```
+
+Mage is pinned in `go.mod`; no separate installation is needed:
+
+```sh
+go run github.com/magefile/mage -l       # list targets
+go run github.com/magefile/mage          # build all release binaries
+go run github.com/magefile/mage linux    # or android, windows, macOS
+```
+
+The default target produces Linux amd64, Windows amd64, macOS Intel/Apple
+silicon and Android arm64 binaries in the repository root. Individual `linux`
+and `android` targets write `strchat-tui`; `macOS` builds both architectures.
+All Mage builds use `CGO_ENABLED=0` and the `purego` tag. `--version` shows build
+provenance when stamped by Mage.
+
+## Start chatting
 
 Enter commands in the Input pane:
 
 ```text
 /nick alice
-/join lobby
-```
-
-Type a message and press Enter to send it to the active chat. Use Chats or
-`/set <name>` to switch chats; only the active chat or group is subscribed.
-
-`/join ucfv0` joins a geographic channel because `ucfv0` is a valid geohash;
-`/join lobby` joins a named channel. Geographic peers must use the exact same
-geohash and precision. Joining a parent cell does not subscribe to its children.
-
-Useful commands:
-
-| Command | Purpose |
-|---|---|
-| `/join <name> [name...]` | Join chats |
-| `/set <name>` | Activate a chat/group |
-| `/set <group> <member>` | Activate an existing group and select its sending destination |
-| `/set <name1> <name2>...` | Create and activate a local group of joined chats |
-| `/list`, `/del [name]` | List or leave chats |
-| `/nick [name]` | Set or clear a nickname |
-| `/clear` | Clear messages and known participants; keep Logs, chats and connections |
-| `/theme [name\|number]`, `/t` | List themes or switch and save colors |
-| `/scrollbar [0\|1\|2]`, `/sb` | Cycle or save scrollbar placement; repeat the current mode for help |
-| `/relay [url...]` | List or add explicit relays |
-| `/relay <number>` | Remove a configured relay |
-| `/pow <0..16>` | Set proof-of-work for the active chat/group; default 0 |
-| `/block`, `/unblock` | Manage blocked participants |
-| `/filter`, `/mute` | Include or hide matching text/regex |
-| `/help [category]`, `/h` | All command categories, or one category with aliases |
-
-Help is grouped into `chats`, `moderation`, `appearance`, `network`, and
-`general`. Use `/help` for the complete reference or `/help chats` for one
-section. Category names are case-insensitive; an unknown category shows the
-available names. Each entry lists its syntax, alias, and argument behavior.
-
-Use nickname completion to address a known participant with `@nick#suffix`.
-In a group, a leading mention sends to that participant's chat instead of the
-selected member. This is a **public reply, not a DM**. Completion uses full
-public keys when short identifiers collide; ambiguous recipients are rejected.
-
-`/clear` takes no arguments. It clears Messages (including scrollback),
-input history, participant/recipient suggestions and optional verification caches.
-Logs, including their history and scroll position, are preserved and continue
-receiving operational events during clear. Chats, groups, the selected sending
-destination, settings, session identities, relay connections and pending sends
-are preserved. Known participants return as
-new messages arrive. Bounded processed-event IDs are retained to suppress replay;
-subscriptions are not restarted. Clear is silent and does not wait for garbage
-collection or write the config. Live traffic continues and may refill the screen
-immediately; transport queues are not drained. It is not secure memory erasure
-and cannot delete public messages from relays or clear the terminal emulator's
-own scrollback.
-
-## Keyboard controls
-
-| Key | Action |
-|---|---|
-| `Ctrl+D` | Quit from any pane (`/quit` also works) |
-| `Tab` / `Shift+Tab` | Cycle between visible panes |
-| `Alt+I` | Focus Input |
-| `Alt+O` | Focus Messages |
-| `Alt+C` | Focus Chats |
-| `Alt+N` | Focus Info; open it temporarily on small terminals |
-| `Alt+L` | Focus Logs |
-| `Ctrl+P` / `Ctrl+N` in Input | Recall older/newer messages and commands |
-| Up/Down in Chats | Move through chats and groups |
-| Enter in Chats | Activate the highlighted chat/group, or create a group from marked chats |
-| Space in Chats | Mark/unmark a chat for a group |
-| Delete in Chats | Leave the highlighted chat or remove the group |
-| Up/Down in Messages or Logs | Scroll |
-| `` ` `` in Messages or Logs | Maximize/restore the pane when space permits |
-
-Input history holds the last 100 submitted lines for the current run only.
-Moving forward past the newest entry restores your unfinished draft; history
-is not saved to disk. Pane titles and the footer show contextual shortcuts.
-
-### Logs
-
-Logs shows operational events, not a stream of protocol diagnostics:
-
-- `INFO`: normal activity, relay connectivity and recovery, accepted messages,
-  and confirmations of operational changes.
-- `WARN`: degraded or missing connectivity, restricted relay access, partial
-  relay acknowledgements, or an input queue that is temporarily full.
-- `ERROR`: an operation could not complete, such as sending a message or saving
-  settings. The message explains what failed or what to retry.
-
-Connection summaries are reported on meaningful state changes, rather than on
-every retry, ping or latency update. Automatic retries continue without filling
-the log. Command help and lists stay in Messages. Info provides live relay
-details when a chat is highlighted.
-
-Entries use `[HH:MM:SS] LEVEL: Message.` with sentence case and consistent
-`Chat "name":`, `Group "name":`, or `Relay <url>:` context where relevant.
-Failures identify the affected operation, its consequences, the known reason,
-and any next step. Original reasons are quoted without changing their case;
-chat names and addresses retain their case too. Log entries cannot introduce
-extra lines through relay-supplied text.
-
-A repeated attempt is not a new incident. New entries explain a changed
-connection state, affected chat, known failure cause, or operation result.
-Choosing a geographic reserve or retrying a primary relay is not itself a
-warning that the chat is unavailable. When connectivity is lost, the summary
-includes a relevant example failure when known, rather than listing every
-failed address. A newly different example cause is reported without repeating
-an unchanged outage on every attempt.
-
-A relay acknowledgement confirms relay acceptance, not that another participant
-received the message. A connected relay is not a guarantee of subscription or
-authentication acceptance. Unconfirmed sends are not automatically resent.
-
-### Mouse
-
-Mouse-capable terminals support left-clicking a pane to focus it, clicking a
-chat/group in Chats to activate it, and clicking a member of the active group
-in Info to choose the sending destination. Click in Input to position the
-cursor. The wheel scrolls the pane under the pointer without moving keyboard
-focus; moving the pointer alone does nothing.
-
-In tmux, mouse events are available when its `mouse` option is enabled. The
-client does not change tmux or system settings. For terminal text selection,
-use your terminal's mouse override (usually Shift while dragging).
-
-### Scrollbars
-
-Scrollbars use the right border by default. `/scrollbar 1` selects the right
-border of Messages, Logs, Chats and Info; `/scrollbar 2` uses the left border,
-and `/scrollbar 0` turns them off. `/sb` is an alias. Without arguments, either
-command silently cycles through `0` (off), `1` (right), `2` (left), and back to
-`0`. The setting is saved and restored at startup, including an explicit off
-selection. Repeating the current mode, such as `/sb 1` when right is already
-selected, shows the current mode and command help without saving again.
-
-A bar appears only when the pane has more text or entries than fit vertically.
-It occupies the existing border, leaving text width and wrapping unchanged.
-The thumb represents the retained history, including wrapped lines, rather
-than only the fragment currently rendered. Click the track above or below the
-thumb to move one page, or drag the thumb without Shift. Releasing outside the
-pane ends the drag. Scrolling Chats may move its local preview highlight, but
-does not activate a chat; scrolling Info does not change the sending destination.
-Mouse movement without a held button is not reported.
-The compact one-row Logs pane has no scrollbar; use Up/Down or the wheel, or
-maximize it for a full-height track. The contextual hints label Up/Down as
-Scroll in Logs and Highlight in Chats; highlighting does not activate a chat.
-
-## Local groups
-
-A group combines joined geographic and named chats in one chronological feed.
-It is a local view, not a new room: Enter sends to **one selected member**, not
-to every chat.
-
-For example, join two chats and combine them:
-
-```text
 /join lobby coffee
 /set lobby coffee
 ```
 
-You can also mark chats with Space in Chats and press Enter to create a group.
-Use `/set <group-name> <member-chat>` (or `/s`) to activate an existing group
-and select its sending destination. The chat must already belong to that group;
-an invalid member leaves the current view and destination unchanged. A list of
-ordinary chat names still creates a group, as above.
+This joins two named chats and combines them in a local group. Enter sends to
+one selected member, never broadcasts; choose the destination in Info (`Alt+N`).
+A leading `@nick#suffix` makes a public reply, not a DM. `/join ucfv0` joins a
+geographic chat instead. Use `/help` or `/help chats` for commands; pane titles
+and the footer show keyboard shortcuts. `Ctrl+D` quits.
 
-To choose where to send:
-
-1. Highlight the active group in Chats and press `Alt+N` to focus Info.
-2. Use Up/Down to choose a member; Home/End select the first/last. The `▶` marker
-   shows the destination immediately, without an extra confirmation.
-3. Press `Alt+I` to return to Input, then type and send with Enter.
-
-The first member is selected by default. Each group's choice is saved across
-restarts while that member remains in the group; removing it selects the first
-remaining member. Deleting the group removes its saved choice. A save error is
-reported if the new choice cannot be written to disk.
-
-The `●` thread markers identify messages from the selected chat. Switching the
-destination does not hide other chats, change subscriptions or move scrollback.
-A leading `@nick#suffix` overrides the destination for that message without
-changing the selection. Unknown or changed destinations are refused rather
-than silently rerouted.
-
-On small terminals, `Alt+N` temporarily replaces the feed with Info; `Alt+I`
-returns to the feed and input without losing the draft.
-
-## Filter and mute
-
-- `/filter <pattern>` keeps only messages matching at least one enabled filter.
-  With no enabled filters, all messages pass this check.
-- `/mute <pattern>` hides messages matching any enabled mute rule, even if they
-  also match a filter. **Filter selects what to include; mute selects what to exclude.**
-
-Both match message content using a case-sensitive literal substring or a
-[Go regular expression](https://pkg.go.dev/regexp/syntax) wrapped in `/.../`.
-For example, `/filter bitcoin` keeps messages containing `bitcoin`, while
-`/mute /spam|scam/` hides messages containing `spam` or `scam`.
-
-The same regexp has opposite effects. With no other rules, used separately:
-
-| Command | Effect |
-|---|---|
-| `/filter /\p{Latin}/` | Show only messages containing a Latin letter, including `é` and `ñ`. |
-| `/mute /\p{Latin}/` | Hide every message containing a Latin letter. |
-
-For example, `Привет` is hidden by this filter but passes this mute; `hello`
-and `Привет, world` pass the filter but are hidden by the mute. URLs containing
-Latin letters match too. `/mute /[A-Za-z]/` matches only ASCII Latin letters,
-unlike `\p{Latin}`. A mute hides the entire message, not just the matching
-characters or one line.
-
-Use `/filter` or `/mute` without arguments to list rules, or with a rule number
-to toggle it. `/unfilter <number>` and `/unmute <number>` remove a rule; omit
-the number to clear the corresponding list. Rules are saved in the configuration
-and affect newly received messages, not retained scrollback.
-
-## Themes
-
-`/theme` lists the available themes and marks the current selection:
-
-1. `default` — the original green-on-black theme (used when no theme is saved).
-2. `monochrome` — high-contrast black and white.
-3. `blue-gray` — cool blue accents on a dark gray background.
-4. `red-gold` — red borders and gold accents on a dark warm background.
-
-Use `/theme blue-gray`, `/theme red-gold`, or a number such as `/t 4`.
-The choice is saved and restored at the next launch. Switching themes recolors
-the interface and retained messages without resetting input, history or scrollback.
-
-## SOCKS5 and Tor
-
-With a local Tor SOCKS listener running on port 9050, start the client with:
+With a local Tor SOCKS listener:
 
 ```sh
-./strchat-tui-linux --socks=127.0.0.1:9050
+./strchat-tui --socks=127.0.0.1:9050
 ```
 
-Substitute your platform's binary name if different. The `--socks` option also
-accepts `socks5://host:port` and `socks5h://host:port`. Pass it on every launch;
-it is not saved in the configuration. Proxy authentication is not supported.
+Relay DNS goes through the proxy, with no direct fallback if it fails.
+The proxy option is not saved; pass it on each launch.
 
-All relay connections use the proxy, including geographic relays, reserves,
-redirects and loopback destinations. Relay hostnames, including `.onion`, are
-resolved by the proxy. Use an IP address for the proxy itself to avoid local
-resolution of its hostname. If the proxy fails, there is **no direct fallback**.
+## Technical notes
 
-Add an onion relay with the usual command, replacing the placeholder with its
-actual address:
-
-```text
-/relay ws://<relay-address>.onion
-```
-
-Use `ws://` for an onion service offering plain WebSocket on port 80, or `wss://`
-if it offers TLS with a trusted certificate. TLS verification stays enabled.
-Tor changes transport routing; public content, nicknames and traffic patterns
-can still be linked, so it is not an anonymity guarantee.
-
-## Relays and compatibility
-
-- Named chats use configured relays, or bundled defaults when none are set.
-  Failed configured relays do not trigger a switch to unrelated public defaults.
-- Geographic chats use the nearest five relays from each of two bundled BitChat
-  catalogs, in addition to configured relays. The catalogs are included in the
-  binary; the client does not download relay lists at startup.
-- If a geographic relay fails, the client can temporarily try the next five
-  relays from that catalog while continuing to retry the primary set. A working
-  primary is not replaced just because a reserve is faster.
-- Connection attempts and retries are paced. A shared limit of 256 relay
-  connections applies to the active chat/group; a warning reports reduced
-  coverage if a large group or relay list exceeds it.
-
-Use `/relay` to inspect configured relays and `/relay <url>` to add one.
-Prefer `wss://` on untrusted networks; `ws://` is available for local or onion
-deployments. Relay URLs containing credentials are rejected.
-
-Geographic messages use kind `20000` with a `g` tag, compatible with BitChat's
-public message format when both clients use the same geohash and share a relay.
-Named messages use kind `23333` with a `d` tag, also used by Nymchat; these are
-not BitChat location channels. Reserve relays cannot guarantee overlap with a
-peer that only listens to its nearest set. If peers cannot see each other,
-check the exact channel and configure a shared relay on both clients.
-Keep `/pow 0` when communicating with peers that do not mine proof-of-work.
-
-The client is live-first: it does not fetch BitChat's one-hour history or send
-presence heartbeats. Relay acceptance is not proof of recipient delivery.
-Sends without an acknowledgement are reported as unconfirmed and are not
-resent after a timeout or disconnect. There is no persistent outbox.
-
-### Relay authentication (NIP-42)
-
-Authentication is automatic when a relay sends an `AUTH` challenge. The client
-signs kind `22242` proofs with the session keys of the chats subscribed on that
-connection; it does not create a separate application identity or save keys.
-The relay receives those session public keys even if you have not posted yet.
-Proofs are sent as `AUTH`, never as chat messages.
-
-After an `auth-required:` rejection, the client waits for the matching `AUTH`
-acknowledgement and retries the subscription or the **same signed event** once.
-It also handles the `auth` hint in `EOSE`. Challenges and authentication results
-are connection-local: reconnecting requires a fresh exchange, and switching
-chats authenticates newly needed keys. Waiting is bounded; denied access is
-reported, and subscription/authentication failures use a paced retry cooldown.
-To limit relay-driven signing and bandwidth amplification, challenges are
-limited to 1024 bytes and four new values per minute on each connection.
-
-Multiple chats share one socket per relay. This relies on NIP-42's requirement
-that relays retain all authenticated keys; relays that remember only the last
-key may reject group traffic. Authentication proves key ownership, not a right
-to access a relay: `restricted:` can still mean payment or allowlist membership
-is required. Ephemeral chat keys do not provide membership tied to a permanent
-key. Authentication does not encrypt messages or prevent a relay from linking
-the chats on its connection.
-
-## Configuration and privacy
-
-Configuration is saved in the OS user-config directory under
-`strchat-tui/config.json`. On Linux this is
-`$XDG_CONFIG_HOME/strchat-tui/config.json`, or
-`~/.config/strchat-tui/config.json` when XDG_CONFIG_HOME is unset.
-
-The file stores joined chats/groups, selected group destinations, relays,
-nickname, theme, scrollbar placement, filters and mutes, but no private keys.
-These settings can still reveal personal information, including joined
-geographic channels.
-
-Each chat has an independent signing identity kept only in memory. Sending to
-the same chat separately or through any local group uses the same identity.
-Groups have no signing identity of their own. Restarting the client, or leaving
-and rejoining a chat, creates a new identity. There is no global or persistent
-sender key.
-
-Without a custom nickname, each chat's nickname is derived from its session
-public key. `/nick` sets a shared display-name preference without changing
-keys; clearing it restores the individual chat nicknames. Reusing a nickname
-can link activity across chats. Relays can also associate chats carried over
-the same connection; separate keys alone do not guarantee anonymity.
-
-## Development
-
-Go 1.27 or newer is required. Build and check the project from the repository root:
-
-```sh
-go build -tags purego -trimpath -o strchat-tui ./cmd/strchat-tui
-./strchat-tui --version
-go test ./...
-go test -tags purego ./...
-go test -race ./...
-go vet ./...
-```
-
-`-tags purego` selects the portable Pure Go secp256k1 backend used for
-BIP-340 verification of incoming chat events. A pinned local fork adds a
-public-data-only wNAF verification kernel; its source changes, license and
-update procedure are documented in `third_party/secp256k1-voi/UPSTREAM.md`.
-Build from a repository checkout containing that directory. Version-suffixed
-`go install ...@version` is not supported while this local replacement is used;
-use the release binaries or the checkout build command above instead.
-Chat and NIP-42 AUTH signing
-use the existing btcec backend. The mage release targets pass the tag on
-every platform; all supported targets build with `CGO_ENABLED=0`. Omitting the
-tag still builds, but amd64 then uses the dependency's optional Go assembly
-table accelerator instead of the portable backend.
-
-Optional benchmarks and loopback relay-scale check:
-
-```sh
-go test -tags purego ./internal/client ./internal/tui -run '^$' -bench . -benchmem
-STRCHAT_RELAY_SCALE=1 go test ./internal/client -run '^TestRelayGroupSafetyCeilingLoopback$' -count=1 -timeout=90s -v
-```
-
-### Release builds
-
-Mage is pinned in `go.mod`; no separate installation is needed. List targets
-or build all release binaries:
-
-```sh
-go run github.com/magefile/mage -l
-go run github.com/magefile/mage
-```
-
-The default target builds the five assets listed above into the repository
-root with `CGO_ENABLED=0`; no C compiler is required. For individual targets:
-
-```sh
-go run github.com/magefile/mage linux
-go run github.com/magefile/mage android
-go run github.com/magefile/mage windows
-go run github.com/magefile/mage macOS
-```
-
-`macOS` builds both macOS architectures. The individual `linux` and `android`
-targets write `strchat-tui`; use the default target for release asset names.
+- Geographic chats use Nostr kind `20000` with a `g` tag; named chats use kind
+  `23333` with a `d` tag. Geographic peers need the exact same geohash and
+  precision, plus a shared relay. Relay catalogs are bundled, not fetched at startup.
+- Each chat has its own in-memory signing key, shared by all local views of that
+  chat. Groups have no sender key; restarting creates new identities.
+- Settings and joined chats are saved in the OS user-config directory under
+  `strchat-tui/config.json`. Private keys and message history are not saved.
+- The client is live-first, without a persistent outbox. A relay acknowledgement
+  means acceptance by that relay, not proof of delivery to another participant.
 
 ## License
 
-MIT; see [LICENSE](LICENSE). The bundled public georelay data is pinned and
-attributed in `internal/client/georelays.go`.
+MIT; see [LICENSE](LICENSE). Bundled relay data is attributed in
+`internal/client/georelays.go`; the local crypto dependency retains its own license.

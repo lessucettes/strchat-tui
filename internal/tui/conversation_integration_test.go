@@ -222,4 +222,18 @@ func TestGroupConversationEndToEndLoopback(t *testing.T) {
 			return view != nil && view.Name == "mixed" && s.ui.conversationChat(s.ui.snapshot()) == "lobby"
 		})
 	})
+	data, err = os.ReadFile(filepath.Join(configDir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved struct {
+		ActiveViewName string        `json:"active_view_name"`
+		Views          []client.View `json:"views"`
+	}
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.ActiveViewName != "mixed" || len(saved.Views) == 0 || saved.Views[0].Name != "mixed" || saved.Views[0].SelectedChat != "lobby" {
+		t.Fatal("command-selected group and destination were not persisted")
+	}
 }
