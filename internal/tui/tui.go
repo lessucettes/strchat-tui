@@ -86,7 +86,9 @@ type tui struct {
 	clearPending    int // accepted clears not yet acknowledged by the client
 
 	// dirty marks model changes that the redraw loop has not painted yet.
-	dirty atomic.Bool
+	// redraw starts the coalescing timer on demand, rather than polling at idle.
+	dirty  atomic.Bool
+	redraw chan struct{}
 
 	// View state. Only touched on the tview event loop.
 	focused              tview.Primitive
@@ -163,6 +165,7 @@ func New(actions chan<- client.UserAction, events <-chan client.DisplayEvent) *t
 		quitCh:            make(chan struct{}),
 		doneCh:            make(chan struct{}),
 		screenReady:       make(chan struct{}),
+		redraw:            make(chan struct{}, 1),
 		selectedForGroup:  make(map[string]bool),
 		groupFocus:        make(map[string]string),
 		completionEntries: []string{},
@@ -318,17 +321,41 @@ func (t *tui) collectEvents() {
 // renderInterval and wakes the event loop with a non-blocking event post.
 func (t *tui) redrawLoop() {
 	defer t.workers.Done()
-	ticker := time.NewTicker(renderInterval)
-	defer ticker.Stop()
+	timer := time.NewTimer(renderInterval)
+	timer.Stop()
+	defer timer.Stop()
+	var tick <-chan time.Time
+	var next time.Time
 	for {
 		select {
 		case <-t.doneCh:
 			return
-		case <-ticker.C:
+		case <-t.redraw:
+			if tick == nil && t.dirty.Load() {
+				timer.Reset(max(0, time.Until(next)))
+				tick = timer.C
+			}
+		case <-tick:
+			tick = nil
 			if t.dirty.Load() {
 				t.wake()
+				next = time.Now().Add(renderInterval)
+				// Retry until painted: a full screen queue may drop the wake.
+				timer.Reset(renderInterval)
+				tick = timer.C
 			}
 		}
+	}
+}
+
+// markDirty never blocks the collector or input handler, including at shutdown.
+func (t *tui) markDirty() {
+	if t.dirty.Swap(true) {
+		return
+	}
+	select {
+	case t.redraw <- struct{}{}:
+	default:
 	}
 }
 
@@ -380,19 +407,19 @@ func (t *tui) applyEvent(ev client.DisplayEvent) {
 				t.messageTarget = result
 			}
 			t.mu.Unlock()
-			t.dirty.Store(true)
+			t.markDirty()
 		}
 	case "THEME_UPDATE":
 		t.mu.Lock()
 		t.themeName = ev.Content
 		t.mu.Unlock()
-		t.dirty.Store(true)
+		t.markDirty()
 	case "SCROLLBAR_UPDATE":
 		if position, ok := ev.Payload.(client.ScrollbarPosition); ok {
 			t.mu.Lock()
 			t.scrollbarMode = position
 			t.mu.Unlock()
-			t.dirty.Store(true)
+			t.markDirty()
 		}
 	}
 }
@@ -436,7 +463,7 @@ func (t *tui) applyNewMessage(ev client.DisplayEvent) {
 	} else {
 		t.output.append(formatMessage(ev, style))
 	}
-	t.dirty.Store(true)
+	t.markDirty()
 }
 
 // applyLocalEvent keeps new UI diagnostics and command output visible even while
@@ -479,7 +506,7 @@ func (t *tui) applyTextEvent(ev client.DisplayEvent, local bool) {
 		}
 	}
 	t.mu.Unlock()
-	t.dirty.Store(true)
+	t.markDirty()
 }
 
 // applyStateUpdate replaces the chat/group state.
@@ -501,7 +528,7 @@ func (t *tui) applyStateUpdate(ev client.DisplayEvent) {
 	// between renders. The collector and keyboard handler share this model.
 	t.pruneConversationFocusLocked(t.views)
 	t.mu.Unlock()
-	t.dirty.Store(true)
+	t.markDirty()
 }
 
 // applyRelaysUpdate replaces the relay status list.
@@ -515,7 +542,7 @@ func (t *tui) applyRelaysUpdate(ev client.DisplayEvent) {
 	t.relays = slices.Clone(relays)
 	t.relaysRev++
 	t.mu.Unlock()
-	t.dirty.Store(true)
+	t.markDirty()
 }
 
 // applyCompletion stores nickname completion candidates for the input field.
@@ -530,7 +557,7 @@ func (t *tui) applyCompletion(ev client.DisplayEvent) {
 		t.completionRev++
 	}
 	t.mu.Unlock()
-	t.dirty.Store(true)
+	t.markDirty()
 }
 
 // appendOutput adds one rendered line to the bounded message scrollback.
@@ -540,7 +567,7 @@ func (t *tui) appendOutput(line string) {
 		t.output.append(line)
 	}
 	t.mu.Unlock()
-	t.dirty.Store(true)
+	t.markDirty()
 }
 
 // appendLogLine adds one rendered line to the bounded log scrollback.
@@ -548,7 +575,7 @@ func (t *tui) appendLogLine(line string) {
 	t.mu.Lock()
 	t.logs.append(line)
 	t.mu.Unlock()
-	t.dirty.Store(true)
+	t.markDirty()
 }
 
 // lineDelta is the contiguous, still-unwritten slice of a bounded line buffer.

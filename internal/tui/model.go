@@ -158,14 +158,14 @@ func sanitizeLineForDisplay(s string) string {
 // formatting runes that could corrupt the terminal layout. Tabs and carriage
 // returns become spaces; newlines are kept.
 func sanitizeRunes(s string) string {
-	var b strings.Builder
-	b.Grow(len(s))
-	for _, r := range s {
+	// Map returns the original string when it needs no sanitizing. Most event
+	// fields are already clean, so do not copy every payload before escaping it.
+	return strings.Map(func(r rune) rune {
 		switch {
 		case r == '\n':
-			b.WriteRune(r)
-		case r == '\r' || r == '\t' || r == '\u2028' || r == '\u2029':
-			b.WriteRune(' ')
+			return r
+		case r == '\r' || r == '	' || r == '\u2028' || r == '\u2029':
+			return ' '
 		case r < 0x20 || r == 0x7f: // C0 controls, DEL, ESC
 		case r >= 0x80 && r <= 0x9f: // C1 controls
 		case r == 0x200b || r == 0x200e || r == 0x200f: // zero-width space and bidi marks
@@ -174,10 +174,10 @@ func sanitizeRunes(s string) string {
 		case r >= 0x2066 && r <= 0x2069: // bidi isolates
 		case r == 0xfeff || r == 0x00ad: // BOM, soft hyphen
 		default:
-			b.WriteRune(r)
+			return r
 		}
-	}
-	return b.String()
+		return -1
+	}, s)
 }
 
 // truncateRunes bounds a payload to max runes, appending an ellipsis so the

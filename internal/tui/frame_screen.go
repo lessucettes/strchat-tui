@@ -20,7 +20,7 @@ import (
 // unchanged, and the whole non-blank screen is written to the terminal again
 // for every keystroke.
 //
-// frameScreen keeps the logical frame in two cell buffers and forwards only
+// frameScreen keeps a logical cell buffer and a compact submitted snapshot, forwarding only
 // cells that differ from the last submitted frame. The wrapped screen keeps its
 // own diff against the physical display, so cells that did not change produce
 // no terminal output at all. Clear/Fill stay logical and never touch the real
@@ -36,11 +36,16 @@ type frameScreen struct {
 
 	mu    sync.Mutex
 	work  tcell.CellBuffer // the frame currently being drawn
-	shown tcell.CellBuffer // the frame already submitted to Screen
+	shown []submittedCell  // no duplicate dirty/previous-style/width bookkeeping
 	full  bool             // the next Show must repaint and resync everything
 	done  bool
 
 	initErr error
+}
+
+type submittedCell struct {
+	text  string
+	style tcell.Style
 }
 
 // newFrameScreen creates the terminal screen and wraps it in the final-frame
@@ -70,7 +75,7 @@ func (s *frameScreen) Init() error {
 	s.initErr = err
 	if err == nil {
 		s.done = false
-		s.work, s.shown = tcell.CellBuffer{}, tcell.CellBuffer{}
+		s.work, s.shown = tcell.CellBuffer{}, nil
 		s.syncSizeLocked()
 	}
 	s.mu.Unlock()
@@ -148,6 +153,15 @@ func (s *frameScreen) SetCell(x, y int, style tcell.Style, ch ...rune) {
 func (s *frameScreen) SetContent(x, y int, mainc rune, combc []rune, style tcell.Style) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// tview uses this legacy API for every cell. CellBuffer.SetContent builds
+	// an escaping rune slice/string even for ASCII. Slice immutable text for
+	// that common case; Put still owns grapheme widths and ColorNone handling.
+	const ascii = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+	if len(combc) == 0 && mainc >= ' ' && mainc <= '~' {
+		i := int(mainc - ' ')
+		s.work.Put(x, y, ascii[i:i+1], style)
+		return
+	}
 	s.work.SetContent(x, y, mainc, combc, style)
 }
 
@@ -240,11 +254,19 @@ func (s *frameScreen) SetStyle(style tcell.Style) {
 // keeps matching what the wrapped screen resized to.
 func (s *frameScreen) syncSizeLocked() {
 	width, height := s.Screen.Size()
-	if w, h := s.work.Size(); w == width && h == height {
+	w, h := s.work.Size()
+	if w == width && h == height {
 		return
 	}
+	shown := make([]submittedCell, width*height)
+	for i := range shown {
+		shown[i].text = " "
+	}
+	for y := 0; y < min(h, height); y++ {
+		copy(shown[y*width:y*width+min(w, width)], s.shown[y*w:y*w+min(w, width)])
+	}
 	s.work.Resize(width, height)
-	s.shown.Resize(width, height)
+	s.shown = shown
 }
 
 // flushLocked submits the cells whose final content differs from the last
@@ -255,8 +277,8 @@ func (s *frameScreen) flushLocked() {
 	for y := 0; y < height; y++ {
 		for x := 0; x < width; x++ {
 			str, style, _ := s.work.Get(x, y)
-			prev, prevStyle, _ := s.shown.Get(x, y)
-			if str == prev && style == prevStyle {
+			prev := s.shown[y*width+x]
+			if str == prev.text && style == prev.style {
 				continue
 			}
 			s.submitLocked(x, y, str, style)
@@ -278,7 +300,8 @@ func (s *frameScreen) pushAllLocked() {
 // submitLocked forwards one cell and records it as submitted.
 func (s *frameScreen) submitLocked(x, y int, str string, style tcell.Style) {
 	s.Screen.Put(x, y, str, style)
-	s.shown.Put(x, y, str, style)
+	width, _ := s.work.Size()
+	s.shown[y*width+x] = submittedCell{text: str, style: style}
 }
 
 // screenHost is the tview application plus the one piece of lifecycle state Run

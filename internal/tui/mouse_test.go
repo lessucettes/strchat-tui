@@ -129,11 +129,11 @@ func TestMouseCompletionPopupDoesNotActivateUnderlyingChat(t *testing.T) {
 				s.ui.input.Autocomplete()
 			})
 			s.draw()
-			point := onLoopValue(s, func() [2]int { x, y := s.findByPrefix("@nick-one"); return [2]int{x, y} })
-			if point[0] < 0 {
+			x, y := s.findByPrefix("@nick-one")
+			if x < 0 {
 				t.Fatal("completion popup was not visible")
 			}
-			clickMouse(s, point[0]+1, point[1])
+			clickMouse(s, x+1, y)
 			waitFor(t, time.Second, func() bool {
 				return s.matches(func() bool { return s.ui.input.GetText() == "@nick-one#abcd " && s.ui.focused == s.ui.input })
 			})

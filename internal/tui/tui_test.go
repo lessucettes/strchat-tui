@@ -67,6 +67,45 @@ func newIdleTUI(t *testing.T, queue int) *tui {
 	return ui
 }
 
+// A dropped nonblocking wake must be retried without another model update;
+// after painting, the next update must restart the otherwise idle redraw loop.
+func TestRedrawRetriesFullQueueAndRearms(t *testing.T) {
+	ui := newIdleTUI(t, 1)
+	sim := tcell.NewSimulationScreen("UTF-8")
+	if err := sim.Init(); err != nil {
+		t.Fatal(err)
+	}
+	defer sim.Fini()
+	var screen tcell.Screen = sim
+	ui.screen.Store(&screen)
+	for sim.PostEvent(tcell.NewEventInterrupt(nil)) == nil {
+	}
+	ui.workers.Add(1)
+	go ui.redrawLoop()
+	defer func() { close(ui.doneCh); ui.workers.Wait() }()
+	ui.markDirty()
+	time.Sleep(2 * renderInterval) // Keep the queue full across the first wake.
+	for sim.HasPendingEvent() {
+		sim.PollEvent()
+	}
+	awaitWake := func() {
+		t.Helper()
+		waitFor(t, time.Second, sim.HasPendingEvent)
+		ev, ok := sim.PollEvent().(*tcell.EventKey)
+		if !ok || ev.Key() != wakeKey {
+			t.Fatal("redraw did not post its wake event")
+		}
+	}
+	awaitWake()
+	ui.dirty.Store(false) // The render pass acknowledges the pending changes.
+	time.Sleep(2 * renderInterval)
+	for sim.HasPendingEvent() {
+		sim.PollEvent()
+	}
+	ui.markDirty()
+	awaitWake()
+}
+
 // waitRun waits for Run to return, caching the result so both the test body and
 // the cleanup can ask for it.
 func (s *simTUI) waitRun() error {
@@ -149,9 +188,27 @@ func (s *simTUI) key(key tcell.Key, r rune, mod tcell.ModMask) {
 	s.screen.InjectKey(key, r, mod)
 }
 
+// contents copies the simulation's aliased front buffer on the drawing loop.
+// GetContents locks only while returning the slice, not while callers read it.
+func (s *simTUI) contents() (cells []tcell.SimCell, w, h int) {
+	s.onLoop(func() {
+		var front []tcell.SimCell
+		front, w, h = s.screen.GetContents()
+		cells = make([]tcell.SimCell, len(front))
+		for i, cell := range front {
+			cells[i] = tcell.SimCell{
+				Style: cell.Style,
+				Runes: append([]rune(nil), cell.Runes...),
+				Bytes: append([]byte(nil), cell.Bytes...),
+			}
+		}
+	})
+	return
+}
+
 // text returns the rendered screen as a string (what the user sees).
 func (s *simTUI) text() string {
-	cells, w, h := s.screen.GetContents()
+	cells, w, h := s.contents()
 	var b strings.Builder
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
@@ -169,14 +226,14 @@ func (s *simTUI) text() string {
 
 // styleAt returns the style of a screen cell.
 func (s *simTUI) styleAt(x, y int) tcell.Style {
-	cells, w, _ := s.screen.GetContents()
+	cells, w, _ := s.contents()
 	return cells[y*w+x].Style
 }
 
 // findByPrefix returns the coordinates of the first cell starting the given
 // string, or (-1, -1).
 func (s *simTUI) findByPrefix(prefix string) (x, y int) {
-	cells, w, h := s.screen.GetContents()
+	cells, w, h := s.contents()
 	for yy := 0; yy < h; yy++ {
 		for xx := 0; xx+len(prefix) <= w; xx++ {
 			ok := true

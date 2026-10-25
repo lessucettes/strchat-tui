@@ -43,7 +43,7 @@ func TestConversationThreadKeepsMessagesAndWrappedContinuations(t *testing.T) {
 		t.Fatal("multiline continuation not visible")
 	}
 	left := onLoopValue(s, func() int { xx, _, _, _ := s.ui.outputView.GetInnerRect(); return xx - 2 })
-	cells, width, _ := s.screen.GetContents()
+	cells, width, _ := s.contents()
 	if got := cells[y*width+left].Runes; len(got) == 0 || got[0] != '│' {
 		t.Fatalf("thread guide missing beside a multiline continuation: %q", string(got))
 	}

@@ -98,7 +98,7 @@ func (t *tui) setupInputHandlers() {
 	// Nickname completion requests are best-effort: a dropped request only
 	// means the completion menu does not refresh for this keystroke.
 	t.input.SetChangedFunc(func(text string) {
-		t.dirty.Store(true) // The destination title depends on the current draft.
+		t.markDirty() // The destination title depends on the current draft.
 		nick, complete := extractNickPrefix(text)
 		if complete {
 			t.lastNickQuery = ""

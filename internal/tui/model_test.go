@@ -113,6 +113,7 @@ func TestSanitizeForDisplayStripsControlAndFormatRunes(t *testing.T) {
 		{"soft hyphen", "a\u00adb", "ab"},
 		{"newline kept", "a\nb", "a\nb"},
 		{"unicode kept", "héllo ✅", "héllo ✅"},
+		{"invalid UTF-8 replaced", "a\xffb", "a\ufffdb"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

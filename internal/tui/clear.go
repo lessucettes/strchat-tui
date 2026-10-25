@@ -48,5 +48,5 @@ func (t *tui) clearSession() {
 	}
 	t.input.reset()
 	t.setupInputHandlers()
-	t.dirty.Store(true)
+	t.markDirty()
 }
