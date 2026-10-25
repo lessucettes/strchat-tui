@@ -2,7 +2,6 @@ package client
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,12 +11,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
-
-	"github.com/nbd-wtf/go-nostr"
 )
 
 // Tests for config loading, validation and persistence hardening:
@@ -551,70 +547,4 @@ func TestGetAppConfigDirHonorsXDG(t *testing.T) {
 		t.Fatalf("default config not created in app config dir: %v", err)
 	}
 	assertNoSecretFields(t, raw)
-}
-
-// BenchmarkExecutePublishMining measures the real balance the maxPoW bound is
-// based on: expected hashes for a target are 2^difficulty, and mining shares the
-// ten-second publish deadline with signing and acknowledgement, so a difficulty
-// whose expected hashes do not fit that deadline must not be accepted.
-func BenchmarkExecutePublishMining(b *testing.B) {
-	key := performanceTestKey
-	msg := strings.Repeat("m", 200)
-	pubkey, err := nostr.GetPublicKey(key)
-	if err != nil {
-		b.Fatal(err)
-	}
-	hashes := uint64(0)
-	for b.Loop() {
-		job := publishJob{event: nostr.Event{PubKey: pubkey, Kind: geoChatKind, Content: msg, Tags: nostr.Tags{{"g", "u33dc0"}}},
-			key: key, chat: "lobby", difficulty: 16}
-		result := executePublish(context.Background(), job)
-		if result.kind != "ERROR" {
-			b.Fatalf("unexpected publish result: %+v", result)
-		}
-		if !result.event.CheckID() || !isPoWValid(&result.event, 16) {
-			b.Fatal("mining produced an invalid final proof")
-		}
-		// The winning nonce is the number of tries the loop actually needed.
-		nonce, err := strconv.ParseUint(result.event.Tags[len(result.event.Tags)-1][1], 10, 64)
-		if err != nil {
-			b.Fatalf("mining left no nonce tag: %v", err)
-		}
-		hashes += nonce + 1
-	}
-	// The ten-second publish deadline has to cover 2^difficulty expected hashes;
-	// this rate is what makes maxPoW reachable on ordinary hardware.
-	b.ReportMetric(float64(hashes)/b.Elapsed().Seconds(), "hashes/s")
-}
-
-func BenchmarkConfigSave(b *testing.B) {
-	dir := b.TempDir()
-	conf := &config{Nick: "bench", path: filepath.Join(dir, "config.json")}
-	b.ReportAllocs()
-	for b.Loop() {
-		if err := conf.save(); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-func BenchmarkConfigLoad(b *testing.B) {
-	dir := b.TempDir()
-	path := filepath.Join(dir, "config.json")
-	seed := &config{
-		Nick:           "bench",
-		Views:          []View{{Name: "berlin", Children: []string{"u33dc0"}}},
-		ActiveViewName: "berlin",
-		AnchorRelays:   []string{"wss://relay.example.com"},
-		path:           path,
-	}
-	if err := seed.save(); err != nil {
-		b.Fatal(err)
-	}
-	b.ReportAllocs()
-	for b.Loop() {
-		if _, err := loadConfigFrom(path); err != nil {
-			b.Fatal(err)
-		}
-	}
 }

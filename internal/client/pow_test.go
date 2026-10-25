@@ -70,16 +70,6 @@ func TestPoWDigestHelperMatchesHexHelper(t *testing.T) {
 	}
 }
 
-func BenchmarkRejectMissingRequiredPoW(b *testing.B) {
-	c, _ := testClient(b)
-	c.config.Views[0].PoW = 8
-	ev := performanceEvent(b, "message without a required proof")
-	b.ReportAllocs()
-	for b.Loop() {
-		c.processEvent(ev, "local")
-	}
-}
-
 func TestProcessEventUsesVerifiedDigestForPoW(t *testing.T) {
 	c, events := testClient(t)
 	c.config.Views[0].PoW = 1

@@ -42,16 +42,6 @@ func TestProcessEventRejectsUnrelatedTraffic(t *testing.T) {
 	}
 }
 
-func BenchmarkProcessDuplicate(b *testing.B) {
-	c, _ := testClient(b)
-	e := signedEvent(b, "hello")
-	c.processEvent(e, "local")
-	b.ResetTimer()
-	for b.Loop() {
-		c.processEvent(e, "local")
-	}
-}
-
 func TestProcessEventValidationAndDedup(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -139,25 +129,6 @@ func TestPublishWithoutAcknowledgementExplainsFailure(t *testing.T) {
 				t.Fatalf("missing clear failure reason when %s: %+v", name, result)
 			}
 		})
-	}
-}
-
-func BenchmarkProcessMessage(b *testing.B) {
-	c, events := testClient(b)
-	e := performanceEvent(b, "A short public chat message.")
-	b.ReportAllocs()
-	for b.Loop() {
-		c.seenCache.Purge()
-		c.processEvent(e, "local")
-		<-events
-	}
-}
-
-func BenchmarkClientInitialization(b *testing.B) {
-	b.ReportAllocs()
-	for b.Loop() {
-		c := newClient(&config{}, nil, nil)
-		c.Stop()
 	}
 }
 

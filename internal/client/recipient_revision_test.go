@@ -10,7 +10,7 @@ func TestMessageRecipientMetadataChanges(t *testing.T) {
 	c, events := testClient(t)
 	c.config.Views = []View{{Name: "group", IsGroup: true, Children: []string{"lobby", "coffee"}}}
 	c.config.ActiveViewName = "group"
-	ev := performanceEvent(t, "first")
+	ev := signedEvent(t, "first")
 	for _, step := range []struct {
 		nick, chat        string
 		forget, unchanged bool
@@ -24,7 +24,7 @@ func TestMessageRecipientMetadataChanges(t *testing.T) {
 	} {
 		ev.Content += "."
 		ev.Tags = nostr.Tags{{"d", step.chat}, {"n", step.nick}}
-		if err := ev.Sign(performanceTestKey); err != nil {
+		if err := ev.Sign(signerTestKeys[0]); err != nil {
 			t.Fatal(err)
 		}
 		if step.forget {

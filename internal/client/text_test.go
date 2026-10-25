@@ -1,7 +1,6 @@
 package client
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 
@@ -55,36 +54,3 @@ func FuzzTextTransforms(f *testing.F) {
 		}
 	})
 }
-
-func BenchmarkTextTransforms(b *testing.B) {
-	for _, sample := range []struct{ name, text string }{
-		{"short", strings.Repeat("message ", 16)},
-		{"limit", strings.Repeat("x", 2000)},
-		{"long", strings.Repeat("x", 8000)},
-		{"mixedLimit", performanceLongContent(b)},
-		{"unicode", strings.Repeat("Я界e\u0301👨‍👩‍👧‍👦 ", 100)},
-	} {
-		b.Run(sample.name, func(b *testing.B) {
-			b.Run("truncate", func(b *testing.B) {
-				b.ReportAllocs()
-				for b.Loop() {
-					textTransformResult = truncateString(sample.text, MaxMsgLen)
-				}
-			})
-			for _, dirty := range []bool{false, true} {
-				b.Run(fmt.Sprintf("sanitize/dirty=%v", dirty), func(b *testing.B) {
-					text := sample.text
-					if dirty {
-						text += "\x1b"
-					}
-					b.ReportAllocs()
-					for b.Loop() {
-						textTransformResult = sanitizeString(text)
-					}
-				})
-			}
-		})
-	}
-}
-
-var textTransformResult string

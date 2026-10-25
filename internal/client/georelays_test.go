@@ -501,35 +501,3 @@ func TestHaversineKnownDistances(t *testing.T) {
 		})
 	}
 }
-
-func BenchmarkClosestRelays(b *testing.B) {
-	b.Setenv("XDG_CONFIG_HOME", b.TempDir())
-	b.ReportAllocs()
-	for b.Loop() {
-		if _, err := closestRelays("s0000h", defaultRelayCount); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-func BenchmarkParseCatalogCSV(b *testing.B) {
-	b.ReportAllocs()
-	for b.Loop() {
-		if _, err := parseCatalog("bundled", bundledCatalogCSV); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-func BenchmarkSelectClosestRelays(b *testing.B) {
-	entries, err := parseCatalog("bundled", bundledCatalogCSV)
-	if err != nil {
-		b.Fatal(err)
-	}
-	b.ReportAllocs()
-	for b.Loop() {
-		if _, err := selectClosestRelays(entries, "s0000h", defaultRelayCount); err != nil {
-			b.Fatal(err)
-		}
-	}
-}

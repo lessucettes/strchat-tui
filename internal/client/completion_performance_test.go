@@ -51,22 +51,3 @@ func TestCompletionMatchesFullSort(t *testing.T) {
 		}
 	}
 }
-
-func BenchmarkNickCompletion(b *testing.B) {
-	for _, size := range []int{16, 256, 4096} {
-		for _, prefix := range []string{"@", "@user0001", "@absent"} {
-			b.Run(fmt.Sprintf("users%d/%s", size, prefix), func(b *testing.B) {
-				c, events := testClient(b)
-				for i := range size {
-					key := fmt.Sprintf("%064x", i)
-					c.userContext.Add(key, userContext{nick: fmt.Sprintf("user%04d", i), chat: "lobby", shortPubKey: key[60:]})
-				}
-				b.ReportAllocs()
-				for b.Loop() {
-					c.handleNickCompletion(prefix)
-					<-events
-				}
-			})
-		}
-	}
-}

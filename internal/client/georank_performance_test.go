@@ -1,7 +1,6 @@
 package client
 
 import (
-	"fmt"
 	"math/rand/v2"
 	"slices"
 	"sort"
@@ -47,23 +46,5 @@ func TestNearestSelectionMatchesFullRanking(t *testing.T) {
 				}
 			}
 		}
-	}
-}
-
-func BenchmarkNearestSelection(b *testing.B) {
-	catalogs, err := bundledCatalogEntries()
-	if err != nil {
-		b.Fatal(err)
-	}
-	entries := catalogs[0]
-	for _, count := range []int{5, 10, 64, len(entries)} {
-		b.Run(fmt.Sprintf("count%d", count), func(b *testing.B) {
-			b.ReportAllocs()
-			for b.Loop() {
-				if _, err := selectClosestHosts(entries, "s0000h", count); err != nil {
-					b.Fatal(err)
-				}
-			}
-		})
 	}
 }

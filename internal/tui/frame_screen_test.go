@@ -223,54 +223,6 @@ func screenText(sim tcell.SimulationScreen) string {
 	return screenProjection(sim).String()
 }
 
-// BenchmarkFrameScreenUnchangedFrame measures the extra bookkeeping the adapter
-// adds to a frame that changes nothing: a Clear, a full widget draw and the diff
-// scan, with no cell submitted to the terminal.
-func BenchmarkFrameScreenUnchangedFrame(b *testing.B) {
-	const width, height = 120, 40
-	spy, sim := newSpyScreen(b)
-	sim.SetSize(width, height)
-	screen := wrapFrameScreen(spy)
-	frame := fullFrame(width, height, "w")
-	applyFrame(screen, frame)
-	spy.reset()
-	b.ReportAllocs()
-	for b.Loop() {
-		applyFrame(screen, frame)
-	}
-	b.ReportMetric(float64(spy.writeCount())/float64(b.N), "cells-submitted/op")
-}
-
-// BenchmarkFrameScreenOneCellChange measures the common keystroke frame: one
-// cell differs, everything else is skipped.
-func BenchmarkFrameScreenOneCellChange(b *testing.B) {
-	const width, height = 120, 40
-	spy, sim := newSpyScreen(b)
-	sim.SetSize(width, height)
-	screen := wrapFrameScreen(spy)
-	frame := fullFrame(width, height, "w")
-	applyFrame(screen, frame)
-	spy.reset()
-	b.ReportAllocs()
-	i := 0
-	for b.Loop() {
-		i++
-		frame[len(frame)-1].text = string(rune('a' + i%26))
-		applyFrame(screen, frame)
-	}
-	b.ReportMetric(float64(spy.writeCount())/float64(b.N), "cells-submitted/op")
-}
-
-func fullFrame(width, height int, text string) []frameCell {
-	frame := make([]frameCell, 0, width*height)
-	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
-			frame = append(frame, frameCell{x: x, y: y, text: text, style: styleFor(x + y)})
-		}
-	}
-	return frame
-}
-
 // TestFrameScreenUnchangedFrameWritesNothing is the defect this type exists for:
 // a frame that ends with the same cells it started with must not reach the
 // terminal.
