@@ -30,14 +30,16 @@ const (
 )
 
 type relaySubscription struct {
-	chats []string
-	since map[string]nostr.Timestamp // immutable per-chat recovery watermarks
-	keys  map[string]string          // immutable public-key -> signing-key snapshot
+	chats     []string
+	since     map[string]nostr.Timestamp // immutable per-chat recovery watermarks
+	activated map[string]nostr.Timestamp // immutable start of each chat's active interval
+	keys      map[string]string          // immutable public-key -> signing-key snapshot
 }
 
-// Resume only retained chats. New chats keep their live-first watermark, and
-// every recovery remains bounded even if a snapshot waited in a queue.
-func (sub relaySubscription) resume(previous map[string]nostr.Timestamp) relaySubscription {
+// Resume only continuously active chats. Coalesced updates and retry snapshots
+// can still name a chat that was left and rejoined; its old cursor must not win.
+// Every recovery remains bounded even if a snapshot waited in a queue.
+func (sub relaySubscription) resume(previous relaySubscription) relaySubscription {
 	now := nostr.Now()
 	watermarks := make(map[string]nostr.Timestamp, len(sub.chats))
 	for _, chat := range sub.chats {
@@ -45,7 +47,7 @@ func (sub relaySubscription) resume(previous map[string]nostr.Timestamp) relaySu
 		if since == 0 {
 			since = now
 		}
-		if saved := previous[chat]; saved > 0 {
+		if saved := previous.since[chat]; saved > 0 && sub.activated[chat] == previous.activated[chat] {
 			since = min(since, saved)
 		}
 		watermarks[chat] = max(since, now-30)
@@ -233,7 +235,7 @@ func (c *client) dialRelay(ctx context.Context, url string) (relayConn, time.Dur
 // blacklists a relay. Backoff resets only after a stable connection, not a handshake.
 func (c *client) runRelay(ctx context.Context, worker *managedRelay, subscription relaySubscription) {
 	delay := max(c.relayTiming.minimum, worker.retry.delay)
-	subscription = subscription.resume(worker.retry.since)
+	subscription = subscription.resume(relaySubscription{since: worker.retry.since, activated: worker.retry.activated})
 	for ctx.Err() == nil {
 		conn, latency, err := c.dialRelay(ctx, worker.url)
 		if err == nil {
@@ -254,10 +256,10 @@ func (c *client) runRelay(ctx context.Context, worker *managedRelay, subscriptio
 			return
 		}
 		// Only a small overlap is requested; ephemeral relays need not retain it.
-		subscription = subscription.resume(nil)
+		subscription = subscription.resume(relaySubscription{})
 		pause := delay/2 + time.Duration(rand.Int64N(int64(delay/2)+1))
 		delay = min(delay*2, c.relayTiming.maximum)
-		retry := relayRetry{until: time.Now().Add(pause), delay: delay, since: subscription.since}
+		retry := relayRetry{until: time.Now().Add(pause), delay: delay, since: subscription.since, activated: subscription.activated}
 		if err != nil {
 			retry.failure = relayProblemText(err)
 		}
@@ -274,7 +276,7 @@ func (c *client) runRelay(ctx context.Context, worker *managedRelay, subscriptio
 				timer.Stop()
 				return
 			case update := <-worker.updates:
-				subscription = update.resume(subscription.since)
+				subscription = update.resume(subscription)
 			case request := <-worker.publish:
 				request.result <- errors.New("relay is reconnecting")
 			case <-timer.C:
@@ -296,7 +298,7 @@ func writeFrame(ctx context.Context, conn relayConn, frame any) error {
 
 func subscribe(ctx context.Context, conn relayConn, sub relaySubscription) error {
 	// Admission or owner backpressure may have aged the snapshot before use.
-	sub = sub.resume(nil)
+	sub = sub.resume(relaySubscription{})
 	groups := make(map[nostr.Timestamp][]string)
 	var watermarks []nostr.Timestamp
 	for _, chat := range sub.chats {
@@ -542,7 +544,7 @@ func (c *client) serveRelayWithPing(ctx context.Context, worker *managedRelay, c
 				return sub, false, probe.err
 			}
 		case update := <-worker.updates:
-			sub = update.resume(sub.since)
+			sub = update.resume(sub)
 			auth.prune(authKeys())
 			subRetried = false
 			if auth.challenged {

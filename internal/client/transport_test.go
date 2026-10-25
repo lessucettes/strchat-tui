@@ -1030,6 +1030,269 @@ func TestRelayRecoveryPreservesRetainedChatAfterGroupChange(t *testing.T) {
 	}
 }
 
+func TestRelayRecoveryIncludesChatActivatedDuringCooldown(t *testing.T) {
+	for _, mode := range []string{"active_before_outage", "activated_while_connected", "activated_during_cooldown"} {
+		t.Run(mode, func(t *testing.T) {
+			disconnect := make(chan struct{})
+			var once sync.Once
+			trigger := func() { once.Do(func() { close(disconnect) }) }
+			defer trigger()
+			history := make(chan []*nostr.Event, 1)
+			ts := newRelayWSServer(t, func(ts *relayTestServer, conn *websocket.Conn, idx int) {
+				frame, ok := relayNextLabeledFrame(ts, conn, "REQ")
+				if !ok {
+					return
+				}
+				relayTestNoteREQ(ts, frame)
+				if idx == 1 {
+					if mode == "activated_while_connected" {
+						// Record the live subscription replacement before the
+						// socket failure, so its per-chat watermark is in the
+						// worker's subscription when the connection drops.
+						frame, ok = relayNextLabeledFrame(ts, conn, "REQ")
+						if !ok {
+							return
+						}
+						relayTestNoteREQ(ts, frame)
+					}
+					select {
+					case <-disconnect:
+					case <-time.After(transportWaitSlow):
+					}
+					return
+				}
+				var filters nostr.Filters
+				for _, raw := range frame[2:] {
+					var filter nostr.Filter
+					if err := json.Unmarshal(raw, &filter); err != nil {
+						ts.t.Error(err)
+						return
+					}
+					filters = append(filters, filter)
+				}
+				select {
+				case events := <-history:
+					for _, event := range events {
+						if filters.Match(event) && !relayWriteJSON(ts, conn, relayEventFrame("chat", event)) {
+							return
+						}
+					}
+				case <-time.After(transportWaitOp):
+					ts.t.Error("missing recovery fixtures")
+					return
+				}
+				live := freshChatEvent(ts, transportTestKey, "other", 1)
+				if live == nil || !filters.Match(live) {
+					ts.t.Error("recovery does not cover live other traffic")
+					return
+				}
+				relayWriteJSON(ts, conn, relayEventFrame("chat", live))
+				relayReadUntilClosed(ts, conn)
+			})
+			cfg := relayTestConfig(t, ts.url)
+			cfg.Views = []View{{Name: "lobby"}, {Name: "other"}}
+			if mode == "active_before_outage" {
+				cfg.ActiveViewName = "other"
+			}
+			beforeJoin := signedChatEvent(t, transportTestKey, ephChatKind, "other", "before activation", nostr.Now()-1)
+			h := startRelayHarness(t, cfg, func(c *client) {
+				c.relayTiming.minimum, c.relayTiming.maximum = 6*time.Second, 6*time.Second
+				c.relayTiming.dialGap = 0
+			})
+			ts.takeREQ()
+			h.waitRelayStatusCount(ts.url, true, 1)
+			if mode == "activated_while_connected" {
+				h.send(UserAction{Type: "ACTIVATE_VIEW", Payload: "other"})
+				h.waitForEvent("other activated while connected", func(event DisplayEvent) bool {
+					state, ok := event.Payload.(StateUpdate)
+					return ok && state.ActiveViewIndex >= 0 && state.Views[state.ActiveViewIndex].Name == "other"
+				})
+				ts.takeREQ() // The live replacement must be applied before the failure.
+			}
+			trigger()
+			h.waitRelayList(nil, []string{ts.url})
+			if mode == "activated_during_cooldown" {
+				h.send(UserAction{Type: "ACTIVATE_VIEW", Payload: "other"})
+				h.waitForEvent("other activated during cooldown", func(event DisplayEvent) bool {
+					state, ok := event.Payload.(StateUpdate)
+					return ok && state.ActiveViewIndex >= 0 && state.Views[state.ActiveViewIndex].Name == "other"
+				})
+			}
+			missed := signedChatEvent(t, transportTestKey, ephChatKind, "other", "after activation during outage", nostr.Now())
+			history <- []*nostr.Event{beforeJoin, missed}
+			if !waitUntil(t, 2*time.Second, func() bool { return nostr.Now() > missed.CreatedAt }) {
+				t.Fatal("clock did not advance past the post-activation message")
+			}
+			if ts.conns.Load() != 1 {
+				t.Fatal("fixture missed the cooldown")
+			}
+			recovered := ts.waitREQContent("other")
+			h.waitMessage("other-1") // Same-socket FIFO barrier after filtered history.
+			if nostr.Now()-missed.CreatedAt >= 30 {
+				t.Fatal("fixture exceeded the supported recovery window")
+			}
+			if got := h.countMessages(beforeJoin.Content); got != 0 {
+				t.Errorf("pre-activation history was replayed: %d messages", got)
+			}
+			if got := h.countMessages(missed.Content); got != 1 {
+				t.Fatalf("active chat lost post-activation message: displayed=%d, message timestamp=%d, recovery REQ=%s; live traffic recovered", got, missed.CreatedAt, mustMarshal(recovered))
+			}
+		})
+	}
+}
+
+func TestRelayRecoveryRespectsReactivation(t *testing.T) {
+	for _, mode := range []string{"coalesced_retained", "coalesced_reentry", "cooldown_reentry"} {
+		t.Run(mode, func(t *testing.T) {
+			cooldown := mode == "cooldown_reentry"
+			reentry := mode != "coalesced_retained"
+			disconnect := make(chan struct{})
+			var once sync.Once
+			trigger := func() { once.Do(func() { close(disconnect) }) }
+			defer trigger()
+			history := make(chan []*nostr.Event, 1)
+			ts := newRelayWSServer(t, func(ts *relayTestServer, conn *websocket.Conn, idx int) {
+				for {
+					frame, ok := relayNextLabeledFrame(ts, conn, "REQ")
+					if !ok {
+						return
+					}
+					relayTestNoteREQ(ts, frame)
+					if cooldown && idx == 1 {
+						select {
+						case <-disconnect:
+						case <-time.After(transportWaitSlow):
+						}
+						return
+					}
+					// Test the final replacement, not the initial queued snapshot.
+					if !strings.Contains(string(mustMarshal(frame)), "third") {
+						continue
+					}
+					var filters nostr.Filters
+					for _, raw := range frame[2:] {
+						var filter nostr.Filter
+						if err := json.Unmarshal(raw, &filter); err != nil {
+							ts.t.Error(err)
+							return
+						}
+						filters = append(filters, filter)
+					}
+					select {
+					case events := <-history:
+						for _, event := range events {
+							if filters.Match(event) && !relayWriteJSON(ts, conn, relayEventFrame("chat", event)) {
+								return
+							}
+						}
+					case <-time.After(transportWaitOp):
+						ts.t.Error("missing recovery fixtures")
+						return
+					}
+					live := freshChatEvent(ts, transportTestKey, "other", 99)
+					if live == nil || !filters.Match(live) {
+						ts.t.Error("final subscription lacks live other traffic")
+						return
+					}
+					relayWriteJSON(ts, conn, relayEventFrame("chat", live))
+					relayReadUntilClosed(ts, conn)
+					return
+				}
+			})
+			cfg := relayTestConfig(t, ts.url)
+			cfg.Views = []View{{Name: "lobby"}, {Name: "other"}, {Name: "third"},
+				{Name: "pair", IsGroup: true, Children: []string{"lobby", "other"}},
+				{Name: "next", IsGroup: true, Children: []string{"lobby", "other", "third"}}}
+			if reentry {
+				cfg.ActiveViewName = "other"
+			}
+			before := signedChatEvent(t, transportTestKey, ephChatKind, "other", "before first activation", nostr.Now()-1)
+			h := startRelayHarness(t, cfg, func(c *client) {
+				c.relayTiming.dialGap = 0
+				if cooldown {
+					c.relayTiming.minimum, c.relayTiming.maximum = 6*time.Second, 6*time.Second
+				} else {
+					// Coalesce updates deterministically while dial admission is held.
+					for range cap(c.dialSlots) {
+						c.dialSlots <- struct{}{}
+					}
+				}
+			})
+			h.waitForEvent("startup complete", func(e DisplayEvent) bool { return e.Type == "SCROLLBAR_UPDATE" })
+			if cooldown {
+				ts.takeREQ()
+				h.waitRelayStatusCount(ts.url, true, 1)
+				trigger()
+				h.waitRelayList(nil, []string{ts.url})
+			}
+			activate := func(view string) {
+				t.Helper()
+				mark := h.mark()
+				h.send(UserAction{Type: "ACTIVATE_VIEW", Payload: view})
+				h.send(UserAction{Type: "GET_ACTIVE_CHAT"})
+				// STATE_UPDATE precedes subscription planning; this reply follows it.
+				if !waitUntil(t, transportWaitOp, func() bool {
+					for _, e := range h.snapshot()[mark:] {
+						if e.Type == "INFO" && e.Content == "Current active chat/group is: "+view {
+							return true
+						}
+					}
+					return false
+				}) {
+					t.Fatal("owner did not finish activation of " + view)
+				}
+			}
+			var inactive, wanted *nostr.Event
+			if reentry {
+				activate("lobby")
+				inactive = signedChatEvent(t, transportTestKey, ephChatKind, "other", "published while inactive", nostr.Now())
+				if !waitUntil(t, 2*time.Second, func() bool { return nostr.Now() > inactive.CreatedAt }) {
+					t.Fatal("clock did not advance before reactivation")
+				}
+				activate("next")
+				wanted = signedChatEvent(t, transportTestKey, ephChatKind, "other", "after reactivation", nostr.Now())
+			} else {
+				activate("pair")
+				wanted = signedChatEvent(t, transportTestKey, ephChatKind, "other", "retained through coalescing", nostr.Now())
+				if !waitUntil(t, 2*time.Second, func() bool { return nostr.Now() > wanted.CreatedAt }) {
+					t.Fatal("clock did not advance before group change")
+				}
+				activate("next")
+			}
+			events := []*nostr.Event{before, wanted}
+			if inactive != nil {
+				events = append(events, inactive)
+			}
+			history <- events
+			if cooldown {
+				if ts.conns.Load() != 1 {
+					t.Fatal("fixture missed the cooldown")
+				}
+			} else {
+				if ts.conns.Load() != 0 {
+					t.Fatal("dial admission gate failed")
+				}
+				<-h.c.dialSlots
+			}
+			final := ts.waitREQContent("third")
+			h.waitMessage("other-99") // Same-socket FIFO barrier after filtered history.
+			if nostr.Now()-wanted.CreatedAt >= 30 {
+				t.Fatal("fixture exceeded recovery window")
+			}
+			if got := h.countMessages(wanted.Content); got != 1 {
+				t.Errorf("lost active message: count=%d REQ=%s", got, mustMarshal(final))
+			}
+			if got := h.countMessages(before.Content); got != 0 {
+				t.Errorf("pre-activation message replayed: count=%d REQ=%s", got, mustMarshal(final))
+			}
+			if inactive != nil && h.countMessages(inactive.Content) != 0 {
+				t.Errorf("inactive interval replayed after reactivation: timestamp=%d REQ=%s", inactive.CreatedAt, mustMarshal(final))
+			}
+			h.stopWithin(time.Second)
+		})
+	}
+}
+
 func TestRelaySubscriptionReplacementReusesConnection(t *testing.T) {
 	other := signedChatEvent(t, transportTestKey, ephChatKind, "other", "hello other room", nostr.Now())
 	ts := newRelayWSServer(t, func(ts *relayTestServer, conn *websocket.Conn, idx int) {

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
+	"github.com/nbd-wtf/go-nostr"
 )
 
 // Run is the only owner of configuration, identities, caches and relay handles.
@@ -30,6 +31,7 @@ type client struct {
 	nextDial                       time.Time // protected by dialPace
 	relayTiming                    relayTiming
 	relayRetries                   *lru.Cache[string, relayRetry]
+	activeChatSince                map[string]nostr.Timestamp // owner-only activation times, bounded by active chats
 	geoPlans                       map[string][][]string
 	relayPlans                     relayPlanner
 	nextRelayRetry                 time.Time

@@ -14,6 +14,7 @@ type relayRetry struct {
 	until       time.Time
 	delay       time.Duration
 	since       map[string]nostr.Timestamp // immutable per-chat recovery snapshot
+	activated   map[string]nostr.Timestamp // active intervals associated with the saved cursors
 	lastProblem string                     // bounded warning history survives cooldown retirement
 	failure     string                     // bounded diagnostic cause, not a retry policy input
 }
@@ -66,7 +67,10 @@ func (c *client) relayCovers(url string, now time.Time) bool {
 // longer rebuilds and re-normalizes the relay list for every (relay, chat) pair.
 func (c *client) subscriptionForRelay(url string, chats []string) relaySubscription {
 	c.syncRelayPlanning()
-	update := relaySubscription{chats: chats, since: make(map[string]nostr.Timestamp, len(chats)), keys: make(map[string]string, len(chats))}
+	update := relaySubscription{
+		chats: chats, since: make(map[string]nostr.Timestamp, len(chats)),
+		activated: make(map[string]nostr.Timestamp, len(chats)), keys: make(map[string]string, len(chats)),
+	}
 	since := nostr.Now()
 	for _, chat := range chats {
 		if session, ok := c.chatKeys[chat]; ok {
@@ -82,8 +86,14 @@ func (c *client) subscriptionForRelay(url string, chats []string) relaySubscript
 	}
 	for _, chat := range chats {
 		update.since[chat] = since
+		// Activation can precede worker creation when every route is cooling down.
+		// Copy both the cursor and its interval; never alias the owner's map.
+		if activated := c.activeChatSince[chat]; activated > 0 {
+			update.activated[chat] = activated
+			update.since[chat] = min(since, activated)
+		}
 	}
-	return update
+	return update.resume(relaySubscription{})
 }
 
 // Preserve each catalog's nearest five independently. Only failed primaries
@@ -230,6 +240,23 @@ func (c *client) updateAllSubscriptions() {
 	}
 	slices.Sort(chats)
 	chats = slices.Compact(chats)
+	// Track membership before relay eligibility: cooldown can leave no workers
+	// at all. Retained group members keep their activation time; newcomers start
+	// live-first, and inactive chats must not keep growing this owner-only map.
+	for chat := range c.activeChatSince {
+		if _, active := slices.BinarySearch(chats, chat); !active {
+			delete(c.activeChatSince, chat)
+		}
+	}
+	if len(chats) > 0 && c.activeChatSince == nil {
+		c.activeChatSince = make(map[string]nostr.Timestamp, len(chats))
+	}
+	now := nostr.Now()
+	for _, chat := range chats {
+		if _, active := c.activeChatSince[chat]; !active {
+			c.activeChatSince[chat] = now
+		}
+	}
 	desired, notice := c.selectRelaySubscriptions(chats, time.Now())
 	c.updateRelaySubscriptions(desired)
 	health := c.logRelayHealth(viewName, chats)
