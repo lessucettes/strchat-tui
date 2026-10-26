@@ -1376,6 +1376,73 @@ func TestRelayRemovalStopsWorkerWithoutResurrection(t *testing.T) {
 	h.waitRelayList([]string{drop.url, keep.url}, nil)
 }
 
+func TestQueuedMessagesSurviveRelayRetirement(t *testing.T) {
+	for _, group := range []bool{false, true} {
+		t.Run(fmt.Sprintf("group_%t", group), func(t *testing.T) {
+			const oldURL, currentURL = "ws://127.0.0.1:1", "ws://127.0.0.1:2"
+			cfg := relayTestConfig(t, oldURL, currentURL)
+			chats := []string{"lobby"}
+			if group {
+				chats = append(chats, "coffee")
+				cfg.Views = append(cfg.Views, View{Name: "coffee"}, View{Name: "group", IsGroup: true, Children: chats})
+				cfg.ActiveViewName = "group"
+			}
+			var queued []*nostr.Event
+			for _, chat := range chats {
+				queued = append(queued, signedChatEvent(t, transportTestKey, ephChatKind, chat, "queued-"+chat, nostr.Now()))
+			}
+			foreign := signedChatEvent(t, transportTestKey, ephChatKind, "elsewhere", "foreign", nostr.Now())
+			forged := *queued[0]
+			forged.Content = "forged"
+			var current *managedRelay
+			h := startRelayHarness(t, cfg, func(c *client) {
+				seedRelaySelection(c, chats)
+				old := c.relays[oldURL]
+				current = c.relays[currentURL]
+				// Pin the interleaving: while the owner retires the socket, its
+				// reader has handed off messages, but Run has not consumed them.
+				// Inert handles avoid scheduler timing and all network traffic.
+				old.cancel = func() {
+					c.incoming <- relayEvent{worker: old, event: &forged}
+					c.incoming <- relayEvent{worker: old, event: foreign}
+					for _, event := range queued {
+						c.incoming <- relayEvent{worker: old, event: event}
+						c.incoming <- relayEvent{worker: old, event: event}
+					}
+					c.incoming <- relayEvent{worker: old, connected: true}
+				}
+			})
+			h.waitRelayList([]string{oldURL, currentURL}, nil)
+			h.send(UserAction{Type: "MANAGE_ANCHORS", Payload: "1"})
+			h.waitRelayList([]string{currentURL}, []string{oldURL})
+			barrier := signedEvent(t, "after retirement")
+			h.inject(relayEvent{worker: current, event: barrier})
+			h.waitMessage(barrier.Content) // FIFO barrier after every retired-worker event.
+			for _, event := range queued {
+				if got := h.countMessages(event.Content); got != 1 {
+					t.Errorf("queued message for %s displayed %d times, want 1", event.Tags.Find("d")[1], got)
+				}
+			}
+			var deliveredChats []string
+			for _, event := range h.snapshot() {
+				if event.Type == "NEW_MESSAGE" && event.Content != barrier.Content {
+					deliveredChats = append(deliveredChats, event.Chat)
+				}
+			}
+			if !slices.Equal(deliveredChats, chats) {
+				t.Errorf("message routing/order = %v, want %v", deliveredChats, chats)
+			}
+			if got := h.countType("NEW_MESSAGE"); got != len(queued)+1 {
+				t.Errorf("displayed %d messages, want %d; events:%s", got, len(queued)+1, h.dump(20))
+			}
+			statuses, _ := h.latestRelayStatuses()
+			if len(statuses) != 1 || statuses[0].URL != currentURL {
+				t.Errorf("retired worker status changed the relay list: %+v", statuses)
+			}
+		})
+	}
+}
+
 func TestRemovedWorkerStatusEventsCannotResurrectOrAffectCurrentWorker(t *testing.T) {
 	ts := newRelayWSServer(t, func(ts *relayTestServer, conn *websocket.Conn, idx int) {
 		relayServeChat(ts, conn, true, "")

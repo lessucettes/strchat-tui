@@ -142,7 +142,10 @@ func (c *client) Run() {
 			c.handleAction(action)
 		case incoming := <-c.incoming:
 			worker := incoming.worker
-			if c.relays[worker.url] != worker {
+			// Retiring a socket must not discard messages already handed off.
+			// processEvent validates their signature and current chat membership;
+			// only transport reports require the worker to still be current.
+			if incoming.event == nil && c.relays[worker.url] != worker {
 				continue
 			}
 			if incoming.problem != "" {
