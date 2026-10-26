@@ -1,72 +1,66 @@
 package client
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
-	"strings"
+	"math/bits"
 	"testing"
 
-	"github.com/nbd-wtf/go-nostr"
+	"fiatjaf.com/nostr"
+	"fiatjaf.com/nostr/nip13"
 )
 
-func TestCountLeadingZeroBitsDigestMatchesHex(t *testing.T) {
-	for range 2000 {
-		var digest [32]byte
-		if _, err := rand.Read(digest[:]); err != nil {
-			t.Fatal(err)
+// powLeadingBits is the independent oracle for the digest fixtures below.
+func powLeadingBits(digest [32]byte) int {
+	n := 0
+	for _, b := range digest {
+		if b == 0 {
+			n += 8
+			continue
 		}
-		want := countLeadingZeroBits(hex.EncodeToString(digest[:]))
-		if got := countLeadingZeroBitsDigest(digest); got != want {
-			t.Fatalf("digest %x: got %d want %d", digest, got, want)
-		}
+		return n + bits.LeadingZeros8(b)
 	}
-	// Exercise every possible leading byte and a fully zero digest.
-	var zero [32]byte
-	if got := countLeadingZeroBitsDigest(zero); got != 256 {
-		t.Fatalf("zero digest counted %d bits", got)
-	}
-	for b := range 256 {
-		var d [32]byte
-		d[0] = byte(b)
-		if got, want := countLeadingZeroBitsDigest(d), countLeadingZeroBits(hex.EncodeToString(d[:])); got != want {
-			t.Fatalf("leading byte %d: got %d want %d", b, got, want)
-		}
-	}
+	return n
 }
 
-func TestPoWDigestHelperMatchesHexHelper(t *testing.T) {
-	for _, minDifficulty := range []int{0, 1, 4, 8, 12} {
+func TestPoWValidationUsesLastNonceAndClaimedDifficulty(t *testing.T) {
+	for _, minDifficulty := range []int{0, 1, 4, 8, 12, 16} {
 		for claimed := 0; claimed <= 16; claimed++ {
 			for leading := 0; leading <= 20; leading++ {
 				var digest [32]byte
 				// Set the first `leading` bits to zero and the next bit to one.
-				for i := 0; i < leading; i++ {
-					digest[i/8] &^= 1 << (7 - i%8)
-				}
 				if leading < 256 {
 					digest[leading/8] |= 1 << (7 - leading%8)
 				}
-				ev := &nostr.Event{ID: hex.EncodeToString(digest[:]), Tags: nostr.Tags{{"nonce", "1", fmt.Sprint(claimed)}}}
-				want := isPoWValid(ev, minDifficulty)
+				ev := &nostr.Event{ID: nostr.ID(digest), Tags: nostr.Tags{{"nonce", "1", fmt.Sprint(claimed)}}}
+				want := minDifficulty <= 0 || (claimed >= minDifficulty && powLeadingBits(digest) >= claimed)
 				if got := isPoWValidDigest(ev, minDifficulty, digest); got != want {
 					t.Fatalf("min=%d claimed=%d leading=%d: got %t want %t", minDifficulty, claimed, leading, got, want)
 				}
 			}
 		}
 	}
-	// Missing/short nonce tags and non-numeric difficulty claims agree too.
-	ev := &nostr.Event{ID: strings.Repeat("0", 64), Tags: nostr.Tags{{"nonce", "1"}}}
-	if isPoWValidDigest(ev, 1, [32]byte{}) != isPoWValid(ev, 1) {
-		t.Fatal("short nonce tag disagreed")
+	// Admission parses the last nonce tag (mining appends it) and trims the
+	// claim; short, missing and non-numeric tags cannot satisfy a target.
+	var digest [32]byte // 256 leading zero bits
+	cases := []struct {
+		name string
+		tags nostr.Tags
+		min  int
+		want bool
+	}{
+		{"missing", nil, 1, false},
+		{"short", nostr.Tags{{"nonce", "1"}}, 1, false},
+		{"non-numeric", nostr.Tags{{"nonce", "1", "x"}}, 1, false},
+		{"trimmed", nostr.Tags{{"nonce", "1", "  4  "}}, 4, true},
+		{"below-target", nostr.Tags{{"nonce", "1", "4"}}, 8, false},
+		{"last-tag-wins", nostr.Tags{{"nonce", "1", "16"}, {"nonce", "2", "2"}}, 2, true},
+		{"ignores-first-high-claim", nostr.Tags{{"nonce", "1", "16"}, {"nonce", "2", "2"}}, 8, false},
 	}
-	ev.Tags = nostr.Tags{{"nonce", "1", "x"}}
-	if isPoWValidDigest(ev, 1, [32]byte{}) != isPoWValid(ev, 1) {
-		t.Fatal("invalid difficulty tag disagreed")
-	}
-	ev.Tags = nil
-	if isPoWValidDigest(ev, 1, [32]byte{}) != isPoWValid(ev, 1) {
-		t.Fatal("missing nonce tag disagreed")
+	for _, tc := range cases {
+		ev := &nostr.Event{ID: nostr.ID(digest), Tags: tc.tags}
+		if got := isPoWValidDigest(ev, tc.min, digest); got != tc.want {
+			t.Errorf("%s: got %t want %t", tc.name, got, tc.want)
+		}
 	}
 }
 
@@ -84,7 +78,7 @@ func TestProcessEventUsesVerifiedDigestForPoW(t *testing.T) {
 		if err := signer.sign(&ev); err != nil {
 			t.Fatal(err)
 		}
-		if countLeadingZeroBits(ev.ID) >= 1 {
+		if nip13.Difficulty(ev.ID) >= 1 {
 			break
 		}
 		if nonce > 1000 {

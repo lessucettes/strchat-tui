@@ -2,8 +2,47 @@ package client
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"strings"
+
+	"fiatjaf.com/nostr"
 )
+
+// decodeRelayEvent keeps wire validation at the boundary before converting to
+// binary identifiers. The library's Event decoder silently ignores malformed
+// hex and truncates kinds to uint16; using it here would lose admission checks.
+// JSON input is bounded by maxFrameBytes in the transport.
+func decodeRelayEvent(data []byte) (*nostr.Event, error) {
+	var wire struct {
+		ID        string          `json:"id"`
+		PubKey    string          `json:"pubkey"`
+		CreatedAt nostr.Timestamp `json:"created_at"`
+		Kind      int64           `json:"kind"`
+		Tags      nostr.Tags      `json:"tags"`
+		Content   string          `json:"content"`
+		Sig       string          `json:"sig"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return nil, err
+	}
+	if len(wire.ID) != 64 || len(wire.PubKey) != 64 || len(wire.Sig) != 128 || wire.Kind < 0 || wire.Kind > 65535 ||
+		strings.Trim(wire.ID, "0123456789abcdef") != "" || strings.Trim(wire.PubKey, "0123456789abcdef") != "" {
+		return nil, errors.New("invalid event identifiers or kind")
+	}
+	event := &nostr.Event{Kind: nostr.Kind(wire.Kind), CreatedAt: wire.CreatedAt, Tags: wire.Tags, Content: wire.Content}
+	if _, err := hex.Decode(event.ID[:], []byte(wire.ID)); err != nil {
+		return nil, err
+	}
+	if _, err := hex.Decode(event.PubKey[:], []byte(wire.PubKey)); err != nil {
+		return nil, err
+	}
+	if _, err := hex.Decode(event.Sig[:], []byte(wire.Sig)); err != nil {
+		return nil, err
+	}
+	return event, nil
+}
 
 // relayEnvelopeParts bounds the top-level values retained from one relay frame.
 // A relay frame that carries more values than this is reported with this count

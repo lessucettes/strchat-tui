@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/nbd-wtf/go-nostr"
+	"fiatjaf.com/nostr"
 )
 
 const (
@@ -170,7 +170,7 @@ func (c *client) updateRelaySubscriptions(desired map[string][]string) {
 	c.sendRelaysUpdate()
 }
 
-func chatFilters(chats []string, since nostr.Timestamp) nostr.Filters {
+func chatFilters(chats []string, since nostr.Timestamp) []nostr.Filter {
 	var geo, topics []string
 	for _, chat := range chats {
 		if isGeohashName(chat) {
@@ -179,12 +179,12 @@ func chatFilters(chats []string, since nostr.Timestamp) nostr.Filters {
 			topics = append(topics, chat)
 		}
 	}
-	var filters nostr.Filters
+	var filters []nostr.Filter
 	if len(geo) > 0 {
-		filters = append(filters, nostr.Filter{Kinds: []int{geoChatKind}, Tags: nostr.TagMap{"g": geo}, Since: &since, Limit: 200})
+		filters = append(filters, nostr.Filter{Kinds: []nostr.Kind{geoChatKind}, Tags: nostr.TagMap{"g": geo}, Since: since, Limit: 200})
 	}
 	if len(topics) > 0 {
-		filters = append(filters, nostr.Filter{Kinds: []int{ephChatKind}, Tags: nostr.TagMap{"d": topics}, Since: &since, Limit: 200})
+		filters = append(filters, nostr.Filter{Kinds: []nostr.Kind{ephChatKind}, Tags: nostr.TagMap{"d": topics}, Since: since, Limit: 200})
 	}
 	return filters
 }
@@ -424,7 +424,7 @@ func (c *client) serveRelayWithPing(ctx context.Context, worker *managedRelay, c
 			keys = make(map[string]string)
 		}
 		if pending != nil && pending.key != "" {
-			keys[pending.event.PubKey] = pending.key
+			keys[pending.event.PubKey.Hex()] = pending.key
 		}
 		return keys
 	}
@@ -470,7 +470,7 @@ func (c *client) serveRelayWithPing(ctx context.Context, worker *managedRelay, c
 		if pendingWait {
 			if err := pending.ctx.Err(); err != nil {
 				finishPending(err)
-			} else if attempt := auth.attempts[pending.event.PubKey]; attempt != nil && attempt.done {
+			} else if attempt := auth.attempts[pending.event.PubKey.Hex()]; attempt != nil && attempt.done {
 				if attempt.err != nil {
 					finishPending(attempt.err)
 				} else {
@@ -609,15 +609,12 @@ func (c *client) serveRelayWithPing(ctx context.Context, worker *managedRelay, c
 				if id != "chat" || count != 3 {
 					continue
 				}
-				var event nostr.Event
-				// The splitter validates the complete frame with json.Valid.
-				// Decode the known-valid event directly, without validating it
-				// a second time or copying it into a generic RawMessage.
-				if event.UnmarshalJSON(parts[2]) != nil {
+				event, err := decodeRelayEvent(parts[2])
+				if err != nil {
 					continue
 				}
 				select {
-				case c.incoming <- relayEvent{worker: worker, event: &event}:
+				case c.incoming <- relayEvent{worker: worker, event: event}:
 				case <-ctx.Done():
 					return sub, false, ctx.Err()
 				}
@@ -662,7 +659,7 @@ func (c *client) serveRelayWithPing(ctx context.Context, worker *managedRelay, c
 						reportProblem(auth.attempts[pubkey].err)
 						authReported = true
 					}
-				} else if pending != nil && !pendingWait && id == pending.event.ID {
+				} else if pending != nil && !pendingWait && id == pending.event.ID.Hex() {
 					if accepted {
 						finishPending(nil)
 					} else if strings.HasPrefix(reason, "auth-required:") && !publishRetried {

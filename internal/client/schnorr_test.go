@@ -8,16 +8,24 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/nbd-wtf/go-nostr"
+	"fiatjaf.com/nostr"
 	"gitlab.com/yawning/secp256k1-voi/secec/bitcoin"
 )
 
-func legacyEventValid(ev *nostr.Event) bool {
-	if !ev.CheckID() {
-		return false
+// referenceEventValid is the upstream meaning of a fully valid event: the
+// stored ID equals the canonical body hash and the signature matches that body.
+// It is the differential oracle for the local verification path.
+func referenceEventValid(ev *nostr.Event) bool {
+	return ev.CheckID() && ev.VerifySignature()
+}
+
+func parseTest32Hex(t testing.TB, hexValue string) [32]byte {
+	t.Helper()
+	raw, err := hex.DecodeString(hexValue)
+	if err != nil || len(raw) != 32 {
+		t.Fatalf("invalid 32-byte hex fixture %q: %v (len %d)", hexValue, err, len(raw))
 	}
-	ok, _ := ev.CheckSignature()
-	return ok
+	return [32]byte(raw)
 }
 
 func randomSignedEvent(t *testing.T, key string, rng *randReader) *nostr.Event {
@@ -28,7 +36,7 @@ func randomSignedEvent(t *testing.T, key string, rng *randReader) *nostr.Event {
 		Content:   rng.text(0, 200),
 		Tags:      nostr.Tags{{"d", "lobby"}},
 	}
-	if err := ev.Sign(key); err != nil {
+	if err := ev.Sign(parseTest32Hex(t, key)); err != nil {
 		t.Fatal(err)
 	}
 	return ev
@@ -63,20 +71,7 @@ func (r *randReader) text(min, max int) string {
 	return string(raw)
 }
 
-func flipHex(s string) string {
-	if s == "" {
-		return "0"
-	}
-	i := len(s) / 3
-	c := s[i]
-	repl := byte('0')
-	if c == '0' {
-		repl = '1'
-	}
-	return s[:i] + string(repl) + s[i+1:]
-}
-
-func TestVerifyEventDigestMatchesLegacyChecks(t *testing.T) {
+func TestVerifyEventDigestMatchesReferenceChecks(t *testing.T) {
 	keys := []string{
 		strings.Repeat("0", 63) + "1",
 		"B7E151628AED2A6ABF7158809CF4F3C762E7160F38B4DA56A784D9045190CFEF",
@@ -86,57 +81,66 @@ func TestVerifyEventDigestMatchesLegacyChecks(t *testing.T) {
 	for ki, key := range keys {
 		for i := range 8 {
 			base := randomSignedEvent(t, key, rng)
+			other := randomSignedEvent(t, keys[(ki+1)%len(keys)], rng)
 			mutations := []struct {
 				name   string
 				mutate func(*nostr.Event)
 			}{
 				{"valid", func(*nostr.Event) {}},
-				{"uppercase-id", func(e *nostr.Event) { e.ID = strings.ToUpper(e.ID) }},
-				{"bad-id", func(e *nostr.Event) { e.ID = flipHex(e.ID) }},
-				{"short-id", func(e *nostr.Event) { e.ID = e.ID[:62] }},
-				{"bad-sig", func(e *nostr.Event) { e.Sig = flipHex(e.Sig) }},
-				{"uppercase-sig", func(e *nostr.Event) { e.Sig = strings.ToUpper(e.Sig) }},
-				{"zero-sig", func(e *nostr.Event) { e.Sig = strings.Repeat("0", 128) }},
+				{"flipped-id", func(e *nostr.Event) { e.ID[0] ^= 0xff }},
+				// The signature still matches the body, but the stored ID names
+				// another event. Upstream VerifySignature ignores the ID, so
+				// the local path must reject this itself.
+				{"foreign-id", func(e *nostr.Event) { e.ID = other.ID }},
+				{"flipped-sig", func(e *nostr.Event) { e.Sig[0] ^= 0xff }},
+				{"zero-sig", func(e *nostr.Event) { e.Sig = [64]byte{} }},
 				{"corrupt-content", func(e *nostr.Event) { e.Content += "x" }},
-				{"corrupt-pubkey", func(e *nostr.Event) { e.PubKey = flipHex(e.PubKey) }},
+				{"other-pubkey", func(e *nostr.Event) { e.PubKey = other.PubKey }},
 			}
 			for _, m := range mutations {
 				ev := *base
 				ev.Tags = append(nostr.Tags(nil), base.Tags...)
 				m.mutate(&ev)
-				want := legacyEventValid(&ev)
+				want := referenceEventValid(&ev)
 				_, _, got := verifyEventDigest(&ev, nil)
 				if got != want {
-					t.Fatalf("key %d event %d %s: digest path=%t legacy=%t (id=%s)", ki, i, m.name, got, want, ev.ID)
+					t.Fatalf("key %d event %d %s: digest path=%t reference=%t (id=%s)", ki, i, m.name, got, want, ev.ID.Hex())
 				}
 			}
 		}
 	}
 }
 
-func TestVerifyEventDigestRejectsMalformedInputs(t *testing.T) {
-	key := strings.Repeat("0", 63) + "1"
-	base := randomSignedEvent(t, key, &randReader{})
+// TestVerifyEventDigestRejectsInvalidCurveData covers typed events whose bytes
+// are structurally complete but cannot verify: an invalid public point or
+// signature scalar. Malformed hex, length and case are wire-decoder concerns
+// and are covered by decodeRelayEvent tests, not by impossible typed values.
+func TestVerifyEventDigestRejectsInvalidCurveData(t *testing.T) {
+	base := randomSignedEvent(t, strings.Repeat("0", 63)+"1", &randReader{})
+	fieldP := parseTest32Hex(t, "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F")
+	orderN := parseTest32Hex(t, "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141")
 	cases := []struct {
 		name   string
 		mutate func(*nostr.Event)
 	}{
-		{"zero-pubkey", func(e *nostr.Event) { e.PubKey = strings.Repeat("0", 64) }},
-		{"field-p-pubkey", func(e *nostr.Event) { e.PubKey = "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F" }},
-		{"uppercase-pubkey", func(e *nostr.Event) { e.PubKey = strings.ToUpper(e.PubKey) }},
-		{"nonhex-pubkey", func(e *nostr.Event) { e.PubKey = strings.Repeat("z", 64) }},
-		{"empty-pubkey", func(e *nostr.Event) { e.PubKey = "" }},
-		{"r-equals-p", func(e *nostr.Event) { e.Sig = "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F" + e.Sig[64:] }},
-		{"s-equals-n", func(e *nostr.Event) { e.Sig = e.Sig[:64] + "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141" }},
-		{"nonhex-sig", func(e *nostr.Event) { e.Sig = strings.Repeat("g", 128) }},
-		{"short-sig", func(e *nostr.Event) { e.Sig = e.Sig[:126] }},
+		{"zero-pubkey", func(e *nostr.Event) {
+			e.PubKey = nostr.PubKey{}
+			e.ID = e.GetID() // reach the point parse instead of failing the ID check
+		}},
+		{"field-p-pubkey", func(e *nostr.Event) {
+			e.PubKey = nostr.PubKey(fieldP)
+			e.ID = e.GetID()
+		}},
+		{"zero-sig", func(e *nostr.Event) { e.Sig = [64]byte{} }},
+		{"r-equals-p", func(e *nostr.Event) { copy(e.Sig[:32], fieldP[:]) }},
+		{"s-equals-n", func(e *nostr.Event) { copy(e.Sig[32:], orderN[:]) }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			ev := *base
 			tc.mutate(&ev)
 			if _, _, ok := verifyEventDigest(&ev, nil); ok {
-				t.Fatal("malformed event verified")
+				t.Fatal("invalid curve data verified")
 			}
 		})
 	}
@@ -181,8 +185,8 @@ func TestAuthorKeyCacheBindingAndTamperRejection(t *testing.T) {
 	// A tampered event must fail even with its own correctly cached key.
 	for _, mutate := range []func(*nostr.Event){
 		func(e *nostr.Event) { e.Content += "x" },
-		func(e *nostr.Event) { e.Sig = flipHex(e.Sig) },
-		func(e *nostr.Event) { e.ID = flipHex(e.ID) },
+		func(e *nostr.Event) { e.Sig[0] ^= 0xff },
+		func(e *nostr.Event) { e.ID[0] ^= 0xff },
 	} {
 		bad := *evB
 		mutate(&bad)
@@ -224,40 +228,4 @@ func TestVerifyEventDigestConcurrent(t *testing.T) {
 	for err := range errs {
 		t.Fatal(err)
 	}
-}
-
-func TestDecodeFixedHexMatchesEncodingHex(t *testing.T) {
-	rng := &randReader{}
-	for range 500 {
-		raw := make([]byte, 32+rng.intn(33))
-		if _, err := rand.Read(raw); err != nil {
-			t.Fatal(err)
-		}
-		encoded := hex.EncodeToString(raw)
-		if rng.intn(2) == 0 {
-			encoded = strings.ToUpper(encoded)
-		}
-		decoded := make([]byte, len(raw))
-		if !decodeFixedHex(decoded, encoded) {
-			t.Fatalf("failed to decode %q", encoded)
-		}
-		if !equalBytes(decoded, raw) {
-			t.Fatalf("decoded %x, want %x", decoded, raw)
-		}
-		if decodeFixedHex(decoded, encoded[:len(encoded)-2]) {
-			t.Fatal("accepted a short encoding")
-		}
-	}
-}
-
-func equalBytes(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }

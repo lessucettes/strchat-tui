@@ -1,11 +1,10 @@
 package client
 
 import (
-	"encoding/hex"
 	"testing"
 
+	"fiatjaf.com/nostr"
 	"github.com/btcsuite/btcd/btcec/v2"
-	"github.com/nbd-wtf/go-nostr"
 	"gitlab.com/yawning/secp256k1-voi/secec/bitcoin"
 )
 
@@ -45,10 +44,9 @@ func TestInvalidSignaturesNeverBuildTable(t *testing.T) {
 	cache := newAuthorVerifyCache(authorVerifyCacheSize)
 
 	for name, mutate := range map[string]func(*nostr.Event){
-		"bad-signature": func(e *nostr.Event) { e.Sig = flipHex(e.Sig) },
-		"bad-id":        func(e *nostr.Event) { e.ID = flipHex(e.ID) },
+		"bad-signature": func(e *nostr.Event) { e.Sig[0] ^= 0xff },
+		"bad-id":        func(e *nostr.Event) { e.ID[0] ^= 0xff },
 		"bad-content":   func(e *nostr.Event) { e.Content += "x" },
-		"malformed-sig": func(e *nostr.Event) { e.Sig = e.Sig[:126] },
 	} {
 		bad := *ev
 		mutate(&bad)
@@ -69,8 +67,10 @@ func TestAuthorVerifyCacheEviction(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		var secret [32]byte
+		copy(secret[:], priv.Serialize())
 		ev := &nostr.Event{Kind: ephChatKind, CreatedAt: nostr.Now(), Tags: nostr.Tags{{"d", "lobby"}}, Content: "eviction fixture"}
-		if err := ev.Sign(hex.EncodeToString(priv.Serialize())); err != nil {
+		if err := ev.Sign(secret); err != nil {
 			t.Fatal(err)
 		}
 		events[i] = ev

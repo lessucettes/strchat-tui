@@ -2,7 +2,6 @@ package client
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"slices"
@@ -11,19 +10,15 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/nbd-wtf/go-nostr"
+	"fiatjaf.com/nostr"
+	"fiatjaf.com/nostr/nip13"
 	"github.com/rivo/uniseg"
 )
 
 // Validate before caching: forged IDs must not poison duplicate suppression.
 // The 64 KiB wire cap also bounds JSON decoding and signature verification input.
 func (c *client) processEvent(ev *nostr.Event, relayURL string) {
-	if ev == nil || len(ev.ID) != 64 || len(ev.PubKey) != 64 || len(ev.Sig) != 128 || len(ev.Content) > maxContentBytes || len(ev.Tags) > 128 || !utf8.ValidString(ev.Content) {
-		return
-	}
-	// NIP-01 keys are lowercase hex. Alternate spellings must not split a
-	// participant's identity or bypass the block list's canonical key lookup.
-	if strings.Trim(ev.PubKey, "0123456789abcdef") != "" {
+	if ev == nil || len(ev.Content) > maxContentBytes || len(ev.Tags) > 128 || !utf8.ValidString(ev.Content) {
 		return
 	}
 	if c.seenCache.Contains(ev.ID) {
@@ -59,8 +54,11 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 			return
 		}
 	}
+	// Binary keys have a single identity; hex is only needed at the UI/config
+	// boundary. Incoming wire spellings are checked by decodeRelayEvent.
+	pubkey := ev.PubKey.Hex()
 	for _, blocked := range c.config.BlockedUsers {
-		if blocked.PubKey == ev.PubKey {
+		if blocked.PubKey == pubkey {
 			return
 		}
 	}
@@ -74,7 +72,7 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 	// Hash the canonical serialization once: the same digest proves the ID,
 	// feeds the BIP-340 signature check and the optional PoW bit count. The
 	// parsed author key is reused only for this exact validated public key.
-	authorKey, digest, ok := verifyEventDigestWarm(ev, c.cachedAuthorKey(ev.PubKey), c.authorVerify)
+	authorKey, digest, ok := verifyEventDigestWarm(ev, c.cachedAuthorKey(pubkey), c.authorVerify)
 	if !ok {
 		return
 	}
@@ -86,31 +84,31 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 	if c.matchesAny(content, c.mutesCompiled) || (len(c.filtersCompiled) > 0 && !c.matchesAny(content, c.filtersCompiled)) {
 		return
 	}
-	nick, short := "", ev.PubKey[:4]
+	nick, short := "", pubkey[:4]
 	if tag := ev.Tags.Find("n"); len(tag) > 1 {
 		if text := strings.TrimSpace(sanitizeString(truncateString(tag[1], 64))); text != "" {
 			nick = text
 		}
-		short = safeSuffix(ev.PubKey, 4)
+		short = safeSuffix(pubkey, 4)
 	}
 	// A usable n tag supplies the display name; only fall back to the generated
 	// name when it did not, instead of always paying for the formatting.
 	if nick == "" {
-		nick = npubToTokiPona(ev.PubKey)
+		nick = npubToTokiPona(pubkey)
 	}
-	previous, known := c.userContext.Peek(ev.PubKey)
+	previous, known := c.userContext.Peek(pubkey)
 	recipientUnchanged := known && previous.nick == nick && previous.chat == chat && previous.shortPubKey == short
-	c.userContext.Add(ev.PubKey, userContext{nick: nick, chat: chat, shortPubKey: short, authorKey: authorKey})
-	own := c.retiredKeys.Contains(ev.PubKey)
+	c.userContext.Add(pubkey, userContext{nick: nick, chat: chat, shortPubKey: short, authorKey: authorKey})
+	own := c.retiredKeys.Contains(pubkey)
 	for _, session := range c.chatKeys {
-		if session.pubKey == ev.PubKey {
+		if session.pubKey == pubkey {
 			own = true
 			break
 		}
 	}
 	c.emit(DisplayEvent{Type: "NEW_MESSAGE", Timestamp: time.Unix(int64(ev.CreatedAt), 0).Format("15:04:05"), Nick: nick,
-		FullPubKey: ev.PubKey, ShortPubKey: short, IsOwnMessage: own, RecipientUnchanged: recipientUnchanged,
-		Content: content, ID: safeSuffix(ev.ID, 4), Chat: chat, RelayURL: relayURL})
+		FullPubKey: pubkey, ShortPubKey: short, IsOwnMessage: own, RecipientUnchanged: recipientUnchanged,
+		Content: content, ID: safeSuffix(ev.ID.Hex(), 4), Chat: chat, RelayURL: relayURL})
 }
 
 const maxContentBytes = 16 << 10
@@ -272,13 +270,13 @@ func (c *client) publishMessageInView(message, viewName, defaultChat, expectedCh
 	job := publishJob{key: session.privKey, signer: signer, chat: chat, difficulty: c.effectivePoWForChat(chat)}
 	nick := session.nick
 	if nick == "" {
-		nick = npubToTokiPona(pk)
+		nick = npubToTokiPona(pk.Hex())
 	}
 	kind, tag := ephChatKind, "d"
 	if isGeohashName(chat) {
 		kind, tag = geoChatKind, "g"
 	}
-	job.event = nostr.Event{PubKey: pk, Kind: kind, CreatedAt: nostr.Now(), Content: message, Tags: nostr.Tags{{tag, chat}, {"n", nick}}}
+	job.event = nostr.Event{PubKey: pk, Kind: nostr.Kind(kind), CreatedAt: nostr.Now(), Content: message, Tags: nostr.Tags{{tag, chat}, {"n", nick}}}
 	if target != "" {
 		job.event.Tags = append(job.event.Tags, nostr.Tag{"p", target})
 	}
@@ -363,9 +361,9 @@ func executePublish(ctx context.Context, job publishJob) publishResult {
 				}
 			} else {
 				event.Tags[len(event.Tags)-1][1] = strconv.FormatUint(nonce, 10)
-				digest = sha256.Sum256(event.Serialize())
+				digest = canonicalEventID(&event)
 			}
-			if countLeadingZeroBitsDigest(digest) >= job.difficulty {
+			if nip13.Difficulty(digest) >= job.difficulty {
 				event.Tags[len(event.Tags)-1][1] = strconv.FormatUint(nonce, 10)
 				break
 			}
@@ -431,11 +429,11 @@ func executePublish(ctx context.Context, job publishJob) publishResult {
 		if failure == "" {
 			failure = "Relays are unavailable or busy"
 		}
-		result.message = fmt.Sprintf("Chat %q: Event %s acknowledged by 0/%d relays. Reason: %q. No automatic resend.", job.chat, safeSuffix(event.ID, 4), len(job.relays), failure)
+		result.message = fmt.Sprintf("Chat %q: Event %s acknowledged by 0/%d relays. Reason: %q. No automatic resend.", job.chat, safeSuffix(event.ID.Hex(), 4), len(job.relays), failure)
 		return result
 	}
 	result.kind = "STATUS"
-	result.message = fmt.Sprintf("Chat %q: Event %s acknowledged by %d/%d relays.", job.chat, safeSuffix(event.ID, 4), result.accepted, len(job.relays))
+	result.message = fmt.Sprintf("Chat %q: Event %s acknowledged by %d/%d relays.", job.chat, safeSuffix(event.ID.Hex(), 4), result.accepted, len(job.relays))
 	if result.accepted < len(job.relays) {
 		result.kind = "WARN"
 		result.message += " Other relay acknowledgements are unconfirmed. No automatic resend."

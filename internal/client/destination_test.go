@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nbd-wtf/go-nostr"
+	"fiatjaf.com/nostr"
 )
 
 // groupDestinationClient seeds an active mixed group (one named chat and one
@@ -16,9 +16,8 @@ func groupDestinationClient(t *testing.T, pow int) (*client, chan DisplayEvent) 
 	t.Helper()
 	c, events := testClient(t)
 	for _, chat := range []string{"lobby", "u33dc"} {
-		key := nostr.GeneratePrivateKey()
-		pk, _ := nostr.GetPublicKey(key)
-		c.chatKeys[chat] = chatSession{privKey: key, pubKey: pk, nick: "sender-" + chat}
+		sk := nostr.Generate()
+		c.chatKeys[chat] = chatSession{privKey: sk.Hex(), pubKey: sk.Public().Hex(), nick: "sender-" + chat}
 	}
 	c.config.Views = []View{
 		{Name: "lobby"},
@@ -82,7 +81,7 @@ func TestSendToExplicitGroupDestinationSelectsWireFormatAndRelays(t *testing.T) 
 	cases := []struct {
 		name     string
 		chat     string
-		kind     int
+		kind     nostr.Kind
 		tag      string
 		wantURLs []string
 	}{
@@ -100,7 +99,7 @@ func TestSendToExplicitGroupDestinationSelectsWireFormatAndRelays(t *testing.T) 
 				t.Fatalf("destination tag/kind = %v/%d, want %s/%d", job.event.Tags, job.event.Kind, tt.tag, tt.kind)
 			}
 			session := c.chatKeys[tt.chat]
-			if job.key != session.privKey || job.event.PubKey != session.pubKey || job.event.Tags.Find("n")[1] != session.nick {
+			if job.key != session.privKey || job.event.PubKey.Hex() != session.pubKey || job.event.Tags.Find("n")[1] != session.nick {
 				t.Fatal("group send did not use the destination chat's session identity")
 			}
 			if job.event.Content != "hello group" {
@@ -157,7 +156,7 @@ func TestMentionOverridesExplicitDestination(t *testing.T) {
 		if job.chat != "u33dc" || job.event.Kind != geoChatKind || job.event.Tags.Find("g")[1] != "u33dc" {
 			t.Fatal("mention did not override the explicit destination")
 		}
-		if session := c.chatKeys["u33dc"]; job.key != session.privKey || job.event.PubKey != session.pubKey || job.event.Tags.Find("n")[1] != session.nick {
+		if session := c.chatKeys["u33dc"]; job.key != session.privKey || job.event.PubKey.Hex() != session.pubKey || job.event.Tags.Find("n")[1] != session.nick {
 			t.Fatal("mention did not select the overridden chat's sender")
 		}
 		if tag := job.event.Tags.Find("p"); tag == nil || tag[1] != fullKey {
@@ -335,7 +334,7 @@ func TestQueuedExplicitDestinationIsImmutableAfterFocusChange(t *testing.T) {
 	if job.chat != "u33dc" || job.event.Tags.Find("g")[1] != "u33dc" {
 		t.Fatal("queued job changed its destination with the active view")
 	}
-	if job.key != session.privKey || job.event.PubKey != session.pubKey {
+	if job.key != session.privKey || job.event.PubKey.Hex() != session.pubKey {
 		t.Fatal("queued job changed its signing identity")
 	}
 	if tag := job.event.Tags.Find("p"); tag == nil || tag[1] != strings.Repeat("b", 60)+"cafe" {

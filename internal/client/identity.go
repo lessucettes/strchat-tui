@@ -1,6 +1,6 @@
 package client
 
-import "github.com/nbd-wtf/go-nostr"
+import "fiatjaf.com/nostr"
 
 // Chat identities belong to this run, never to a view or a configuration file.
 // The owner prepares them before publishing state; previews only read them.
@@ -16,7 +16,7 @@ func (c *client) ensureViewIdentities(view *View) {
 		if _, exists := c.chatKeys[chat]; exists || chat == "" {
 			continue
 		}
-		key := nostr.GeneratePrivateKey()
+		key := nostr.Generate().Hex()
 		// Parse the key and derive its public key once. The immutable signer is
 		// captured by queued publishes and socket AUTH snapshots instead of
 		// re-decoding and re-deriving the same secret per event.
@@ -24,7 +24,7 @@ func (c *client) ensureViewIdentities(view *View) {
 		if err != nil {
 			continue
 		}
-		pubkey := signer.pubKey
+		pubkey := signer.pubKey.Hex()
 		nick := c.config.Nick
 		if nick == "" {
 			nick = npubToTokiPona(pubkey)

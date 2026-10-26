@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"fiatjaf.com/nostr"
 	"github.com/coder/websocket"
 	"github.com/gdamore/tcell/v2"
-	"github.com/nbd-wtf/go-nostr"
 
 	"github.com/lessucettes/strchat-tui/internal/client"
 )
@@ -23,7 +23,8 @@ import (
 // Both members are named chats: geographic wire tags are covered in client tests
 // with inert relay workers, without opening the embedded public geo catalogs.
 func TestGroupConversationEndToEndLoopback(t *testing.T) {
-	peerKey := nostr.GeneratePrivateKey()
+	peerSecret := nostr.Generate()
+	peerKey := peerSecret.Public().Hex()
 	published := make(chan nostr.Event, 8)
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -61,7 +62,7 @@ func TestGroupConversationEndToEndLoopback(t *testing.T) {
 				for _, chat := range []string{"coffee", "lobby"} {
 					ev := nostr.Event{CreatedAt: nostr.Now(), Kind: 23333, Content: "peer in " + chat,
 						Tags: nostr.Tags{{"d", chat}, {"n", "peer"}}}
-					if ev.Sign(peerKey) != nil || !write([]any{"EVENT", subscription, ev}) {
+					if ev.Sign(peerSecret) != nil || !write([]any{"EVENT", subscription, ev}) {
 						return
 					}
 				}
@@ -134,15 +135,15 @@ func TestGroupConversationEndToEndLoopback(t *testing.T) {
 		s.ui.input.SetText("plain message")
 	})
 	s.key(tcell.KeyEnter, 0, tcell.ModNone)
-	var coffeePK string
+	var coffeePK nostr.PubKey
 	select {
 	case event := <-published:
 		coffeePK = event.PubKey
 		if event.Kind != 23333 || event.Tags.Find("d")[1] != "coffee" || event.Content != "plain message" {
 			t.Fatalf("wrong published message: kind %d tags %v content %q", event.Kind, event.Tags, event.Content)
 		}
-		if ok, err := event.CheckSignature(); err != nil || !ok {
-			t.Fatalf("wire event is not signed: %v", err)
+		if !event.VerifySignature() {
+			t.Fatal("wire event is not signed")
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("plain group message never reached the loopback relay")
@@ -158,8 +159,8 @@ func TestGroupConversationEndToEndLoopback(t *testing.T) {
 		if event.Tags.Find("d")[1] != "lobby" || event.Content != "command destination" || len(event.Tags.Find("p")) != 0 || event.PubKey == coffeePK {
 			t.Fatal("command-selected destination did not control the signed ordinary send")
 		}
-		if ok, err := event.CheckSignature(); err != nil || !ok {
-			t.Fatalf("command-selected event is not signed: %v", err)
+		if !event.VerifySignature() {
+			t.Fatal("command-selected event is not signed")
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("command-selected message never reached the loopback relay")
@@ -168,7 +169,7 @@ func TestGroupConversationEndToEndLoopback(t *testing.T) {
 	waitFor(t, 5*time.Second, func() bool {
 		return s.matches(func() bool { return s.ui.conversationChat(s.ui.snapshot()) == "coffee" })
 	})
-	peerPK, _ := nostr.GetPublicKey(peerKey)
+	peerPK := peerKey
 	s.onLoop(func() { s.ui.input.SetText("@peer#" + peerPK + " reply") })
 	t.Cleanup(func() {
 		if t.Failed() {
@@ -192,8 +193,8 @@ func TestGroupConversationEndToEndLoopback(t *testing.T) {
 		if event.PubKey == coffeePK {
 			t.Fatal("different group members shared a signing identity")
 		}
-		if ok, err := event.CheckSignature(); err != nil || !ok {
-			t.Fatalf("mention event is not signed: %v", err)
+		if !event.VerifySignature() {
+			t.Fatal("mention event is not signed")
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("group mention never reached the loopback relay")

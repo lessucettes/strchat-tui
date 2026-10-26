@@ -1,8 +1,7 @@
 package client
 
 import (
-	"strings"
-
+	"fiatjaf.com/nostr"
 	lru "github.com/hashicorp/golang-lru/v2"
 	"gitlab.com/yawning/secp256k1-voi/secec/bitcoin"
 )
@@ -14,22 +13,22 @@ import (
 const authorVerifyCacheSize = 512
 
 // authorVerifyCache retains wNAF tables for authors whose signatures already
-// validated. Entries are keyed by the exact event public-key string and are
+// validated. Entries are keyed by the exact typed event public key and are
 // never mutated after insertion; the table itself carries an owner label
 // derived inside the bitcoin package from the parsed key, so a cache hit cannot
 // be redirected to a different author.
 type authorVerifyCache struct {
-	tables *lru.Cache[string, *bitcoin.AuthorVerifyTable]
+	tables *lru.Cache[nostr.PubKey, *bitcoin.AuthorVerifyTable]
 }
 
 func newAuthorVerifyCache(size int) *authorVerifyCache {
-	tables, _ := lru.New[string, *bitcoin.AuthorVerifyTable](size)
+	tables, _ := lru.New[nostr.PubKey, *bitcoin.AuthorVerifyTable](size)
 	return &authorVerifyCache{tables: tables}
 }
 
 // table returns the retained table for pubkey, or nil. The caller must still
 // pass the parsed key to VerifyWithTable, which re-checks the key binding.
-func (c *authorVerifyCache) table(pubkey string) *bitcoin.AuthorVerifyTable {
+func (c *authorVerifyCache) table(pubkey nostr.PubKey) *bitcoin.AuthorVerifyTable {
 	if c == nil {
 		return nil
 	}
@@ -40,14 +39,14 @@ func (c *authorVerifyCache) table(pubkey string) *bitcoin.AuthorVerifyTable {
 	return tbl
 }
 
-// retain stores a table built from an already-verified key. pubkey is cloned so
-// the cache never keeps a larger caller-owned string alive, and the entry is
-// immutable after this call.
-func (c *authorVerifyCache) retain(pubkey string, key *bitcoin.SchnorrPublicKey) {
+// retain stores a table built from an already-verified key. The typed array
+// key owns its bytes, so no string copy is needed; the entry is immutable after
+// this call.
+func (c *authorVerifyCache) retain(pubkey nostr.PubKey, key *bitcoin.SchnorrPublicKey) {
 	if c == nil {
 		return
 	}
-	c.tables.Add(strings.Clone(pubkey), bitcoin.NewAuthorVerifyTable(key))
+	c.tables.Add(pubkey, bitcoin.NewAuthorVerifyTable(key))
 }
 
 func (c *authorVerifyCache) len() int {

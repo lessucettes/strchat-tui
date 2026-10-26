@@ -19,8 +19,8 @@ import (
 	"testing"
 	"time"
 
+	"fiatjaf.com/nostr"
 	gorillaws "github.com/gorilla/websocket"
-	"github.com/nbd-wtf/go-nostr"
 )
 
 // relayPingPeer is a loopback relay that answers a ping only after writing a burst

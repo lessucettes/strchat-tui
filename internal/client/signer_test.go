@@ -2,11 +2,13 @@ package client
 
 import (
 	"context"
+	"crypto/sha256"
 	"strings"
 	"sync"
 	"testing"
 
-	"github.com/nbd-wtf/go-nostr"
+	"fiatjaf.com/nostr"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 )
 
 var signerTestKeys = []string{
@@ -16,13 +18,14 @@ var signerTestKeys = []string{
 	"0340034003400340034003400340034003400340034003400340034003400340",
 }
 
-func TestSessionSignerMatchesGoNostrSign(t *testing.T) {
+func TestSessionSignerMatchesNostrSign(t *testing.T) {
 	rng := &randReader{}
 	for ki, key := range signerTestKeys {
 		signer, err := newSessionSigner(key)
 		if err != nil {
 			t.Fatalf("key %d: %v", ki, err)
 		}
+		secret := parseTest32Hex(t, key)
 		for i := range 12 {
 			base := nostr.Event{
 				Kind:      ephChatKind,
@@ -31,7 +34,7 @@ func TestSessionSignerMatchesGoNostrSign(t *testing.T) {
 				Tags:      nostr.Tags{{"d", "lobby"}, {"n", "alice"}},
 			}
 			if i%4 == 0 {
-				base.Tags = nil // go-nostr normalizes nil tags to empty
+				base.Tags = nil // nostr.Event.Sign normalizes nil tags to empty
 			}
 			if i%5 == 0 {
 				base.Content = "héllo 世界\n\t" + base.Content
@@ -40,8 +43,8 @@ func TestSessionSignerMatchesGoNostrSign(t *testing.T) {
 				base.Tags = append(base.Tags, nostr.Tag{"p", strings.Repeat("a", 64)})
 			}
 			legacy := base
-			if err := legacy.Sign(key); err != nil {
-				t.Fatalf("legacy sign: %v", err)
+			if err := legacy.Sign(secret); err != nil {
+				t.Fatalf("reference sign: %v", err)
 			}
 			modern := base
 			if err := signer.sign(&modern); err != nil {
@@ -64,11 +67,83 @@ func TestNewSessionSignerRejectsInvalidKeys(t *testing.T) {
 		"long":        strings.Repeat("0", 66),
 		"non-hex":     strings.Repeat("z", 64),
 		"zero-scalar": strings.Repeat("0", 64),
+		"group-order": "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141",
 	}
 	for name, key := range cases {
 		t.Run(name, func(t *testing.T) {
 			if _, err := newSessionSigner(key); err == nil {
 				t.Fatal("accepted an invalid signing key")
+			}
+		})
+	}
+}
+
+// TestControlBytesPreserveLegacyCanonicalSerialization pins the NIP-01 wire
+// bytes for uncommon JSON control characters independently of the pinned
+// library. Upstream leaves bytes such as \b, \f and \x01 raw in Serialize and
+// GetID; the legacy encoder escaped them as \b, \f and \u00xx. Signing and
+// verification must keep producing the IDs and signatures peers accept, so the
+// expected serialization below is written out rather than recalculated from the
+// implementation. BTCEC verifies the signature directly, avoiding the library's
+// equally affected VerifySignature path.
+func TestControlBytesPreserveLegacyCanonicalSerialization(t *testing.T) {
+	const pubKeyHex = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+	signer, err := newSessionSigner(strings.Repeat("0", 63) + "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name    string
+		content string
+		tags    nostr.Tags
+		wire    string
+	}{
+		{
+			name:    "content-controls",
+			content: "bell\bform\ffeed\x1fnul\x00end",
+			tags:    nostr.Tags{{"d", "lobby"}},
+			wire:    `[0,"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",1700000000,23333,[["d","lobby"]],"bell\bform\ffeed\u001fnul\u0000end"]`,
+		},
+		{
+			name:    "tag-controls",
+			content: "plain",
+			tags:    nostr.Tags{{"d", "lobby"}, {"x", "tag\b\x1fend"}},
+			wire:    `[0,"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",1700000000,23333,[["d","lobby"],["x","tag\b\u001fend"]],"plain"]`,
+		},
+		{
+			name:    "content-and-tag-controls",
+			content: "bell\bform\ffeed\x1fnul\x00end",
+			tags:    nostr.Tags{{"d", "lobby"}, {"x", "tag\b\x1fend"}},
+			wire:    `[0,"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",1700000000,23333,[["d","lobby"],["x","tag\b\u001fend"]],"bell\bform\ffeed\u001fnul\u0000end"]`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			expectedID := nostr.ID(sha256.Sum256([]byte(tc.wire)))
+			ev := nostr.Event{CreatedAt: 1700000000, Kind: ephChatKind, Tags: tc.tags, Content: tc.content}
+			if err := signer.sign(&ev); err != nil {
+				t.Fatal(err)
+			}
+			if ev.PubKey.Hex() != pubKeyHex {
+				t.Fatalf("pubkey = %s, want %s", ev.PubKey.Hex(), pubKeyHex)
+			}
+			if ev.ID != expectedID {
+				t.Fatalf("id = %s, want legacy canonical %s", ev.ID.Hex(), expectedID.Hex())
+			}
+			pub, err := schnorr.ParsePubKey(ev.PubKey[:])
+			if err != nil {
+				t.Fatal(err)
+			}
+			sig, err := schnorr.ParseSignature(ev.Sig[:])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !sig.Verify(expectedID[:], pub) {
+				t.Fatal("signature does not cover the legacy canonical ID")
+			}
+			author, digest, ok := verifyEventDigest(&ev, nil)
+			if !ok || digest != [32]byte(expectedID) || author == nil || author.pubKey != ev.PubKey {
+				t.Fatal("verification rejected a signature over the legacy canonical ID")
 			}
 		})
 	}
@@ -81,14 +156,14 @@ func TestChatSessionSigningIdentityValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A session that predates the cached signer is validated lazily.
-	if got, err := (chatSession{privKey: key, pubKey: signer.pubKey}).signingIdentity(); err != nil || got.pubKey != signer.pubKey {
+	if got, err := (chatSession{privKey: key, pubKey: signer.pubKey.Hex()}).signingIdentity(); err != nil || got.pubKey != signer.pubKey {
 		t.Fatalf("lazy signer: %v", err)
 	}
 	other, err := newSessionSigner(signerTestKeys[1])
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (chatSession{privKey: key, pubKey: other.pubKey}).signingIdentity(); err == nil {
+	if _, err := (chatSession{privKey: key, pubKey: other.pubKey.Hex()}).signingIdentity(); err == nil {
 		t.Fatal("accepted a key that does not match the session public key")
 	}
 	if _, err := (chatSession{}).signingIdentity(); err == nil {
@@ -138,7 +213,7 @@ func TestQueuedPublishKeepsCapturedSignerAfterIdentityRemoval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.chatKeys["lobby"] = chatSession{privKey: key, pubKey: signer.pubKey, nick: "alice", signer: signer}
+	c.chatKeys["lobby"] = chatSession{privKey: key, pubKey: signer.pubKey.Hex(), nick: "alice", signer: signer}
 	relay := &managedRelay{url: "local", connected: true, chats: []string{"lobby"}, publish: make(chan relayPublish, 1)}
 	c.relays["local"] = relay
 	c.publishMessage("hello")
@@ -170,15 +245,16 @@ func TestRelayAuthReusesValidatedSigner(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		first, err := a.signerFor(signer.pubKey, key)
+		pubkey := signer.pubKey.Hex()
+		first, err := a.signerFor(pubkey, key)
 		if err != nil {
 			t.Fatal(err)
 		}
-		second, err := a.signerFor(signer.pubKey, key)
+		second, err := a.signerFor(pubkey, key)
 		if err != nil || first != second {
 			t.Fatal("AUTH did not reuse the validated session signer")
 		}
-		if _, err := a.signerFor(signer.pubKey, signerTestKeys[1]); err == nil {
+		if _, err := a.signerFor(pubkey, signerTestKeys[1]); err == nil {
 			t.Fatal("accepted an AUTH key that does not match its public key")
 		}
 		a.prune(map[string]string{})

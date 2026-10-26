@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nbd-wtf/go-nostr"
+	"fiatjaf.com/nostr"
 )
 
 func testClient(t testing.TB) (*client, chan DisplayEvent) {
@@ -20,7 +20,7 @@ func testClient(t testing.TB) (*client, chan DisplayEvent) {
 func signedEvent(t testing.TB, content string) *nostr.Event {
 	t.Helper()
 	e := &nostr.Event{Kind: ephChatKind, CreatedAt: nostr.Now(), Tags: nostr.Tags{{"d", "lobby"}, {"n", "alice"}}, Content: content}
-	if err := e.Sign(strings.Repeat("0", 63) + "1"); err != nil {
+	if err := e.Sign(nostr.MustSecretKeyFromHex(strings.Repeat("0", 63) + "1")); err != nil {
 		t.Fatal(err)
 	}
 	return e
@@ -30,7 +30,7 @@ func TestProcessEventRejectsUnrelatedTraffic(t *testing.T) {
 	c, events := testClient(t)
 	e := signedEvent(t, "not in the active chat")
 	e.Tags[0][1] = "other"
-	if err := e.Sign(strings.Repeat("0", 63) + "1"); err != nil {
+	if err := e.Sign(nostr.MustSecretKeyFromHex(strings.Repeat("0", 63) + "1")); err != nil {
 		t.Fatal(err)
 	}
 	c.processEvent(e, "local")
@@ -47,9 +47,8 @@ func TestProcessEventValidationAndDedup(t *testing.T) {
 		name   string
 		mutate func(*nostr.Event)
 	}{
-		{"bad-id", func(e *nostr.Event) { e.ID = strings.Repeat("f", 64) }},
-		{"bad-signature", func(e *nostr.Event) { e.Sig = strings.Repeat("0", 128) }},
-		{"short-pubkey", func(e *nostr.Event) { e.PubKey = "1" }},
+		{"bad-id", func(e *nostr.Event) { e.ID = nostr.MustIDFromHex(strings.Repeat("f", 64)) }},
+		{"bad-signature", func(e *nostr.Event) { e.Sig = [64]byte{} }},
 		{"wrong-kind", func(e *nostr.Event) { e.Kind = 1 }},
 		{"wrong-tag", func(e *nostr.Event) { e.Tags = nostr.Tags{{"g", "lobby"}} }},
 		{"future", func(e *nostr.Event) { e.CreatedAt = nostr.Now() + 3600 }},
@@ -65,10 +64,10 @@ func TestProcessEventValidationAndDedup(t *testing.T) {
 			bad.Tags = append(nostr.Tags(nil), original.Tags...)
 			tt.mutate(&bad)
 			switch tt.name {
-			case "bad-id", "bad-signature", "short-pubkey":
+			case "bad-id", "bad-signature":
 			default:
 				// Keep policy probes signed so an invalid ID cannot mask a missing guard.
-				if err := bad.Sign(strings.Repeat("0", 63) + "1"); err != nil {
+				if err := bad.Sign(nostr.MustSecretKeyFromHex(strings.Repeat("0", 63) + "1")); err != nil {
 					t.Fatal(err)
 				}
 			}

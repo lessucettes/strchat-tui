@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"fiatjaf.com/nostr"
 	lru "github.com/hashicorp/golang-lru/v2"
-	"github.com/nbd-wtf/go-nostr"
 )
 
 // Run is the only owner of configuration, identities, caches and relay handles.
@@ -41,7 +41,7 @@ type client struct {
 	incoming                       chan relayEvent
 	outgoing                       chan publishJob
 	results                        chan publishResult
-	seenCache                      *lru.Cache[string, bool]
+	seenCache                      *lru.Cache[nostr.ID, bool]
 	userContext                    *lru.Cache[string, userContext]
 	authorVerify                   *authorVerifyCache
 	filtersCompiled, mutesCompiled []compiledPattern
@@ -70,7 +70,7 @@ func NewWithOptions(actions <-chan UserAction, events chan<- DisplayEvent, optio
 
 func newClient(cfg *config, actions <-chan UserAction, events chan<- DisplayEvent) *client {
 	ctx, cancel := context.WithCancel(context.Background())
-	seen, _ := lru.New[string, bool](seenCacheSize)
+	seen, _ := lru.New[nostr.ID, bool](seenCacheSize)
 	users, _ := lru.New[string, userContext](userContextCacheSize)
 	retries, _ := lru.New[string, relayRetry](relayRetryCacheSize)
 	retired, _ := lru.New[string, bool](seenCacheSize)

@@ -9,7 +9,7 @@ import (
 	"hash"
 	"strconv"
 
-	"github.com/nbd-wtf/go-nostr"
+	"fiatjaf.com/nostr"
 )
 
 // nonceTemplate identifies an editable decimal slot in the authoritative
@@ -24,7 +24,7 @@ func newNonceTemplate(event *nostr.Event) (*nonceTemplate, error) {
 	if last < 0 || len(event.Tags[last]) != 3 || event.Tags[last][0] != "nonce" || event.Tags[last][1] != "0" {
 		return nil, errors.New("mining requires a final zero nonce tag")
 	}
-	canonical := event.Serialize()
+	canonical := serializeCanonicalEvent(event)
 	decoder := json.NewDecoder(bytes.NewReader(canonical))
 	if _, err := decoder.Token(); err != nil {
 		return nil, err

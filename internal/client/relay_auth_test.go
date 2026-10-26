@@ -1,16 +1,46 @@
 package client
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"fiatjaf.com/nostr"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/coder/websocket"
-	"github.com/nbd-wtf/go-nostr"
 )
+
+// verifyAuthProofReference rebuilds the NIP-01 ID with stdlib JSON and checks
+// the BIP-340 signature independently of the client's verification path. The
+// fixture challenge contains a raw NUL, which the pinned library's own
+// VerifySignature cannot reserialize; the reference encoder escapes it. These
+// fixtures exclude U+2028/U+2029, which stdlib JSON always escapes.
+func verifyAuthProofReference(event *nostr.Event) bool {
+	var canonical bytes.Buffer
+	encoder := json.NewEncoder(&canonical)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode([]any{0, event.PubKey.Hex(), int64(event.CreatedAt), int(event.Kind), event.Tags, event.Content}); err != nil {
+		return false
+	}
+	digest := sha256.Sum256(bytes.TrimSuffix(canonical.Bytes(), []byte{'\n'}))
+	if nostr.ID(digest) != event.ID {
+		return false
+	}
+	pk, err := schnorr.ParsePubKey(event.PubKey[:])
+	if err != nil {
+		return false
+	}
+	sig, err := schnorr.ParseSignature(event.Sig[:])
+	if err != nil {
+		return false
+	}
+	return sig.Verify(digest[:], pk)
+}
 
 // checkAuthProof checks the actual wire proof, not just the AUTH label.
 func checkAuthProof(ts *relayTestServer, frame []json.RawMessage, challenge string) (nostr.Event, bool) {
@@ -20,12 +50,12 @@ func checkAuthProof(ts *relayTestServer, frame []json.RawMessage, challenge stri
 		ts.t.Errorf("expected an AUTH proof, got %s", mustMarshal(frame))
 		return event, false
 	}
-	valid, err := event.CheckSignature()
+	valid := verifyAuthProofReference(&event)
 	relay, nonce := event.Tags.Find("relay"), event.Tags.Find("challenge")
-	if err != nil || !valid || event.ID != event.GetID() || event.Kind != nostr.KindClientAuthentication || event.Content != "" ||
+	if !valid || event.Kind != nostr.KindClientAuthentication || event.Content != "" ||
 		len(event.Tags) != 2 || len(relay) != 2 || relay[1] != ts.url ||
 		len(nonce) != 2 || nonce[1] != challenge || event.CreatedAt < nostr.Now()-10 || event.CreatedAt > nostr.Now()+10 {
-		ts.t.Errorf("invalid AUTH proof: kind=%d signature=%v error=%v", event.Kind, valid, err)
+		ts.t.Errorf("invalid AUTH proof: kind=%d signature=%v", event.Kind, valid)
 		return event, false
 	}
 	return event, true
@@ -37,12 +67,12 @@ func TestRelayAuthResubscribesGroupAndUsesFreshReconnectChallenge(t *testing.T) 
 		if !relayTestWaitREQ(ts, conn) {
 			return
 		}
-		challenge := fmt.Sprintf("challenge-%d\x00\"exact", index)
+		challenge := fmt.Sprintf("challenge-%d\x00\"<exact>&", index)
 		if !relayWriteJSON(ts, conn, []any{"AUTH", challenge}) ||
 			!relayWriteJSON(ts, conn, relayClosedFrame("chat", "auth-required: authenticate both chat identities")) {
 			return
 		}
-		keys := make(map[string]bool)
+		keys := make(map[nostr.PubKey]bool)
 		for len(keys) < 2 {
 			frame, ok := relayNextFrame(ts, conn)
 			if !ok {
@@ -79,7 +109,7 @@ func TestRelayAuthResubscribesGroupAndUsesFreshReconnectChallenge(t *testing.T) 
 	cfg.ActiveViewName = "mixed"
 	h := startRelayHarness(t, cfg, nil)
 	h.waitMessage("coffee-2")
-	var firstKeys = make(map[string]bool)
+	var firstKeys = make(map[nostr.PubKey]bool)
 	for i := range 4 {
 		select {
 		case proof := <-proofs:
@@ -134,7 +164,7 @@ func TestRelayAuthPublishRetryPreservesEventAndAcknowledgement(t *testing.T) {
 					t.Error("invalid initial EVENT")
 					return
 				}
-				if valid, err := original.CheckSignature(); err != nil || !valid {
+				if !original.VerifySignature() {
 					t.Error("initial EVENT has no valid signature")
 					return
 				}
@@ -144,7 +174,7 @@ func TestRelayAuthPublishRetryPreservesEventAndAcknowledgement(t *testing.T) {
 					!relayWriteJSON(ts, conn, []any{"AUTH", "write-challenge"}) {
 					return
 				}
-				keys := make(map[string]bool)
+				keys := make(map[nostr.PubKey]bool)
 				for len(keys) < 2 {
 					frame, ok = relayNextFrame(ts, conn)
 					if !ok {

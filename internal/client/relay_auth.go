@@ -2,13 +2,13 @@ package client
 
 import (
 	"context"
-
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
 
+	"fiatjaf.com/nostr"
 	"github.com/btcsuite/btcd/btcec/v2"
-	"github.com/nbd-wtf/go-nostr"
 )
 
 const (
@@ -86,8 +86,8 @@ func (a *relayAuth) send(ctx context.Context, conn relayConn, url string, keys m
 		if err := writeFrame(ctx, conn, []any{"AUTH", event}); err != nil {
 			return err
 		}
-		a.attempts[pubkey] = &relayAuthAttempt{id: event.ID}
-		a.pending[event.ID] = pubkey
+		a.attempts[pubkey] = &relayAuthAttempt{id: event.ID.Hex()}
+		a.pending[event.ID.Hex()] = pubkey
 	}
 	return nil
 }
@@ -101,7 +101,10 @@ func (a *relayAuth) signerFor(pubkey, key string) (*sessionSigner, error) {
 		// Fail closed if a later snapshot pairs the same public key label with
 		// a different secret, matching the old derive-and-compare behavior.
 		var raw [32]byte
-		if !decodeFixedHex(raw[:], key) {
+		if len(key) != hex.EncodedLen(len(raw)) {
+			return nil, errors.New("no valid chat identity for relay authentication")
+		}
+		if _, err := hex.Decode(raw[:], []byte(key)); err != nil {
 			return nil, errors.New("no valid chat identity for relay authentication")
 		}
 		// Match newSessionSigner's modulo-N normalization, including its
@@ -116,7 +119,7 @@ func (a *relayAuth) signerFor(pubkey, key string) (*sessionSigner, error) {
 		return signer, nil
 	}
 	signer, err := newSessionSigner(key)
-	if err != nil || signer.pubKey != pubkey {
+	if err != nil || signer.pubKey.Hex() != pubkey {
 		return nil, errors.New("no valid chat identity for relay authentication")
 	}
 	if a.signers == nil {

@@ -72,11 +72,11 @@ func assertGeoPublishedEvent(t *testing.T, relay *relayTestServer, content, chat
 	t.Helper()
 	select {
 	case event := <-relay.eventCh:
-		if event.Content != content || event.Kind != geoChatKind || event.Tags.GetFirst([]string{"g", chat}) == nil {
+		if event.Content != content || event.Kind != geoChatKind || event.Tags.FindWithValue("g", chat) == nil {
 			t.Fatalf("unexpected geo event: kind=%d content=%q tags=%v", event.Kind, event.Content, event.Tags)
 		}
-		if ok, err := event.CheckSignature(); err != nil || !ok {
-			t.Fatalf("invalid geo signature: %v", err)
+		if !event.VerifySignature() {
+			t.Fatal("invalid geo signature")
 		}
 	case <-time.After(transportWaitOp):
 		t.Fatalf("relay %s did not receive geo publication", relay.url)

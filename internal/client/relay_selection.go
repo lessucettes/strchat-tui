@@ -5,7 +5,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/nbd-wtf/go-nostr"
+	"fiatjaf.com/nostr"
 )
 
 // Retry history belongs to the client loop, not to a particular socket/view.

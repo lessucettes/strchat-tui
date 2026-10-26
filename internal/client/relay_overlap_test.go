@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"fiatjaf.com/nostr"
 	"github.com/coder/websocket"
-	"github.com/nbd-wtf/go-nostr"
 )
 
 func TestGeoFailoverKeepsBoundedSubscriptionOverlap(t *testing.T) {
@@ -105,7 +105,7 @@ func TestRelaySubscriptionUpdateKeepsRetainedChatWatermark(t *testing.T) {
 			worker.updates <- relaySubscription{chats: []string{"fourth", "lobby"},
 				since: map[string]nostr.Timestamp{"fourth": now, "lobby": now}}
 			frame := server.takeREQ()
-			var filters nostr.Filters
+			var filters []nostr.Filter
 			for _, raw := range frame[2:] {
 				var filter nostr.Filter
 				if err := json.Unmarshal(raw, &filter); err != nil {
@@ -116,7 +116,7 @@ func TestRelaySubscriptionUpdateKeepsRetainedChatWatermark(t *testing.T) {
 			// Filter-only probes: signatures are irrelevant to REQ matching.
 			retained := &nostr.Event{Kind: ephChatKind, CreatedAt: now - 5, Tags: nostr.Tags{{"d", "lobby"}}}
 			newcomer := &nostr.Event{Kind: ephChatKind, CreatedAt: now - 5, Tags: nostr.Tags{{"d", "fourth"}}}
-			if !filters.Match(retained) || filters.Match(newcomer) {
+			if !filtersMatch(filters, retained) || filtersMatch(filters, newcomer) {
 				t.Fatalf("subscription update lost per-chat recovery boundaries: %s", mustMarshal(frame))
 			}
 		})

@@ -34,8 +34,8 @@ import (
 	"testing"
 	"time"
 
+	"fiatjaf.com/nostr"
 	"github.com/coder/websocket"
-	"github.com/nbd-wtf/go-nostr"
 )
 
 const (
@@ -106,7 +106,7 @@ func drainRelayReports(t testing.TB, c *client) {
 }
 
 // signedChatEvent signs an event for the given chat with a fixed test key.
-func signedChatEvent(t testing.TB, key string, kind int, chat, content string, createdAt nostr.Timestamp, extra ...nostr.Tag) *nostr.Event {
+func signedChatEvent(t testing.TB, key string, kind nostr.Kind, chat, content string, createdAt nostr.Timestamp, extra ...nostr.Tag) *nostr.Event {
 	t.Helper()
 	tagKey := "d"
 	if kind == geoChatKind {
@@ -115,14 +115,14 @@ func signedChatEvent(t testing.TB, key string, kind int, chat, content string, c
 	tags := nostr.Tags{{tagKey, chat}, {"n", "alice"}}
 	tags = append(tags, extra...)
 	e := &nostr.Event{Kind: kind, CreatedAt: createdAt, Tags: tags, Content: content}
-	if err := e.Sign(key); err != nil {
+	if err := e.Sign(nostr.MustSecretKeyFromHex(key)); err != nil {
 		t.Fatalf("sign test event: %v", err)
 	}
 	return e
 }
 
 func relayEventFrame(subID string, ev *nostr.Event) []any { return []any{"EVENT", subID, ev} }
-func relayOKFrame(id string, accepted bool, reason string) []any {
+func relayOKFrame(id nostr.ID, accepted bool, reason string) []any {
 	return []any{"OK", id, accepted, reason}
 }
 func relayClosedFrame(subID, reason string) []any { return []any{"CLOSED", subID, reason} }
@@ -138,11 +138,17 @@ func freshChatEvent(ts *relayTestServer, key, chat string, seq int) *nostr.Event
 		Tags:      nostr.Tags{{"d", chat}, {"n", "peer"}},
 		Content:   fmt.Sprintf("%s-%d", chat, seq),
 	}
-	if err := ev.Sign(key); err != nil {
+	if err := ev.Sign(nostr.MustSecretKeyFromHex(key)); err != nil {
 		ts.t.Errorf("signing fresh event %d for %q: %v", seq, chat, err)
 		return nil
 	}
 	return ev
+}
+
+// filtersMatch mirrors a relay's OR-of-filters matching for fixtures that
+// script recovery history from the client's actual REQ frames.
+func filtersMatch(filters []nostr.Filter, event *nostr.Event) bool {
+	return slices.ContainsFunc(filters, func(filter nostr.Filter) bool { return filter.Matches(*event) })
 }
 
 // waitUntil polls cond until it holds or the timeout elapses.
@@ -934,7 +940,7 @@ func TestRelayRecoveryPreservesRetainedChatAfterGroupChange(t *testing.T) {
 					ts.t.Error("no outage message supplied to relay")
 					return
 				}
-				var filters nostr.Filters
+				var filters []nostr.Filter
 				for _, raw := range frame[2:] {
 					var filter nostr.Filter
 					if err := json.Unmarshal(raw, &filter); err != nil {
@@ -948,16 +954,16 @@ func TestRelayRecoveryPreservesRetainedChatAfterGroupChange(t *testing.T) {
 				if change == "switch_group" {
 					// Filter-only probe, not an event sent to the client.
 					oldNewcomer := nostr.Event{Kind: ephChatKind, CreatedAt: missed.CreatedAt, Tags: nostr.Tags{{"d", "fourth"}}}
-					if filters.Match(&oldNewcomer) {
+					if filtersMatch(filters, &oldNewcomer) {
 						ts.t.Error("newly joined fourth inherited another chat's recovery window")
 						return
 					}
 				}
-				if filters.Match(missed) && !relayWriteJSON(ts, conn, relayEventFrame("chat", missed)) {
+				if filtersMatch(filters, missed) && !relayWriteJSON(ts, conn, relayEventFrame("chat", missed)) {
 					return
 				}
 				live := freshChatEvent(ts, transportTestKey, "lobby", 1)
-				if live == nil || !filters.Match(live) {
+				if live == nil || !filtersMatch(filters, live) {
 					ts.t.Error("recovered subscription does not cover live lobby traffic")
 					return
 				}
@@ -1061,7 +1067,7 @@ func TestRelayRecoveryIncludesChatActivatedDuringCooldown(t *testing.T) {
 					}
 					return
 				}
-				var filters nostr.Filters
+				var filters []nostr.Filter
 				for _, raw := range frame[2:] {
 					var filter nostr.Filter
 					if err := json.Unmarshal(raw, &filter); err != nil {
@@ -1073,7 +1079,7 @@ func TestRelayRecoveryIncludesChatActivatedDuringCooldown(t *testing.T) {
 				select {
 				case events := <-history:
 					for _, event := range events {
-						if filters.Match(event) && !relayWriteJSON(ts, conn, relayEventFrame("chat", event)) {
+						if filtersMatch(filters, event) && !relayWriteJSON(ts, conn, relayEventFrame("chat", event)) {
 							return
 						}
 					}
@@ -1082,7 +1088,7 @@ func TestRelayRecoveryIncludesChatActivatedDuringCooldown(t *testing.T) {
 					return
 				}
 				live := freshChatEvent(ts, transportTestKey, "other", 1)
-				if live == nil || !filters.Match(live) {
+				if live == nil || !filtersMatch(filters, live) {
 					ts.t.Error("recovery does not cover live other traffic")
 					return
 				}
@@ -1169,7 +1175,7 @@ func TestRelayRecoveryRespectsReactivation(t *testing.T) {
 					if !strings.Contains(string(mustMarshal(frame)), "third") {
 						continue
 					}
-					var filters nostr.Filters
+					var filters []nostr.Filter
 					for _, raw := range frame[2:] {
 						var filter nostr.Filter
 						if err := json.Unmarshal(raw, &filter); err != nil {
@@ -1181,7 +1187,7 @@ func TestRelayRecoveryRespectsReactivation(t *testing.T) {
 					select {
 					case events := <-history:
 						for _, event := range events {
-							if filters.Match(event) && !relayWriteJSON(ts, conn, relayEventFrame("chat", event)) {
+							if filtersMatch(filters, event) && !relayWriteJSON(ts, conn, relayEventFrame("chat", event)) {
 								return
 							}
 						}
@@ -1190,7 +1196,7 @@ func TestRelayRecoveryRespectsReactivation(t *testing.T) {
 						return
 					}
 					live := freshChatEvent(ts, transportTestKey, "other", 99)
-					if live == nil || !filters.Match(live) {
+					if live == nil || !filtersMatch(filters, live) {
 						ts.t.Error("final subscription lacks live other traffic")
 						return
 					}
@@ -1528,7 +1534,7 @@ func TestRelayDropsMalformedDuplicateAndForgedTraffic(t *testing.T) {
 	tamperedContent := *alpha
 	tamperedContent.Content = "alpha content swapped after signing"
 	tamperedSig := *alpha
-	tamperedSig.Sig = strings.Repeat("a", 128)
+	tamperedSig.Sig[0] ^= 0xff
 	kindOne := signedChatEvent(t, transportTestKey, 1, "lobby", "wrong kind", nostr.Now())
 	wrongChat := signedChatEvent(t, transportTestKey, ephChatKind, "elsewhere", "wrong chat", nostr.Now())
 	future := signedChatEvent(t, transportTestKey, ephChatKind, "lobby", "future event", nostr.Now()+3600)
@@ -1803,7 +1809,7 @@ func TestStalledPeerCancellationIsBounded(t *testing.T) {
 	// cancellation, never as success.
 	answer := make(chan error, 1)
 	select {
-	case worker.publish <- relayPublish{ctx: context.Background(), event: nostr.Event{ID: strings.Repeat("c", 64)}, result: answer}:
+	case worker.publish <- relayPublish{ctx: context.Background(), event: nostr.Event{ID: nostr.MustIDFromHex(strings.Repeat("c", 64))}, result: answer}:
 	case <-time.After(transportWaitOp):
 		t.Fatal("publish request was not accepted by the stalled worker")
 	}

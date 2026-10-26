@@ -3,7 +3,7 @@ package client
 import (
 	"testing"
 
-	"github.com/nbd-wtf/go-nostr"
+	"fiatjaf.com/nostr"
 )
 
 func TestMessageRecipientMetadataChanges(t *testing.T) {
@@ -24,11 +24,11 @@ func TestMessageRecipientMetadataChanges(t *testing.T) {
 	} {
 		ev.Content += "."
 		ev.Tags = nostr.Tags{{"d", step.chat}, {"n", step.nick}}
-		if err := ev.Sign(signerTestKeys[0]); err != nil {
+		if err := ev.Sign(nostr.MustSecretKeyFromHex(signerTestKeys[0])); err != nil {
 			t.Fatal(err)
 		}
 		if step.forget {
-			c.userContext.Remove(ev.PubKey)
+			c.userContext.Remove(ev.PubKey.Hex())
 		}
 		c.processEvent(ev, "local")
 		select {

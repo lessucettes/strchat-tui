@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/nbd-wtf/go-nostr"
+	"fiatjaf.com/nostr"
 )
 
 func TestChatIdentityIsSharedAcrossViewsButNotChatsOrRuns(t *testing.T) {
@@ -26,7 +26,7 @@ func TestChatIdentityIsSharedAcrossViewsButNotChatsOrRuns(t *testing.T) {
 		c.setActiveView(view)
 		c.publishMessageInView("hello", view, "coffee", "coffee")
 		job := nextJob(t, c)
-		if job.key != coffee.privKey || job.event.PubKey != coffee.pubKey || job.event.Tags.Find("n")[1] != coffee.nick {
+		if job.key != coffee.privKey || job.event.PubKey.Hex() != coffee.pubKey || job.event.Tags.Find("n")[1] != coffee.nick {
 			t.Fatalf("view %q changed the coffee sender", view)
 		}
 	}

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nbd-wtf/go-nostr"
+	"fiatjaf.com/nostr"
 )
 
 // oldRelayEnvelope is the literal pre-spike production parse: a generic outer
@@ -96,7 +96,7 @@ func TestEnvelopeSplitMatchesRawMessage(t *testing.T) {
 		Tags:    nostr.Tags{{"d", "lobby"}, {"n", "peer"}, {"t", "two"}},
 		Content: strings.Repeat("ab \\\"quote\\\" \\u00e9 and more ", 40),
 	}
-	if err := event.Sign(transportTestKey); err != nil {
+	if err := event.Sign(nostr.MustSecretKeyFromHex(transportTestKey)); err != nil {
 		t.Fatal(err)
 	}
 	signed, err := json.Marshal(event)
@@ -172,6 +172,86 @@ func TestEnvelopeSplitMatchesRawMessage(t *testing.T) {
 	}
 	for _, data := range frames {
 		compareEnvelope(t, data)
+	}
+}
+
+// TestDecodeRelayEventRejectsWrappedChatKind pins the boundary that the
+// upstream decoder loses: Event.UnmarshalJSON narrows an int kind to uint16,
+// so 65536+23333 aliases to the chat kind and the original signature still
+// verifies. The strict decoder must reject the overflow, not admit it.
+func TestDecodeRelayEventRejectsWrappedChatKind(t *testing.T) {
+	event := &nostr.Event{Kind: ephChatKind, CreatedAt: nostr.Now(), Tags: nostr.Tags{{"d", "lobby"}}, Content: "wrapped kind"}
+	if err := event.Sign(nostr.MustSecretKeyFromHex(transportTestKey)); err != nil {
+		t.Fatal(err)
+	}
+	wire := wireEventFor(event)
+	wire.Kind = 1<<16 + ephChatKind
+	data, err := json.Marshal(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var aliased nostr.Event
+	if err := json.Unmarshal(data, &aliased); err != nil {
+		t.Fatalf("fixture is not accepted by the upstream decoder: %v", err)
+	}
+	if aliased.Kind != ephChatKind || !aliased.VerifySignature() {
+		t.Fatalf("fixture no longer demonstrates kind aliasing: kind=%d valid=%v", aliased.Kind, aliased.VerifySignature())
+	}
+	if decoded, err := decodeRelayEvent(data); err == nil {
+		t.Fatalf("wrapped kind decoded as %d instead of being rejected", decoded.Kind)
+	}
+}
+
+// TestDecodeRelayEventRejectsMissingNullAndWrongTypes covers structural wire
+// damage that canonical identity checks alone cannot see. Malformed hex and
+// uppercase spellings are covered by identity_validation_test.
+func TestDecodeRelayEventRejectsMissingNullAndWrongTypes(t *testing.T) {
+	event := &nostr.Event{Kind: ephChatKind, CreatedAt: nostr.Now(), Tags: nostr.Tags{{"d", "lobby"}}, Content: "wire shape"}
+	if err := event.Sign(nostr.MustSecretKeyFromHex(transportTestKey)); err != nil {
+		t.Fatal(err)
+	}
+	base, err := json.Marshal(wireEventFor(event))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		edit func(map[string]any)
+	}{
+		{"missing-id", func(w map[string]any) { delete(w, "id") }},
+		{"missing-pubkey", func(w map[string]any) { delete(w, "pubkey") }},
+		{"missing-sig", func(w map[string]any) { delete(w, "sig") }},
+		{"null-id", func(w map[string]any) { w["id"] = nil }},
+		{"null-pubkey", func(w map[string]any) { w["pubkey"] = nil }},
+		{"null-sig", func(w map[string]any) { w["sig"] = nil }},
+		{"numeric-id", func(w map[string]any) { w["id"] = 42 }},
+		{"object-pubkey", func(w map[string]any) { w["pubkey"] = map[string]any{"hex": "x"} }},
+		{"boolean-sig", func(w map[string]any) { w["sig"] = true }},
+		{"string-kind", func(w map[string]any) { w["kind"] = "23333" }},
+		{"string-created-at", func(w map[string]any) { w["created_at"] = "now" }},
+		{"object-tags", func(w map[string]any) { w["tags"] = map[string]any{"d": "lobby"} }},
+		{"numeric-tag-element", func(w map[string]any) { w["tags"] = []any{[]any{"d", 42}} }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var wire map[string]any
+			if err := json.Unmarshal(base, &wire); err != nil {
+				t.Fatal(err)
+			}
+			tc.edit(wire)
+			data, err := json.Marshal(wire)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if decoded, err := decodeRelayEvent(data); err == nil {
+				t.Fatalf("malformed wire event decoded as %+v", decoded)
+			}
+		})
+	}
+	for _, data := range []string{"null", "[]", `"event"`, "42", "{}"} {
+		if decoded, err := decodeRelayEvent([]byte(data)); err == nil {
+			t.Errorf("%s decoded as %+v", data, decoded)
+		}
 	}
 }
 

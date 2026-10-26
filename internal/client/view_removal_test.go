@@ -31,7 +31,7 @@ func TestDeletingViewActivatesRemainingChatIdentity(t *testing.T) {
 			c.publishMessage("hello from the fallback chat")
 			select {
 			case job := <-c.outgoing:
-				if job.key != session.privKey || job.event.PubKey != session.pubKey {
+				if job.key != session.privKey || job.event.PubKey.Hex() != session.pubKey {
 					t.Fatal("fallback publish did not capture the session identity")
 				}
 			default:

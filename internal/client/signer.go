@@ -1,13 +1,12 @@
 package client
 
 import (
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 
+	"fiatjaf.com/nostr"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
-	"github.com/nbd-wtf/go-nostr"
 )
 
 var errInvalidSignerKey = errors.New("invalid signing key")
@@ -21,19 +20,19 @@ var errInvalidSignerKey = errors.New("invalid signing key")
 // semantics. No secret is persisted or logged.
 type sessionSigner struct {
 	key    *btcec.PrivateKey
-	pubKey string // lowercase x-only hex, derived from key
+	pubKey nostr.PubKey // derived x-only key of key
 }
 
 func newSessionSigner(privKey string) (*sessionSigner, error) {
-	var raw [32]byte
-	if !decodeFixedHex(raw[:], privKey) {
+	raw, err := hex.DecodeString(privKey)
+	if err != nil || len(raw) != 32 {
 		return nil, errInvalidSignerKey
 	}
-	key, pub := btcec.PrivKeyFromBytes(raw[:])
+	key, pub := btcec.PrivKeyFromBytes(raw)
 	if key == nil || pub == nil || key.Key.IsZero() {
 		return nil, errInvalidSignerKey
 	}
-	return &sessionSigner{key: key, pubKey: hex.EncodeToString(schnorr.SerializePubKey(pub))}, nil
+	return &sessionSigner{key: key, pubKey: nostr.PubKey(pub.SerializeCompressed()[1:])}, nil
 }
 
 // sign mirrors nostr.Event.Sign's observable behavior (PubKey/ID/Sig fields,
@@ -46,13 +45,12 @@ func (s *sessionSigner) sign(ev *nostr.Event) error {
 		ev.Tags = make(nostr.Tags, 0)
 	}
 	ev.PubKey = s.pubKey
-	digest := sha256.Sum256(ev.Serialize())
-	sig, err := schnorr.Sign(s.key, digest[:], schnorr.FastSign())
+	ev.ID = canonicalEventID(ev)
+	sig, err := schnorr.Sign(s.key, ev.ID[:], schnorr.FastSign())
 	if err != nil {
 		return err
 	}
-	ev.ID = hex.EncodeToString(digest[:])
-	ev.Sig = hex.EncodeToString(sig.Serialize())
+	ev.Sig = [64]byte(sig.Serialize())
 	return nil
 }
 
@@ -71,7 +69,7 @@ func (s chatSession) signingIdentity() (*sessionSigner, error) {
 			return nil, err
 		}
 	}
-	if signer.pubKey != s.pubKey {
+	if signer.pubKey.Hex() != s.pubKey {
 		return nil, errors.New("signing identity public key mismatch")
 	}
 	return signer, nil

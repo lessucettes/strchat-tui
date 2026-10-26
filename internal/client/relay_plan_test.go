@@ -6,17 +6,14 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/nbd-wtf/go-nostr"
+	"fiatjaf.com/nostr"
 )
 
 func randomChatSession(t *testing.T) chatSession {
 	t.Helper()
-	priv := nostr.GeneratePrivateKey()
-	pub, err := nostr.GetPublicKey(priv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return chatSession{privKey: priv, pubKey: pub, nick: pub[:4]}
+	sk := nostr.Generate()
+	pub := sk.Public().Hex()
+	return chatSession{privKey: sk.Hex(), pubKey: pub, nick: pub[:4]}
 }
 
 func TestRelayPlanningRebuildsWhenAnchorsChange(t *testing.T) {

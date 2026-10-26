@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nbd-wtf/go-nostr"
+	"fiatjaf.com/nostr"
 )
 
 func TestPublishDoesNotWaitForRetiredRelayWorker(t *testing.T) {

@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"fiatjaf.com/nostr"
 	"github.com/coder/websocket"
-	"github.com/nbd-wtf/go-nostr"
 )
 
 func TestGeoFailoverAdvancesPastFailedReserve(t *testing.T) {

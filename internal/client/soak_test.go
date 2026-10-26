@@ -32,8 +32,8 @@ import (
 	"testing"
 	"time"
 
+	"fiatjaf.com/nostr"
 	"github.com/coder/websocket"
-	"github.com/nbd-wtf/go-nostr"
 )
 
 const (
@@ -137,7 +137,7 @@ func TestSoakRelayTransportSteadyState(t *testing.T) {
 	)
 	// Signing identities rotate so the client's user-context cache is
 	// exercised by more than one author.
-	signingKeys := []string{nostr.GeneratePrivateKey(), nostr.GeneratePrivateKey(), nostr.GeneratePrivateKey(), nostr.GeneratePrivateKey()}
+	signingKeys := []string{nostr.Generate().Hex(), nostr.Generate().Hex(), nostr.Generate().Hex(), nostr.Generate().Hex()}
 
 	var malformedSent atomic.Int64
 
@@ -253,6 +253,8 @@ func TestSoakRelayTransportSteadyState(t *testing.T) {
 	}
 	counts := &soakCounts{}
 	var stableConnected atomic.Bool
+	const finalProbe = "soak final probe"
+	var finalProbeAcknowledged atomic.Bool
 
 	events := make(chan DisplayEvent, 4096)
 	actions := make(chan UserAction, 64)
@@ -266,11 +268,19 @@ func TestSoakRelayTransportSteadyState(t *testing.T) {
 			switch ev.Type {
 			case "NEW_MESSAGE":
 				counts.messages.Add(1)
-			case "STATUS":
+				// Own messages enter the display only after a successful
+				// publish. Earlier in-flight results cannot satisfy this probe.
+				if ev.IsOwnMessage && ev.Content == finalProbe {
+					finalProbeAcknowledged.Store(true)
+				}
+			case "STATUS", "WARN":
 				if strings.Contains(ev.Content, "acknowledged by ") {
 					counts.okPublishes.Add(1)
 				}
-				if strings.Contains(ev.Content, "relay rejected event") {
+				// A confirmed send with unconfirmed/rejected peers is WARN,
+				// not STATUS. Count the actual partial-delivery report; the
+				// strict relay's received count proves explicit rejections.
+				if ev.Type == "WARN" && strings.Contains(ev.Content, "Other relay acknowledgements are unconfirmed.") {
 					counts.rejectsReported.Add(1)
 				}
 			case "ERROR":
@@ -442,12 +452,11 @@ func TestSoakRelayTransportSteadyState(t *testing.T) {
 	// Stop the load generators, then prove the client is still healthy with one
 	// final publish and one final inbound message.
 	stopLoads()
-	probeOKBefore := counts.okPublishes.Load()
 	probeMessagesBefore := counts.messages.Load()
-	if !soakSendAction(actions, UserAction{Type: "SEND_MESSAGE", Payload: "soak final probe"}, 2*time.Second) {
+	if !soakSendAction(actions, UserAction{Type: "SEND_MESSAGE", Payload: finalProbe}, 2*time.Second) {
 		t.Errorf("soak: final probe publish could not be queued")
 	}
-	probeOK := waitUntil(t, 5*time.Second, func() bool { return counts.okPublishes.Load() > probeOKBefore })
+	probeOK := waitUntil(t, 5*time.Second, finalProbeAcknowledged.Load)
 	probeMessages := waitUntil(t, 5*time.Second, func() bool { return counts.messages.Load() > probeMessagesBefore })
 
 	stopClient()

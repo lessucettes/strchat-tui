@@ -5,7 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nbd-wtf/go-nostr"
+	"fiatjaf.com/nostr"
+	"fiatjaf.com/nostr/nip13"
 )
 
 // Synthetic signed fixtures following the pinned Swift/Android public builders,
@@ -16,8 +17,8 @@ func TestBitChatPublicWireShapes(t *testing.T) {
 			c, events := testClient(t)
 			c.config.Views = []View{{Name: "u33dc"}}
 			c.config.ActiveViewName = "u33dc"
-			key := strings.Repeat("0", 63) + "1"
-			pk, _ := nostr.GetPublicKey(key)
+			key := nostr.MustSecretKeyFromHex(strings.Repeat("0", 63) + "1")
+			pk := key.Public()
 			event := nostr.Event{Kind: 20000, PubKey: pk, CreatedAt: nostr.Now(), Tags: nostr.Tags{{"g", "u33dc"}}, Content: "hello from a public geohash channel"}
 			if variant != "nickname-absent" {
 				event.Tags = append(event.Tags, nostr.Tag{"n", "alice"})
@@ -33,7 +34,7 @@ func TestBitChatPublicWireShapes(t *testing.T) {
 						value = fmt.Sprintf("%016x", nonce)
 					}
 					event.Tags[len(event.Tags)-1][1] = value
-					if countLeadingZeroBits(event.GetID()) >= 8 {
+					if nip13.Difficulty(event.GetID()) >= 8 {
 						break
 					}
 				}
