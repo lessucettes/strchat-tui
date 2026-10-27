@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/lessucettes/strchat-tui/internal/client"
 	"github.com/lessucettes/strchat-tui/internal/tui"
@@ -37,6 +38,9 @@ func main() {
 	versionFlag := flag.Bool("version", false, "Print the version and exit")
 	vFlag := flag.Bool("v", false, "Print the version and exit (shorthand)")
 	socksFlag := flag.String("socks", "", "SOCKS5 proxy for all relays, with remote DNS (e.g. 127.0.0.1:9050)")
+	pluginSendFlag := flag.String("plugin-send", "", "Executable for outgoing message processing (runtime-only)")
+	pluginReceiveFlag := flag.String("plugin-receive", "", "Executable for incoming message processing (runtime-only)")
+	pluginTimeoutFlag := flag.Duration("plugin-timeout", 10*time.Second, "Execution timeout per message-processing plugin (maximum 2m)")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		log.Fatal("Positional arguments are not supported; use --help for command-line options")
@@ -50,12 +54,20 @@ func main() {
 		if option.Name == "socks" && *socksFlag == "" {
 			log.Fatal("SOCKS5 proxy address cannot be empty; omit --socks to use the default transport")
 		}
+		if (option.Name == "plugin-send" && *pluginSendFlag == "") || (option.Name == "plugin-receive" && *pluginReceiveFlag == "") {
+			log.Fatalf("%s executable cannot be empty; omit the flag to disable it", option.Name)
+		}
 	})
+	if *pluginTimeoutFlag <= 0 || *pluginTimeoutFlag > 2*time.Minute {
+		log.Fatal("plugin timeout must be positive and at most 2m")
+	}
 
 	actionsChan := make(chan client.UserAction, 32)
 	eventsChan := make(chan client.DisplayEvent, 256)
 
-	nostrClient, err := client.NewWithOptions(actionsChan, eventsChan, client.Options{SOCKSProxy: *socksFlag})
+	nostrClient, err := client.NewWithOptions(actionsChan, eventsChan, client.Options{
+		SOCKSProxy: *socksFlag, PluginSend: *pluginSendFlag, PluginReceive: *pluginReceiveFlag, PluginTimeout: *pluginTimeoutFlag,
+	})
 	if err != nil {
 		log.Fatalf("Failed to create nostr client: %v", err)
 	}

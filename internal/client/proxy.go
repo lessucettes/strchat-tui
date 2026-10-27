@@ -12,7 +12,10 @@ import (
 
 // Options contains process-local settings, never saved to config.json.
 type Options struct {
-	SOCKSProxy string
+	SOCKSProxy    string
+	PluginSend    string
+	PluginReceive string
+	PluginTimeout time.Duration // zero uses the default execution timeout
 }
 
 // Tor may need to fetch onion descriptors and build a circuit on the first dial.

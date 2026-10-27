@@ -17,6 +17,7 @@ import (
 // Workers receive immutable snapshots and return results through bounded channels.
 type client struct {
 	config                         *config
+	plugins                        messagePlugins // runtime-only; never persisted
 	relayHTTPClient                *http.Client
 	proxyStartupNotice             string
 	chatKeys                       map[string]chatSession
@@ -41,6 +42,10 @@ type client struct {
 	incoming                       chan relayEvent
 	outgoing                       chan publishJob
 	results                        chan publishResult
+	receiveJobs                    chan receivePluginJob
+	receiveResults                 chan receivePluginResult
+	receiveEpoch                   uint64 // CLEAR invalidates pending local presentations
+	receiveOverloaded              bool
 	seenCache                      *lru.Cache[nostr.ID, bool]
 	userContext                    *lru.Cache[string, userContext]
 	authorVerify                   *authorVerifyCache
@@ -52,6 +57,10 @@ func New(actions <-chan UserAction, events chan<- DisplayEvent) (*client, error)
 }
 
 func NewWithOptions(actions <-chan UserAction, events chan<- DisplayEvent, options Options) (*client, error) {
+	plugins, err := newMessagePlugins(options)
+	if err != nil {
+		return nil, err
+	}
 	httpClient, err := newRelayHTTPClient(options.SOCKSProxy)
 	if err != nil {
 		return nil, err
@@ -61,6 +70,7 @@ func NewWithOptions(actions <-chan UserAction, events chan<- DisplayEvent, optio
 		return nil, fmt.Errorf("failed to load configuration: %w", err)
 	}
 	c := newClient(cfg, actions, events)
+	c.plugins = plugins
 	c.relayHTTPClient = httpClient
 	if proxy := strings.TrimSpace(options.SOCKSProxy); proxy != "" {
 		c.proxyStartupNotice = fmt.Sprintf("Using SOCKS5 proxy %s for all relay connections. Direct fallback is disabled.", proxy)
@@ -111,6 +121,13 @@ func (c *client) Run() {
 	// no subscription and no traffic. updateAllSubscriptions emits its relay
 	// snapshot only after the workers exist.
 	c.wg.Go(c.publishLoop)
+	if c.plugins.OnReceive != nil {
+		if c.receiveJobs == nil {
+			c.receiveJobs = make(chan receivePluginJob, 32)
+			c.receiveResults = make(chan receivePluginResult, 32)
+		}
+		c.wg.Go(c.receivePluginLoop)
+	}
 	c.updateAllSubscriptions()
 	if view := c.getActiveView(); view != nil {
 		c.setActiveView(view.Name)
@@ -173,6 +190,8 @@ func (c *client) Run() {
 					c.sendRelaysUpdate()
 				}
 			}
+		case result := <-c.receiveResults:
+			c.finishReceivePlugin(result)
 		case result := <-c.results:
 			if result.accepted > 0 {
 				c.processEvent(&result.event, "local")
@@ -197,6 +216,15 @@ func (c *client) shutdown() {
 func (c *client) handleAction(action UserAction) {
 	switch action.Type {
 	case "CLEAR":
+		c.receiveEpoch++
+		// Only the owner queues incoming work. Drop the bounded backlog without
+		// waiting for the worker; its in-flight result is invalidated by epoch.
+		for range len(c.receiveJobs) {
+			select {
+			case <-c.receiveJobs:
+			default:
+			}
+		}
 		// Swap empty caches instead of walking their entries. Keep dedup IDs,
 		// identities and transport state so history is not replayed on clear.
 		c.userContext, _ = lru.New[string, userContext](userContextCacheSize)

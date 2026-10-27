@@ -81,6 +81,8 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 	}
 	c.seenCache.Add(ev.ID, true)
 	content := sanitizeString(truncateString(ev.Content, MaxMsgLen))
+	// Filter the original display text before queueing any external processing.
+	// Rejected messages must not reach a plugin or consume its queue capacity.
 	if c.matchesAny(content, c.mutesCompiled) || (len(c.filtersCompiled) > 0 && !c.matchesAny(content, c.filtersCompiled)) {
 		return
 	}
@@ -96,9 +98,6 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 	if nick == "" {
 		nick = npubToTokiPona(pubkey)
 	}
-	previous, known := c.userContext.Peek(pubkey)
-	recipientUnchanged := known && previous.nick == nick && previous.chat == chat && previous.shortPubKey == short
-	c.userContext.Add(pubkey, userContext{nick: nick, chat: chat, shortPubKey: short, authorKey: authorKey})
 	own := c.retiredKeys.Contains(pubkey)
 	for _, session := range c.chatKeys {
 		if session.pubKey == pubkey {
@@ -106,14 +105,35 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 			break
 		}
 	}
-	c.emit(DisplayEvent{Type: "NEW_MESSAGE", Timestamp: time.Unix(int64(ev.CreatedAt), 0).Format("15:04:05"), Nick: nick,
-		FullPubKey: pubkey, ShortPubKey: short, IsOwnMessage: own, RecipientUnchanged: recipientUnchanged,
-		Content: content, ID: safeSuffix(ev.ID.Hex(), 4), Chat: chat, RelayURL: relayURL})
+	display := DisplayEvent{Type: "NEW_MESSAGE", Timestamp: time.Unix(int64(ev.CreatedAt), 0).Format("15:04:05"), Nick: nick,
+		FullPubKey: pubkey, ShortPubKey: short, IsOwnMessage: own,
+		Content: content, ID: safeSuffix(ev.ID.Hex(), 4), Chat: chat, RelayURL: relayURL}
+	user := userContext{nick: nick, chat: chat, shortPubKey: short, authorKey: authorKey}
+	if c.plugins.OnReceive != nil {
+		job := receivePluginJob{plugin: c.plugins.OnReceive, display: display, user: user, epoch: c.receiveEpoch,
+			request: pluginRequest{Version: 1, Plugin: "on_receive", Direction: "incoming", Chat: chat, Content: ev.Content,
+				Sender: pluginSender{PubKey: pubkey, Nick: nick}, EventID: ev.ID.Hex(), CreatedAt: int64(ev.CreatedAt)}}
+		if recipient := ev.Tags.Find("p"); len(recipient) > 1 {
+			job.request.Recipient = recipient[1]
+		}
+		select {
+		case c.receiveJobs <- job:
+			c.receiveOverloaded = false
+		default:
+			if !c.receiveOverloaded {
+				c.emit(DisplayEvent{Type: "WARN", Content: "on_receive plugin queue is full. Incoming messages are being dropped locally."})
+				c.receiveOverloaded = true
+			}
+		}
+		return
+	}
+	c.displayReceived(display, user)
 }
 
 const maxContentBytes = 16 << 10
 
 type publishJob struct {
+	plugin     *pluginConfig
 	event      nostr.Event
 	key, chat  string
 	signer     *sessionSigner // immutable identity captured when queued
@@ -268,6 +288,7 @@ func (c *client) publishMessageInView(message, viewName, defaultChat, expectedCh
 	}
 	pk := signer.pubKey
 	job := publishJob{key: session.privKey, signer: signer, chat: chat, difficulty: c.effectivePoWForChat(chat)}
+	job.plugin = c.plugins.OnSend
 	nick := session.nick
 	if nick == "" {
 		nick = npubToTokiPona(pk.Hex())
@@ -315,6 +336,30 @@ func (c *client) publishLoop() {
 func executePublish(ctx context.Context, job publishJob) publishResult {
 	result := publishResult{kind: "ERROR"}
 	scope := fmt.Sprintf("Chat %q: ", job.chat)
+	if job.plugin != nil {
+		request := pluginRequest{Version: 1, Plugin: "on_send", Direction: "outgoing", Chat: job.chat,
+			Content: job.event.Content, Sender: pluginSender{PubKey: job.event.PubKey.Hex()}}
+		if nick := job.event.Tags.Find("n"); len(nick) > 1 {
+			request.Sender.Nick = nick[1]
+		}
+		if recipient := job.event.Tags.Find("p"); len(recipient) > 1 {
+			request.Recipient = recipient[1]
+		}
+		content, suppress, err := runMessagePlugin(ctx, job.plugin, request)
+		if err != nil {
+			result.message = scope + fmt.Sprintf("on_send plugin failed: %s. The message was not sent.", err)
+			return result
+		}
+		if suppress {
+			result.kind, result.message = "STATUS", scope+"Message suppressed by on_send plugin."
+			return result
+		}
+		if strings.TrimSpace(content) == "" || !utf8.ValidString(content) || len(content) > maxContentBytes || uniseg.GraphemeClusterCount(content) > MaxMsgLen {
+			result.message = scope + "on_send plugin returned empty or oversized content (maximum 2000 characters / 16 KiB). The message was not sent."
+			return result
+		}
+		job.event.Content = content
+	}
 	// Mining and publishing share one deadline and one worker, not one CPU loop per
 	// keystroke. Only explicit auth-required rejections permit a bounded retry
 	// of the same signed event on the same socket, within this deadline.

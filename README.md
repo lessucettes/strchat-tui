@@ -11,6 +11,8 @@ when clients use the same channel and share a relay.
 
 - Local groups bring several chats into one feed; each message goes to one chat.
 - Public replies with nickname completion, filters, mute rules and themes.
+- Optional [external plugins](examples/translate-plugin/PROTOCOL.md) transform
+  or suppress messages.
 - Automatic relay reconnection, geographic reserves and NIP-42 authentication.
 - Runs on Linux, Windows, macOS and Android/Termux.
 

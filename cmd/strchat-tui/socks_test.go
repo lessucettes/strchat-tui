@@ -38,6 +38,13 @@ func TestSOCKSFlagRejectsUnsafeArgumentsBeforeConfig(t *testing.T) {
 		{[]string{"lobby", "--socks=127.0.0.1:9050"}, "Positional"},
 		{[]string{"--socks=127.0.0.1:9050", "lobby"}, "Positional"},
 		{[]string{"--", "--socks=127.0.0.1:9050"}, "Positional"},
+		{[]string{"--plugin-send="}, "plugin-send executable cannot be empty"},
+		{[]string{"-plugin-receive", ""}, "plugin-receive executable cannot be empty"},
+		{[]string{"--plugin-send= "}, "plugin-send executable cannot be blank"},
+		{[]string{"--plugin-receive=" + filepath.Join(t.TempDir(), "missing")}, "plugin-receive executable is unavailable"},
+		{[]string{"--plugin-timeout=0s"}, "plugin timeout must"},
+		{[]string{"--plugin-timeout=-1s"}, "plugin timeout must"},
+		{[]string{"--plugin-timeout=121s"}, "plugin timeout must"},
 	} {
 		home := t.TempDir()
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -54,7 +61,7 @@ func TestSOCKSFlagRejectsUnsafeArgumentsBeforeConfig(t *testing.T) {
 			t.Fatalf("expected %s validation failure for %q, got %v: %s", tc.want, tc.args, err, output)
 		}
 		if _, err := os.Stat(filepath.Join(home, "strchat-tui")); !os.IsNotExist(err) {
-			t.Fatalf("invalid proxy touched the configuration: %v", err)
+			t.Fatalf("invalid runtime options touched the configuration: %v", err)
 		}
 	}
 }
