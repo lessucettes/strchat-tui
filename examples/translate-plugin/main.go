@@ -29,10 +29,9 @@ const (
 )
 
 type request struct {
-	Version   int    `json:"version"`
-	Plugin    string `json:"plugin"`
-	Direction string `json:"direction"`
-	Content   string `json:"content"`
+	Version int    `json:"version"`
+	Plugin  string `json:"plugin"`
+	Content string `json:"content"`
 }
 
 type response struct {
@@ -119,7 +118,7 @@ func run(ctx context.Context, in io.Reader, out io.Writer, cfg config) error {
 		return err
 	}
 
-	if req.Plugin != "on_send" || req.Direction != "outgoing" || strings.TrimSpace(req.Content) == "" {
+	if req.Plugin != "on_send" || strings.TrimSpace(req.Content) == "" {
 		return respond("unchanged", "")
 	}
 

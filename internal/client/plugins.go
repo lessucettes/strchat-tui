@@ -86,11 +86,8 @@ type pluginSender struct {
 type pluginRequest struct {
 	Version   int          `json:"version"`
 	Plugin    string       `json:"plugin"`
-	Direction string       `json:"direction"`
-	Chat      string       `json:"chat"`
 	Content   string       `json:"content"`
 	Sender    pluginSender `json:"sender"`
-	Recipient string       `json:"recipient,omitempty"`
 	EventID   string       `json:"event_id,omitempty"`
 	CreatedAt int64        `json:"created_at,omitempty"`
 }

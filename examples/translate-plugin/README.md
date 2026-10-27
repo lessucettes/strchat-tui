@@ -1,151 +1,118 @@
 # translate-plugin
 
-A standalone, standard-library-only Go example of an outgoing strchat-tui
-translation plugin. It reads one JSON request line from standard input and
-writes exactly one JSON response line to standard output.
-
-See [PROTOCOL.md](PROTOCOL.md) for the message protocol and recommendations for
-writing your own plugins in any language.
-
-The plugin translates outgoing `on_send` messages with GigaChat's
-OpenAI-compatible Chat Completions API. Requests for other events, or for
-incoming messages, return `unchanged` without any network traffic.
+Translates strchat-tui `on_send` messages with GigaChat. The implementation uses
+only the Go standard library and takes no command-line arguments.
 
 ## Build
 
-From a full repository checkout:
+Run from the repository root:
 
 ```sh
-CGO_ENABLED=0 go build -trimpath \
-  -o "$HOME/.local/bin/translate-plugin" \
-  ./examples/translate-plugin
+CGO_ENABLED=0 go build -trimpath -o translate-plugin ./examples/translate-plugin
 ```
 
-The plugin takes no command-line arguments. It can also be run directly:
+## Launch
 
-```sh
-go run ./examples/translate-plugin
-```
-
-## Request and response
-
-The request is one JSON line. Unknown fields are ignored, so newer request
-fields do not require a plugin change.
-
-```json
-{"version":1,"plugin":"on_send","direction":"outgoing","chat":"lobby","content":"Привет, @bob#abcd!","sender":{"pubkey":"abc123","nick":"alice"},"future_field":true}
-```
-
-A successful outgoing translation returns:
-
-```json
-{"version":1,"action":"replace","content":"Hi, @bob#abcd!"}
-```
-
-Any request that is not `plugin:"on_send"` with `direction:"outgoing"` (or that
-has blank content) returns:
-
-```json
-{"version":1,"action":"unchanged"}
-```
-
-The plugin does not implement a suppression action. Response strings are JSON
-encoded, so a translated message containing newlines still produces exactly one
-output line.
-
-## Configuration
-
-The plugin reads its own process environment. Export these variables before
-starting `strchat-tui`, or set them in the service unit that launches it.
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `TRANSLATE_PLUGIN_BASE_URL` | `https://api.giga.chat/v1` | OpenAI-compatible API base. The plugin appends `/chat/completions`. |
-| `TRANSLATE_PLUGIN_AUTH_URL` | `https://ngw.devices.sberbank.ru:9443/api/v2/oauth` | GigaChat OAuth token endpoint. |
-| `TRANSLATE_PLUGIN_MODEL` | `GigaChat-2` | Chat Completions model name. |
-| `TRANSLATE_PLUGIN_API_KEY` | unset | GigaChat authorization key for OAuth, required unless an access token is supplied. |
-| `TRANSLATE_PLUGIN_ACCESS_TOKEN` | unset | Optional access token. Takes precedence over the API key and skips OAuth. |
-| `TRANSLATE_PLUGIN_SCOPE` | `GIGACHAT_API_PERS` | OAuth scope. Use the scope matching the authorization key (`GIGACHAT_API_B2B` or `GIGACHAT_API_CORP` where applicable). |
-| `TRANSLATE_PLUGIN_TARGET_LANGUAGE` | `English` | Language written into the translation instruction. |
-
-### Authorization key
-
-Set `TRANSLATE_PLUGIN_API_KEY` to the GigaChat authorization key from GigaChat
-Studio: the already-Base64-encoded `client_id:client_secret` value, without a
-`Basic` prefix or an `Authorization` header. The plugin does not read credential
-files. A missing/blank key fails before any HTTP request unless
-`TRANSLATE_PLUGIN_ACCESS_TOKEN` is set.
-
-In Bash, enter the key without echoing it or placing its value in shell history:
+Set the OAuth authorization key in Bash:
 
 ```sh
 read -r -s -p 'GigaChat authorization key: ' TRANSLATE_PLUGIN_API_KEY
 printf '\n'
 export TRANSLATE_PLUGIN_API_KEY
+
+./strchat-tui --plugin-send="$PWD/translate-plugin" --plugin-timeout=35s
 ```
 
-Start the client from the same shell so the plugin inherits the variable. An
-existing `TRANSLATE_PLUGIN_ACCESS_TOKEN` takes precedence; unset it to use OAuth.
-After the client exits, use `unset TRANSLATE_PLUGIN_API_KEY` if it is no longer
-needed. Neither credential is written to stdout/stderr or passed in executable
-arguments. Environment variables are still secrets: avoid shell tracing, dumping
-the environment, or exposing it in diagnostics; they are not an OS security
-boundary against other processes with access to your environment.
+The key is the Base64 authorization value, without the `Basic` prefix. The plugin
+uses the value directly; it does not encode it or read credential files.
+`TRANSLATE_PLUGIN_ACCESS_TOKEN`, when nonblank, takes precedence and skips OAuth.
 
-### Enable for a launch
+The client starts a new plugin process for each outgoing message. The plugin
+inherits the client's environment. Its HTTP operations share a 30-second context;
+the HTTP client also has a 30-second timeout. The launch above sets the client's
+process timeout to 35 seconds instead of the default 10 seconds.
 
-Pass the built executable to `--plugin-send`. The client does not store plugin
-settings in `config.json`. Its default plugin timeout is 10 seconds (maximum
-2 minutes), while this example bounds a run to 30 seconds. Allow slightly more
-time for the example to report its own error instead of being killed:
+## Input and output
 
-```sh
-./strchat-tui \
-  --plugin-send="$HOME/.local/bin/translate-plugin" \
-  --plugin-timeout=35s
+The process reads the first JSON line from stdin, writes one JSON line to stdout
+and exits. The input limit is 1 MiB, including the newline. EOF without a final
+newline is accepted; subsequent lines are not processed.
+
+The plugin reads `version`, `plugin` and `content`. Unknown fields are ignored.
+`version` must be `1`. Only `plugin:"on_send"` with nonblank content triggers an
+API request; `sender` and other metadata do not affect translation.
+
+```json
+{"version":1,"plugin":"on_send","content":"Привет!"}
 ```
 
-The executable is invoked once per outgoing message and receives the plugin
-request on standard input. It inherits the environment above from the process
-that starts `strchat-tui`. The plugin takes no command-line arguments.
+Successful translation:
 
-## TLS certificate verification
-
-TLS certificate verification is always enabled. There is no insecure-skip
-option, and this example never sets `InsecureSkipVerify`.
-
-GigaChat requires the Russian Trusted Root CA; see its
-[official certificate instructions](https://developers.sber.ru/docs/ru/gigachat/certificates).
-Go uses the host's system trust store. If that CA is missing, install it there
-(recommended on macOS and Windows). On Unix-like hosts, Go can instead use a PEM
-bundle for the plugin process:
-
-```sh
-export SSL_CERT_FILE="$HOME/.config/gigachat/trusted-ca.pem"
+```json
+{"version":1,"action":"replace","content":"Hello!"}
 ```
 
-On Unix, `SSL_CERT_DIR` can point at a directory of hashed CA certificates. If a
-TLS-intercepting proxy is in use, add the proxy CA to the same trust bundle.
-Use `https://` endpoints for real services; plain `http://` is only useful for
-local mock servers.
+Other handler names, or content that is empty after trimming whitespace, return
+the following without HTTP requests or credential checks:
 
-## Failure behavior
+```json
+{"version":1,"action":"unchanged"}
+```
 
-- Unsupported request versions, malformed requests, missing credentials, and
-  API failures exit with status 1.
-- On failure, standard output stays empty. A sanitized diagnostic is written to
-  standard error with the `translate-plugin:` prefix.
-- API response bodies, authorization keys, and access tokens are never logged.
-- A run is bounded to 30 seconds (the HTTP client also has a 30-second timeout).
-  Request lines and decoded HTTP response input are limited to 1 MiB.
+The plugin never returns `suppress`. Newlines within response content are JSON
+escaped.
+
+## Configuration
+
+Values are read from environment variables and trimmed. Blank values use the
+defaults below; credentials have no default.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `TRANSLATE_PLUGIN_BASE_URL` | `https://api.giga.chat/v1` | API base; trailing slashes are removed before appending `/chat/completions`. |
+| `TRANSLATE_PLUGIN_AUTH_URL` | `https://ngw.devices.sberbank.ru:9443/api/v2/oauth` | OAuth endpoint. |
+| `TRANSLATE_PLUGIN_MODEL` | `GigaChat-2` | Model sent to the API. |
+| `TRANSLATE_PLUGIN_API_KEY` | unset | Authorization key used as `Authorization: Basic <key>`. |
+| `TRANSLATE_PLUGIN_ACCESS_TOKEN` | unset | Token used as `Authorization: Bearer <token>`; skips OAuth. |
+| `TRANSLATE_PLUGIN_SCOPE` | `GIGACHAT_API_PERS` | OAuth scope. |
+| `TRANSLATE_PLUGIN_TARGET_LANGUAGE` | `English` | Target language in the system instruction. |
+
+## API requests
+
+Without an access token, each invocation first sends an OAuth `POST` with
+`Content-Type: application/x-www-form-urlencoded`, a generated UUID v4 in `RqUID`
+and a `scope` form field. It reads `access_token` from the JSON response. Tokens
+are not cached between processes.
+
+Translation uses `POST <base>/chat/completions` with a JSON body containing
+`model` and two `messages`: a system instruction and the original content as a
+user message. The instruction requests translation only, preservation of
+mentions, URLs, code and line breaks, and treatment of the message as data.
+These are model instructions, not output validation.
+
+The plugin takes `choices[0].message.content`, trims surrounding whitespace and
+rejects an empty result. Each HTTP response decoder reads at most 1 MiB. HTTP
+statuses outside 200–299 are errors. There are no application-level retries.
+
+HTTPS uses Go's default certificate verification. The client's `--socks` option
+does not configure the plugin's HTTP client. Message text is sent to the API
+before Nostr publication.
+
+## Errors
+
+Malformed JSON, unsupported versions, oversized input, missing credentials,
+HTTP failures and missing token/translation fields cause exit status `1` and a
+`translate-plugin:` diagnostic on stderr, without a protocol response on stdout.
+API response bodies and authorization header values are not included in these
+diagnostics. An absent key or a key containing internal CR/LF fails before HTTP
+unless an access token is supplied.
+
+An outgoing plugin error prevents publication; the client does not send the
+original text as a fallback.
 
 ## Tests
 
-The tests are hermetic and use `httptest` servers only; they never contact the
-real API or read a real credential file.
-
 ```sh
 go test ./examples/translate-plugin
-go test -race ./examples/translate-plugin
 go vet ./examples/translate-plugin
 ```

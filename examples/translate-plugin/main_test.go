@@ -73,7 +73,7 @@ func TestRunTranslatesOutgoing(t *testing.T) {
 	cfg.base, cfg.auth = chat.URL+"/v1", auth.URL+"/oauth"
 	cfg.model, cfg.scope, cfg.target = "GigaChat-2", "GIGACHAT_API_PERS", "English"
 	cfg.client = testClient()
-	req := `{"version":1,"plugin":"on_send","direction":"outgoing","chat":"lobby","content":"Привет\nмир","sender":{"pubkey":"a","nick":"b"},"future_field":true}`
+	req := `{"version":1,"plugin":"on_send","content":"Привет\nмир","sender":{"pubkey":"a","nick":"b"},"future_field":true}`
 
 	var out bytes.Buffer
 	if err := run(context.Background(), strings.NewReader(req+"\n"), &out, cfg); err != nil {
@@ -100,10 +100,9 @@ func TestRunLeavesNonSendUnchanged(t *testing.T) {
 
 	cfg := config{base: srv.URL, auth: srv.URL, client: testClient()}
 	for _, req := range []string{
-		`{"version":1,"plugin":"on_receive","direction":"incoming","content":"hello"}`,
-		`{"version":1,"plugin":"on_send","direction":"incoming","content":"hello"}`,
-		`{"version":1,"plugin":"on_edit","direction":"outgoing","content":"hello"}`,
-		`{"version":1,"plugin":"on_send","direction":"outgoing","content":"  "}`,
+		`{"version":1,"plugin":"on_receive","content":"hello"}`,
+		`{"version":1,"plugin":"on_edit","content":"hello"}`,
+		`{"version":1,"plugin":"on_send","content":"  "}`,
 	} {
 		var out bytes.Buffer
 		if err := run(context.Background(), strings.NewReader(req+"\n"), &out, cfg); err != nil {
@@ -140,7 +139,7 @@ func TestRunUsesConfiguredAccessToken(t *testing.T) {
 	cfg := configFromEnv()
 	cfg.base, cfg.auth = chat.URL+"/v1", auth.URL
 	cfg.client = testClient()
-	req := `{"version":1,"plugin":"on_send","direction":"outgoing","content":"hello"}`
+	req := `{"version":1,"plugin":"on_send","content":"hello"}`
 
 	var out bytes.Buffer
 	if err := run(context.Background(), strings.NewReader(req+"\n"), &out, cfg); err != nil {
@@ -157,7 +156,7 @@ func TestRunUsesConfiguredAccessToken(t *testing.T) {
 
 func TestRunFailuresKeepStdoutEmptyAndHideBodies(t *testing.T) {
 	const secret = "sensitive-api-response-body"
-	req := `{"version":1,"plugin":"on_send","direction":"outgoing","content":"hello"}`
+	req := `{"version":1,"plugin":"on_send","content":"hello"}`
 
 	t.Run("missing or invalid credentials", func(t *testing.T) {
 		var calls atomic.Int32
@@ -242,7 +241,7 @@ func TestRunFailuresKeepStdoutEmptyAndHideBodies(t *testing.T) {
 func TestRunRejectsInvalidRequests(t *testing.T) {
 	cfg := config{client: testClient()}
 	for _, req := range []string{
-		`{"version":2,"plugin":"on_send","direction":"outgoing","content":"hi"}`,
+		`{"version":2,"plugin":"on_send","content":"hi"}`,
 		`{"version":1,`,
 	} {
 		var out bytes.Buffer

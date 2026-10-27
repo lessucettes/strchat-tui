@@ -78,7 +78,7 @@ func testPlugin(t *testing.T, mode string) *pluginConfig {
 }
 
 func TestExecMessagePlugin(t *testing.T) {
-	request := pluginRequest{Version: 1, Plugin: "on_send", Direction: "outgoing", Chat: "lobby", Content: "original"}
+	request := pluginRequest{Version: 1, Plugin: "on_send", Content: "original"}
 	for _, mode := range []string{"replace", "suppress", "unchanged", "fail", "malformed", "trailing", "huge"} {
 		t.Run(mode, func(t *testing.T) {
 			content, suppress, err := runMessagePlugin(context.Background(), testPlugin(t, mode), request)
@@ -180,8 +180,8 @@ func TestOutgoingPluginsFailClosedAndKeepCapturedIdentity(t *testing.T) {
 					}
 					if mode == "request" {
 						assertPluginEnvelope(t, e.Content, map[string]any{
-							"version": float64(1), "plugin": "on_send", "direction": "outgoing", "chat": "u33dc", "content": message,
-							"sender": map[string]any{"pubkey": pubkey, "nick": "sender-u33dc"}, "recipient": recipient,
+							"version": float64(1), "plugin": "on_send", "content": message,
+							"sender": map[string]any{"pubkey": pubkey, "nick": "sender-u33dc"},
 						})
 					} else if e.Content != "translated" {
 						t.Error("outgoing content not transformed")
@@ -256,7 +256,7 @@ func TestIncomingPluginsOnlyChangeValidatedPresentation(t *testing.T) {
 					}
 					if mode == "request" {
 						assertPluginEnvelope(t, e.Content, map[string]any{
-							"version": float64(1), "plugin": "on_receive", "direction": "incoming", "chat": "lobby", "content": "original",
+							"version": float64(1), "plugin": "on_receive", "content": "original",
 							"sender":   map[string]any{"pubkey": original.PubKey.Hex(), "nick": "alice"},
 							"event_id": original.ID.Hex(), "created_at": float64(original.CreatedAt),
 						})

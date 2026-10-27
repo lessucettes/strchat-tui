@@ -111,11 +111,8 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 	user := userContext{nick: nick, chat: chat, shortPubKey: short, authorKey: authorKey}
 	if c.plugins.OnReceive != nil {
 		job := receivePluginJob{plugin: c.plugins.OnReceive, display: display, user: user, epoch: c.receiveEpoch,
-			request: pluginRequest{Version: 1, Plugin: "on_receive", Direction: "incoming", Chat: chat, Content: ev.Content,
+			request: pluginRequest{Version: 1, Plugin: "on_receive", Content: ev.Content,
 				Sender: pluginSender{PubKey: pubkey, Nick: nick}, EventID: ev.ID.Hex(), CreatedAt: int64(ev.CreatedAt)}}
-		if recipient := ev.Tags.Find("p"); len(recipient) > 1 {
-			job.request.Recipient = recipient[1]
-		}
 		select {
 		case c.receiveJobs <- job:
 			c.receiveOverloaded = false
@@ -337,14 +334,12 @@ func executePublish(ctx context.Context, job publishJob) publishResult {
 	result := publishResult{kind: "ERROR"}
 	scope := fmt.Sprintf("Chat %q: ", job.chat)
 	if job.plugin != nil {
-		request := pluginRequest{Version: 1, Plugin: "on_send", Direction: "outgoing", Chat: job.chat,
+		request := pluginRequest{Version: 1, Plugin: "on_send",
 			Content: job.event.Content, Sender: pluginSender{PubKey: job.event.PubKey.Hex()}}
 		if nick := job.event.Tags.Find("n"); len(nick) > 1 {
 			request.Sender.Nick = nick[1]
 		}
-		if recipient := job.event.Tags.Find("p"); len(recipient) > 1 {
-			request.Recipient = recipient[1]
-		}
+
 		content, suppress, err := runMessagePlugin(ctx, job.plugin, request)
 		if err != nil {
 			result.message = scope + fmt.Sprintf("on_send plugin failed: %s. The message was not sent.", err)
