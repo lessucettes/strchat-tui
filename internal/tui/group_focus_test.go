@@ -27,12 +27,25 @@ func TestGroupInfoArrowsChooseConversation(t *testing.T) {
 		return s.matches(func() bool { return len(s.ui.snapshot().views) == 4 })
 	})
 	s.draw()
+	s.key(tcell.KeyRune, 'c', tcell.ModAlt)
+	s.key(tcell.KeyCtrlN, 0, tcell.ModCtrl)
+	waitFor(t, time.Second, func() bool { return s.matches(func() bool { return s.ui.chatList.GetCurrentItem() == 1 }) })
+	s.key(tcell.KeyCtrlP, 0, tcell.ModCtrl)
+	waitFor(t, time.Second, func() bool { return s.matches(func() bool { return s.ui.chatList.GetCurrentItem() == 0 }) })
 	s.key(tcell.KeyRune, 'n', tcell.ModAlt)
 	waitFor(t, time.Second, func() bool { return s.matches(func() bool { return s.ui.focused == s.ui.detailsView }) })
 	waitFor(t, time.Second, func() bool {
 		return s.matches(func() bool { return strings.Contains(s.ui.detailsView.GetText(true), "▶ coffee") })
 	})
 	s.key(tcell.KeyDown, 0, tcell.ModNone)
+	waitFor(t, time.Second, func() bool {
+		return s.matches(func() bool { return s.ui.conversationChat(s.ui.snapshot()) == "ucfv0" })
+	})
+	s.key(tcell.KeyCtrlP, 0, tcell.ModCtrl)
+	waitFor(t, time.Second, func() bool {
+		return s.matches(func() bool { return s.ui.conversationChat(s.ui.snapshot()) == "coffee" })
+	})
+	s.key(tcell.KeyCtrlN, 0, tcell.ModCtrl)
 	waitFor(t, time.Second, func() bool {
 		return s.matches(func() bool { return s.ui.conversationChat(s.ui.snapshot()) == "ucfv0" })
 	})

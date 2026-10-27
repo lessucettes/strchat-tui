@@ -113,10 +113,18 @@ func (t *tui) setupInputHandlers() {
 		}
 	})
 
-	// Input history is session-local; returning past the newest entry restores
-	// the draft saved when browsing began. Neither end wraps around.
 	t.input.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
+		// tcell decodes legacy ESC BS as Alt+Ctrl+H rather than Alt+Backspace.
+		if ev.Key() == tcell.KeyRune && ev.Rune() == 'h' && ev.Modifiers() == tcell.ModAlt|tcell.ModCtrl {
+			return tcell.NewEventKey(tcell.KeyBackspace, 0, tcell.ModAlt)
+		}
 		switch ev.Key() {
+		case tcell.KeyCtrlB:
+			return tcell.NewEventKey(tcell.KeyLeft, 0, ev.Modifiers()&^tcell.ModCtrl)
+		case tcell.KeyCtrlF:
+			return tcell.NewEventKey(tcell.KeyRight, 0, ev.Modifiers()&^tcell.ModCtrl)
+		// Input history is session-local; returning past the newest entry restores
+		// the draft saved when browsing began. Neither end wraps around.
 		case tcell.KeyCtrlP:
 			if t.historyOffset == len(t.inputHistory) {
 				t.bell()
@@ -163,6 +171,25 @@ func (t *tui) handleKey(event *tcell.EventKey) *tcell.EventKey {
 	}
 	t.syncFocus()
 
+	if t.focused != t.input && event.Modifiers()&^tcell.ModCtrl == 0 {
+		switch event.Key() {
+		case tcell.KeyCtrlP:
+			event = tcell.NewEventKey(tcell.KeyUp, 0, tcell.ModNone)
+		case tcell.KeyCtrlN:
+			event = tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone)
+		}
+	}
+
+	// Normalize paging aliases before both split and maximized pane dispatch.
+	if t.focused == t.outputView || t.focused == t.logsView {
+		switch {
+		case event.Key() == tcell.KeyRune && event.Rune() == 'v' && event.Modifiers() == tcell.ModAlt:
+			event = tcell.NewEventKey(tcell.KeyPgUp, 0, tcell.ModNone)
+		case event.Key() == tcell.KeyCtrlV && event.Modifiers()&^tcell.ModCtrl == 0:
+			event = tcell.NewEventKey(tcell.KeyPgDn, 0, tcell.ModNone)
+		}
+	}
+
 	if t.maximizeModeOf() != maximizeNone {
 		return t.handleMaximizedViewKeys(event)
 	}
@@ -189,6 +216,18 @@ func (t *tui) handleKey(event *tcell.EventKey) *tcell.EventKey {
 			t.focusIfVisible(t.logsView)
 		case 'n':
 			t.openInfo()
+		default:
+			if t.focused == t.input {
+				// Forward only word-editing keys, never Alt+Enter submission.
+				switch event.Key() {
+				case tcell.KeyRune:
+					if event.Rune() == 'b' || event.Rune() == 'f' {
+						return event
+					}
+				case tcell.KeyBackspace, tcell.KeyBackspace2:
+					return event
+				}
+			}
 		}
 		return nil
 	}

@@ -38,6 +38,59 @@ func TestInputHistoryCtrlPN(t *testing.T) {
 	}
 }
 
+func TestInputEditingBindings(t *testing.T) {
+	s := newSimTUI(t, 120, 40)
+	key := func(k tcell.Key) *tcell.EventKey { return tcell.NewEventKey(k, 0, tcell.ModNone) }
+	alt := func(r rune) *tcell.EventKey { return tcell.NewEventKey(tcell.KeyRune, r, tcell.ModAlt) }
+	for _, reset := range []bool{false, true} {
+		if reset {
+			s.onLoop(func() { s.ui.handleCommand("/clear") })
+		}
+		for _, tc := range []struct {
+			name string
+			text string
+			keys []*tcell.EventKey
+			want string
+		}{
+			{"word left", "one two", []*tcell.EventKey{alt('b')}, "one Xtwo"},
+			{"word right", "one two", []*tcell.EventKey{key(tcell.KeyHome), alt('f')}, "oneX two"},
+			{"word right repeated", "one two", []*tcell.EventKey{key(tcell.KeyHome), alt('f'), alt('f')}, "one twoX"},
+			{"word right at end", "one", []*tcell.EventKey{alt('f'), alt('f')}, "oneX"},
+			{"word right empty", "", []*tcell.EventKey{alt('f')}, "X"},
+			{"word right combining", "abе\u0301 tail", []*tcell.EventKey{key(tcell.KeyHome), alt('f')}, "abе\u0301X tail"},
+			{"word right selection", "one two", []*tcell.EventKey{key(tcell.KeyHome), tcell.NewEventKey(tcell.KeyRight, 0, tcell.ModShift), alt('f')}, "oneX two"},
+			{"delete word BS", "one two", []*tcell.EventKey{tcell.NewEventKey(tcell.KeyBackspace, 0, tcell.ModAlt)}, "one X"},
+			{"delete word DEL", "one two", []*tcell.EventKey{tcell.NewEventKey(tcell.KeyBackspace2, 0, tcell.ModAlt)}, "one X"},
+			{"delete word legacy BS", "one two", []*tcell.EventKey{tcell.NewEventKey(tcell.KeyRune, 'h', tcell.ModAlt|tcell.ModCtrl)}, "one X"},
+			{"grapheme left", "aе\u0301🙂z", []*tcell.EventKey{key(tcell.KeyCtrlB), key(tcell.KeyCtrlB), key(tcell.KeyCtrlB)}, "aXе\u0301🙂z"},
+			{"grapheme right", "aе\u0301🙂z", []*tcell.EventKey{key(tcell.KeyHome), key(tcell.KeyCtrlF), key(tcell.KeyCtrlF)}, "aе\u0301X🙂z"},
+			{"Alt Enter does not send", "one two", []*tcell.EventKey{tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModAlt)}, "one twoX"},
+			{"Alt Enter does not run commands", "/nick changed", []*tcell.EventKey{tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModAlt)}, "/nick changedX"},
+			{"Alt Home is ignored", "one two", []*tcell.EventKey{tcell.NewEventKey(tcell.KeyHome, 0, tcell.ModAlt)}, "one twoX"},
+		} {
+			t.Run(fmt.Sprintf("%s/after_clear=%t", tc.name, reset), func(t *testing.T) {
+				s.onLoop(func() { s.ui.input.SetText(tc.text) })
+				s.draw()
+				for _, ev := range tc.keys {
+					s.key(ev.Key(), ev.Rune(), ev.Modifiers())
+				}
+				s.key(tcell.KeyRune, 'X', tcell.ModNone)
+				waitFor(t, time.Second, func() bool {
+					return s.matches(func() bool { return strings.Contains(s.ui.input.GetText(), "X") })
+				})
+				if got := onLoopValue(s, func() string { return s.ui.input.GetText() }); got != tc.want {
+					t.Fatalf("input = %q, want %q", got, tc.want)
+				}
+			})
+		}
+	}
+	// Pane shortcuts still take precedence over the editor's Alt bindings.
+	s.key(tcell.KeyRune, 'o', tcell.ModAlt)
+	waitFor(t, time.Second, func() bool { return s.matches(func() bool { return s.ui.focused == s.ui.outputView }) })
+	s.key(tcell.KeyRune, 'i', tcell.ModAlt)
+	waitFor(t, time.Second, func() bool { return s.matches(func() bool { return s.ui.focused == s.ui.input }) })
+}
+
 func TestInputHistoryBoundariesAndEditing(t *testing.T) {
 	ui := newIdleTUI(t, 32)
 	press := func(key tcell.Key) {

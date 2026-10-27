@@ -12,6 +12,18 @@ type inputField struct {
 	*tview.InputField
 }
 
+func (i *inputField) InputHandler() func(*tcell.EventKey, func(tview.Primitive)) {
+	handler := i.InputField.InputHandler()
+	return func(event *tcell.EventKey, setFocus func(tview.Primitive)) {
+		handler(event, setFocus)
+		if event.Key() == tcell.KeyRune && event.Rune() == 'f' && event.Modifiers() == tcell.ModAlt {
+			// Native Alt+F stops on the final grapheme. Advance past it using
+			// the editor's own Unicode-aware movement; at EOF this is a no-op.
+			handler(tcell.NewEventKey(tcell.KeyRight, 0, tcell.ModNone), setFocus)
+		}
+	}
+}
+
 func (i *inputField) reset() {
 	old := i.InputField
 	focused := old.HasFocus()

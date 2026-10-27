@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -73,6 +74,66 @@ func scrollbackCorpus() []string {
 // feedScrollback appends records in model order through the production delta.
 func feedScrollback(v *scrollbackView, lines, chats []string, first int64) {
 	v.sync(lineDelta{lines: lines, chats: chats, from: first, upto: first + int64(len(lines)) - 1, first: first})
+}
+
+func TestScrollbackPagingAliases(t *testing.T) {
+	for _, logs := range []bool{false, true} {
+		for _, maximized := range []bool{false, true} {
+			t.Run(fmt.Sprintf("logs=%t/maximized=%t", logs, maximized), func(t *testing.T) {
+				s := newSimTUI(t, 120, 32)
+				pane := s.ui.outputView
+				mode := maximizeMessages
+				if logs {
+					pane, mode = s.ui.logsView, maximizeLogs
+				}
+				s.onLoop(func() {
+					for i := range 100 {
+						s.ui.appendOutput(fmt.Sprintf("message %d", i))
+						s.ui.appendLogLine(fmt.Sprintf("log %d", i))
+					}
+					s.ui.input.SetText("draft")
+					s.ui.setFocus(pane)
+					if maximized {
+						s.ui.setMaximized(mode)
+					}
+				})
+				s.draw()
+				s.key(tcell.KeyPgUp, 0, tcell.ModNone)
+				waitFor(t, time.Second, func() bool { return s.matches(func() bool { return !pane.follow }) })
+				up := onLoopValue(s, func() int64 { return pane.top })
+				s.key(tcell.KeyPgDn, 0, tcell.ModNone)
+				waitFor(t, time.Second, func() bool { return s.matches(func() bool { return pane.follow }) })
+				down := onLoopValue(s, func() int64 { return pane.top })
+				if up >= down {
+					t.Fatal("fixture did not scroll by a page")
+				}
+				s.key(tcell.KeyRune, 'v', tcell.ModAlt)
+				waitFor(t, time.Second, func() bool {
+					return s.matches(func() bool { return pane.top == up && !pane.follow })
+				})
+				s.key(tcell.KeyCtrlV, 0, tcell.ModCtrl)
+				waitFor(t, time.Second, func() bool {
+					return s.matches(func() bool { return pane.top == down && pane.follow })
+				})
+				s.key(tcell.KeyUp, 0, tcell.ModNone)
+				waitFor(t, time.Second, func() bool { return s.matches(func() bool { return !pane.follow }) })
+				previous := onLoopValue(s, func() int64 { return pane.top })
+				s.key(tcell.KeyDown, 0, tcell.ModNone)
+				waitFor(t, time.Second, func() bool { return s.matches(func() bool { return pane.follow }) })
+				s.key(tcell.KeyCtrlP, 0, tcell.ModCtrl)
+				waitFor(t, time.Second, func() bool {
+					return s.matches(func() bool { return pane.top == previous && !pane.follow })
+				})
+				s.key(tcell.KeyCtrlN, 0, tcell.ModCtrl)
+				waitFor(t, time.Second, func() bool {
+					return s.matches(func() bool { return pane.top == down && pane.follow })
+				})
+				if !s.matches(func() bool { return s.ui.focused == pane && s.ui.input.GetText() == "draft" }) {
+					t.Fatal("paging changed focus or the input draft")
+				}
+			})
+		}
+	}
 }
 
 func TestScrollbackMatchesReferenceTextView(t *testing.T) {
