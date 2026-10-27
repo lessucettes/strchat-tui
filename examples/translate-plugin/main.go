@@ -1,8 +1,8 @@
-// Command translate-plugin translates outgoing strchat-tui messages with GigaChat.
+// Command translate-plugin translates strchat-tui messages with GigaChat.
 //
 // It reads one JSON request per line from stdin and writes one JSON response
-// line to stdout. Non-send requests return "unchanged"; failures use stderr,
-// exit non-zero and never echo API bodies or credentials.
+// line to stdout. Unsupported or blank requests return "unchanged"; failures
+// use stderr, exit non-zero and never echo API bodies or credentials.
 package main
 
 import (
@@ -59,8 +59,9 @@ type chatResponse struct {
 }
 
 type config struct {
-	base, auth, model, key, token, scope, target string
-	client                                       *http.Client
+	base, auth, model, key, token, scope string
+	target, receiveTarget                string
+	client                               *http.Client
 }
 
 func main() {
@@ -74,14 +75,15 @@ func main() {
 
 func configFromEnv() config {
 	return config{
-		base:   env("TRANSLATE_PLUGIN_BASE_URL", "https://api.giga.chat/v1"),
-		auth:   env("TRANSLATE_PLUGIN_AUTH_URL", "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"),
-		model:  env("TRANSLATE_PLUGIN_MODEL", "GigaChat-2"),
-		key:    strings.TrimSpace(os.Getenv("TRANSLATE_PLUGIN_API_KEY")),
-		token:  strings.TrimSpace(os.Getenv("TRANSLATE_PLUGIN_ACCESS_TOKEN")),
-		scope:  env("TRANSLATE_PLUGIN_SCOPE", "GIGACHAT_API_PERS"),
-		target: env("TRANSLATE_PLUGIN_TARGET_LANGUAGE", "English"),
-		client: &http.Client{Timeout: httpTimeout},
+		base:          env("TRANSLATE_PLUGIN_BASE_URL", "https://api.giga.chat/v1"),
+		auth:          env("TRANSLATE_PLUGIN_AUTH_URL", "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"),
+		model:         env("TRANSLATE_PLUGIN_MODEL", "GigaChat-2"),
+		key:           strings.TrimSpace(os.Getenv("TRANSLATE_PLUGIN_API_KEY")),
+		token:         strings.TrimSpace(os.Getenv("TRANSLATE_PLUGIN_ACCESS_TOKEN")),
+		scope:         env("TRANSLATE_PLUGIN_SCOPE", "GIGACHAT_API_PERS"),
+		target:        env("TRANSLATE_PLUGIN_TARGET_LANGUAGE", "French"),
+		receiveTarget: env("TRANSLATE_PLUGIN_RECEIVE_LANGUAGE", "Russian"),
+		client:        &http.Client{Timeout: httpTimeout},
 	}
 }
 
@@ -118,7 +120,14 @@ func run(ctx context.Context, in io.Reader, out io.Writer, cfg config) error {
 		return err
 	}
 
-	if req.Plugin != "on_send" || strings.TrimSpace(req.Content) == "" {
+	if strings.TrimSpace(req.Content) == "" {
+		return respond("unchanged", "")
+	}
+	switch req.Plugin {
+	case "on_send":
+	case "on_receive":
+		cfg.target = cfg.receiveTarget
+	default:
 		return respond("unchanged", "")
 	}
 

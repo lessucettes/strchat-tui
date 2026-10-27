@@ -1,7 +1,8 @@
 # translate-plugin
 
-Translates strchat-tui `on_send` messages with GigaChat. The implementation uses
-only the Go standard library and takes no command-line arguments.
+Translates strchat-tui messages with GigaChat: `on_send` into French and
+`on_receive` into Russian by default. The implementation uses only the Go
+standard library and takes no command-line arguments.
 
 ## Build
 
@@ -20,17 +21,25 @@ read -r -s -p 'GigaChat authorization key: ' TRANSLATE_PLUGIN_API_KEY
 printf '\n'
 export TRANSLATE_PLUGIN_API_KEY
 
-./strchat-tui --plugin-send="$PWD/translate-plugin" --plugin-timeout=35s
+./strchat-tui \
+  --plugin-send="$PWD/translate-plugin" \
+  --plugin-receive="$PWD/translate-plugin" \
+  --plugin-timeout=35s
 ```
 
 The key is the Base64 authorization value, without the `Basic` prefix. The plugin
 uses the value directly; it does not encode it or read credential files.
 `TRANSLATE_PLUGIN_ACCESS_TOKEN`, when nonblank, takes precedence and skips OAuth.
 
-The client starts a new plugin process for each outgoing message. The plugin
-inherits the client's environment. Its HTTP operations share a 30-second context;
+The client starts a new plugin process for each outgoing or admitted incoming
+message. The plugin inherits the client's environment. Its HTTP operations share a 30-second context;
 the HTTP client also has a 30-second timeout. The launch above sets the client's
 process timeout to 35 seconds instead of the default 10 seconds.
+
+The client does not run `on_receive` for its own messages, including local send
+feedback and recognized relay echoes. Your outgoing French text therefore stays
+French on your screen; other senders' admitted messages are translated into
+Russian. Validation and filter/mute checks still apply to both.
 
 ## Input and output
 
@@ -39,17 +48,24 @@ and exits. The input limit is 1 MiB, including the newline. EOF without a final
 newline is accepted; subsequent lines are not processed.
 
 The plugin reads `version`, `plugin` and `content`. Unknown fields are ignored.
-`version` must be `1`. Only `plugin:"on_send"` with nonblank content triggers an
-API request; `sender` and other metadata do not affect translation.
+`version` must be `1`. `plugin:"on_send"` and `plugin:"on_receive"` with nonblank
+content trigger an API request; `sender` and other metadata do not affect
+translation.
 
 ```json
 {"version":1,"plugin":"on_send","content":"Привет!"}
 ```
 
-Successful translation:
+Successful outgoing translation:
 
 ```json
-{"version":1,"action":"replace","content":"Hello!"}
+{"version":1,"action":"replace","content":"Bonjour !"}
+```
+
+For `plugin:"on_receive"`, `content:"Bonjour !"` is translated into Russian:
+
+```json
+{"version":1,"action":"replace","content":"Привет!"}
 ```
 
 Other handler names, or content that is empty after trimming whitespace, return
@@ -75,7 +91,8 @@ defaults below; credentials have no default.
 | `TRANSLATE_PLUGIN_API_KEY` | unset | Authorization key used as `Authorization: Basic <key>`. |
 | `TRANSLATE_PLUGIN_ACCESS_TOKEN` | unset | Token used as `Authorization: Bearer <token>`; skips OAuth. |
 | `TRANSLATE_PLUGIN_SCOPE` | `GIGACHAT_API_PERS` | OAuth scope. |
-| `TRANSLATE_PLUGIN_TARGET_LANGUAGE` | `English` | Target language in the system instruction. |
+| `TRANSLATE_PLUGIN_TARGET_LANGUAGE` | `French` | Outgoing target language in the system instruction. |
+| `TRANSLATE_PLUGIN_RECEIVE_LANGUAGE` | `Russian` | Incoming target language in the system instruction. |
 
 ## API requests
 
@@ -95,8 +112,9 @@ rejects an empty result. Each HTTP response decoder reads at most 1 MiB. HTTP
 statuses outside 200–299 are errors. There are no application-level retries.
 
 HTTPS uses Go's default certificate verification. The client's `--socks` option
-does not configure the plugin's HTTP client. Message text is sent to the API
-before Nostr publication.
+does not configure the plugin's HTTP client. Outgoing text is sent to the API
+before Nostr publication. Incoming text is sent only after validation and
+filter/mute checks; translation changes local presentation, not the signed event.
 
 ## Errors
 
@@ -109,6 +127,7 @@ unless an access token is supplied.
 
 An outgoing plugin error prevents publication; the client does not send the
 original text as a fallback.
+An incoming plugin error logs a warning and displays the admitted original text.
 
 ## Tests
 

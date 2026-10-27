@@ -109,7 +109,9 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 		FullPubKey: pubkey, ShortPubKey: short, IsOwnMessage: own,
 		Content: content, ID: safeSuffix(ev.ID.Hex(), 4), Chat: chat, RelayURL: relayURL}
 	user := userContext{nick: nick, chat: chat, shortPubKey: short, authorKey: authorKey}
-	if c.plugins.OnReceive != nil {
+	// Own local feedback and relay echoes retain the published text instead of
+	// running an incoming transformation over the outgoing plugin's result.
+	if c.plugins.OnReceive != nil && !own {
 		job := receivePluginJob{plugin: c.plugins.OnReceive, display: display, user: user, epoch: c.receiveEpoch,
 			request: pluginRequest{Version: 1, Plugin: "on_receive", Content: ev.Content,
 				Sender: pluginSender{PubKey: pubkey, Nick: nick}, EventID: ev.ID.Hex(), CreatedAt: int64(ev.CreatedAt)}}

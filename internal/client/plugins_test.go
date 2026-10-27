@@ -276,6 +276,62 @@ func TestIncomingPluginsOnlyChangeValidatedPresentation(t *testing.T) {
 	}
 }
 
+func TestIncomingPluginSkipsOwnMessages(t *testing.T) {
+	for _, tt := range []struct {
+		name, source string
+		retired      bool
+	}{
+		{"local_feedback", "local", false},
+		{"relay_echo", "relay", false},
+		{"retired_identity", "relay", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c, events := testClient(t)
+			c.plugins.OnReceive = testPlugin(t, "replace")
+			c.receiveJobs = make(chan receivePluginJob, 2)
+			own := signedEvent(t, "Bonjour !")
+			if tt.retired {
+				c.retiredKeys.Add(own.PubKey.Hex(), true)
+			} else {
+				c.chatKeys["lobby"] = chatSession{pubKey: own.PubKey.Hex()}
+			}
+			c.processEvent(own, tt.source)
+			if len(c.receiveJobs) != 0 || len(events) != 1 {
+				t.Fatal("own message must display without entering the receive plugin queue")
+			}
+			display := <-events
+			if display.Type != "NEW_MESSAGE" || !display.IsOwnMessage || display.Content != own.Content {
+				t.Fatalf("own message did not retain its published content: %+v", display)
+			}
+			c.processEvent(own, "duplicate")
+			if len(events) != 0 || len(c.receiveJobs) != 0 {
+				t.Fatal("own echo was displayed or processed twice")
+			}
+
+			foreign := signedEvent(t, "foreign original")
+			key := nostr.Generate()
+			foreign.PubKey = key.Public()
+			if err := foreign.Sign(key); err != nil {
+				t.Fatal(err)
+			}
+			c.processEvent(foreign, tt.source)
+			if len(c.receiveJobs) != 1 || len(events) != 0 {
+				t.Fatal("foreign message must still pass through the receive plugin")
+			}
+			job := <-c.receiveJobs
+			content, suppress, err := runMessagePlugin(c.ctx, job.plugin, job.request)
+			c.finishReceivePlugin(receivePluginResult{job: job, content: content, suppress: suppress, err: err})
+			if err != nil || len(events) != 1 {
+				t.Fatalf("foreign message processing failed: %v", err)
+			}
+			display = <-events
+			if display.Type != "NEW_MESSAGE" || display.IsOwnMessage || display.Content != "translated" || foreign.Content != "foreign original" {
+				t.Fatalf("foreign message translation changed: %+v", display)
+			}
+		})
+	}
+}
+
 func TestPluginsDoNotBlockOwnerAndCancelOnShutdown(t *testing.T) {
 	for _, outgoing := range []bool{false, true} {
 		t.Run(fmt.Sprint(outgoing), func(t *testing.T) {

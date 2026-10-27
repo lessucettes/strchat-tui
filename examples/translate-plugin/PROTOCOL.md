@@ -103,6 +103,11 @@ before `on_receive`. Filter/mute match the sanitized/truncated original text;
 mute takes priority. The plugin receives the original signed content only for
 messages that pass these checks.
 
+Own messages bypass `on_receive`, including local send feedback and relay echoes
+recognized by current or retained session public keys. They display the published
+text with the usual display sanitization/truncation; validation and filter/mute
+checks still apply.
+
 Replacement changes local display text, not the signed event. The result is
 sanitized/truncated but not filtered again. An empty replacement leaves an empty
 message row; `suppress` hides the message silently. A processing error logs a
