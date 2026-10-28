@@ -98,6 +98,103 @@ func TestConfigSaveFailureIsReportedOnce(t *testing.T) {
 	}
 }
 
+func TestArtPreferencePersistsAndRejectsFailedChanges(t *testing.T) {
+	c, events := testClient(t)
+	path := filepath.Join(t.TempDir(), "config.json")
+	c.config.path, c.config.Nick = path, "alice"
+	c.config.Theme = DefaultTheme
+	for _, name := range []string{"windmill", "rain", "rain", "off", "random"} {
+		c.handleAction(UserAction{Type: "SET_ART", Payload: name})
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("art selection did not save configuration: %v", err)
+		}
+		var saved struct{ Art string }
+		if err := json.Unmarshal(raw, &saved); err != nil || saved.Art != name {
+			t.Fatalf("stored art = %q, want %q (decode error: %v)", saved.Art, name, err)
+		}
+		reloaded, err := loadConfigFrom(path)
+		if err != nil || !reflect.DeepEqual(c.config, reloaded) {
+			t.Fatalf("art preference or other settings did not survive reload: %v", err)
+		}
+		c.config = reloaded
+		select {
+		case ev := <-events:
+			if ev.Type != "ART_UPDATE" || ev.Content != name {
+				t.Fatalf("saved art not sent to the UI: %+v", ev)
+			}
+		default:
+			t.Fatal("saved art was not acknowledged")
+		}
+		if len(events) != 0 {
+			t.Fatal("art selection emitted unexpected extra events")
+		}
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []UserAction{
+		{Type: "SET_ART", Payload: "not-a-scene"},
+		{Type: "SET_ART", Payload: "windmill"},
+		{Type: "SET_THEME", Payload: "red-gold"},
+		{Type: "SET_SCROLLBAR", Payload: "2"},
+	} {
+		t.Run(action.Type+"/"+action.Payload, func(t *testing.T) {
+			// Exercise normalization through each appearance save without letting
+			// a shallow expected snapshot hide changes to the original views.
+			c.config.Views = []View{{Name: "lobby"}, {Name: "coffee"}, {
+				Name: "mixed", IsGroup: true, Children: []string{"lobby", "coffee"}, SelectedChat: "removed",
+			}}
+			if action.Payload != "not-a-scene" {
+				c.config.path = t.TempDir() // Atomic replacement of a directory must fail.
+			}
+			unchanged, err := json.Marshal(c.config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.handleAction(action)
+			current, err := json.Marshal(c.config)
+			if err != nil || !bytes.Equal(current, unchanged) {
+				t.Fatal("failed selection changed live settings or group destination")
+			}
+			select {
+			case ev := <-events:
+				if ev.Type != "ERROR" {
+					t.Fatalf("selection failure was not reported: %+v", ev)
+				}
+			default:
+				t.Fatal("selection failure was silent")
+			}
+			after, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(before, after) || len(events) != 0 {
+				t.Fatal("failed selection changed saved settings or acknowledged success")
+			}
+		})
+	}
+}
+
+func TestLoadArtPreferenceDefaultsAndCompatibility(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{
+		{`{}`, "random"}, {`{"art":""}`, "random"}, {`{"art":"future-scene"}`, "random"},
+		{`{"art":"windmill"}`, "windmill"}, {`{"art":"random"}`, "random"}, {`{"art":"off"}`, "off"},
+	} {
+		path := filepath.Join(t.TempDir(), "config.json")
+		writeTestFile(t, path, tc.raw, 0o600)
+		cfg, err := loadConfigFrom(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Art != tc.want {
+			t.Fatalf("loaded art = %q, want %q for %s", cfg.Art, tc.want, tc.raw)
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil || string(raw) != tc.raw {
+			t.Fatal("loading an art preference rewrote configuration")
+		}
+	}
+}
+
 func TestLoadConfigFromCreatesSecretFreeDefault(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
@@ -111,6 +208,9 @@ func TestLoadConfigFromCreatesSecretFreeDefault(t *testing.T) {
 	}
 	if conf.Theme != DefaultTheme {
 		t.Errorf("default theme = %q, want %q", conf.Theme, DefaultTheme)
+	}
+	if conf.Art != DefaultArt {
+		t.Errorf("default art = %q, want %q", conf.Art, DefaultArt)
 	}
 	if conf.Scrollbar != ScrollbarRight {
 		t.Errorf("default scrollbar = %v, want right", conf.Scrollbar)

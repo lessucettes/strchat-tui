@@ -50,6 +50,12 @@ var helpCategories = []struct{ name, commands string }{
 	{"appearance", `  /theme [name|number]  (Alias: /t)
     Select and save a theme. No arguments: list themes.
 
+  /art [scene|random|off]  (Alias: /a)
+    Choose a decorative ASCII scene. No arguments: list scenes.
+    Saved across restarts; default: random scene at startup.
+    Use random to reset the preference; select again for a new variation.
+    Shown between Messages and Chats/Info in wide windows.
+
   /scrollbar [0|1|2]  (Alias: /sb)
     Select and save scrollbar placement: 0 off, 1 right, 2 left.
     Default: 1. No arguments: cycle 0 -> 1 -> 2 -> 0 silently.
@@ -68,7 +74,7 @@ var helpCategories = []struct{ name, commands string }{
     Describe your actions or emotions in the third person.
     Example: /me waves -> * nick#key waves.
 
-  /clear
+  /clear  (Alias: /c)
     Clear messages, input history and known participants.
     Keep Logs, chats, groups, settings, identities and relay connections.
 

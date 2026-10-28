@@ -68,6 +68,8 @@ type tui struct {
 	activeViewIndex int
 	chatNicks       map[string]string
 	themeName       string
+	artSelection    string
+	artRevision     uint64
 	scrollbarMode   client.ScrollbarPosition
 	relays          []client.RelayInfo
 	stateRev        int64
@@ -87,8 +89,10 @@ type tui struct {
 
 	// dirty marks model changes that the redraw loop has not painted yet.
 	// redraw starts the coalescing timer on demand, rather than polling at idle.
-	dirty  atomic.Bool
-	redraw chan struct{}
+	dirty      atomic.Bool
+	redraw     chan struct{}
+	artRunning atomic.Bool
+	artWake    chan struct{}
 
 	// View state. Only touched on the tview event loop.
 	focused              tview.Primitive
@@ -142,6 +146,7 @@ type tui struct {
 	outputPane            *scrollbackView
 	input                 *inputField
 	hints                 *tview.TextView
+	art                   *artPane
 	maximizedLogsFlex     *tview.Flex
 	maximizedOutputFlex   *tview.Flex
 }
@@ -166,6 +171,7 @@ func New(actions chan<- client.UserAction, events <-chan client.DisplayEvent) *t
 		doneCh:            make(chan struct{}),
 		screenReady:       make(chan struct{}),
 		redraw:            make(chan struct{}, 1),
+		artWake:           make(chan struct{}, 1),
 		selectedForGroup:  make(map[string]bool),
 		groupFocus:        make(map[string]string),
 		completionEntries: []string{},
@@ -324,12 +330,30 @@ func (t *tui) redrawLoop() {
 	timer := time.NewTimer(renderInterval)
 	timer.Stop()
 	defer timer.Stop()
+	artTimer := time.NewTimer(artInterval)
+	artTimer.Stop()
+	defer artTimer.Stop()
+	var artTick <-chan time.Time
 	var tick <-chan time.Time
 	var next time.Time
 	for {
 		select {
 		case <-t.doneCh:
 			return
+		case <-t.artWake:
+			artTimer.Stop()
+			artTick = nil
+			if t.artRunning.Load() {
+				artTimer.Reset(artInterval)
+				artTick = artTimer.C
+			}
+		case <-artTick:
+			artTick = nil
+			if t.artRunning.Load() {
+				t.wake()
+				artTimer.Reset(artInterval)
+				artTick = artTimer.C
+			}
 		case <-t.redraw:
 			if tick == nil && t.dirty.Load() {
 				timer.Reset(max(0, time.Until(next)))
@@ -412,6 +436,12 @@ func (t *tui) applyEvent(ev client.DisplayEvent) {
 	case "THEME_UPDATE":
 		t.mu.Lock()
 		t.themeName = ev.Content
+		t.mu.Unlock()
+		t.markDirty()
+	case "ART_UPDATE":
+		t.mu.Lock()
+		t.artSelection = ev.Content
+		t.artRevision++
 		t.mu.Unlock()
 		t.markDirty()
 	case "SCROLLBAR_UPDATE":
@@ -595,6 +625,8 @@ type modelSnapshot struct {
 	activeIndex   int
 	chatNicks     map[string]string
 	themeName     string
+	artSelection  string
+	artRevision   uint64
 	scrollbarMode client.ScrollbarPosition
 	relays        []client.RelayInfo
 	stateRev      int64
@@ -619,6 +651,8 @@ func (t *tui) snapshot() modelSnapshot {
 		activeIndex:   t.activeViewIndex,
 		chatNicks:     t.chatNicks, // immutable after the collector clones it
 		themeName:     t.themeName,
+		artSelection:  t.artSelection,
+		artRevision:   t.artRevision,
 		scrollbarMode: t.scrollbarMode,
 		relays:        slices.Clone(t.relays),
 		stateRev:      t.stateRev,
@@ -772,6 +806,7 @@ const (
 // initViews builds every widget. Scan scrollback is bounded by the model and
 // windowed into the tview widgets by scrollbackView.
 func (t *tui) initViews() {
+	t.art = newArtPane(t.theme)
 	t.logsView = newScrollbackView(false)
 	t.logsView.SetBorder(true).SetTitle(titleLogs).SetTitleAlign(tview.AlignLeft)
 	t.logsView.ScrollToEnd()
@@ -834,6 +869,7 @@ func (t *tui) initLayout() {
 		t.captureScreen(screen)
 		t.applyLayout(screen)
 		t.render()
+		t.syncArt()
 		return false
 	})
 }

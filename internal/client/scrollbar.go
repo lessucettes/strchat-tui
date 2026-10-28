@@ -2,6 +2,7 @@ package client
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -60,6 +61,7 @@ func (c *client) setScrollbar(raw string) {
 	}
 
 	updated := *c.config
+	updated.Views = slices.Clone(updated.Views)
 	updated.Scrollbar = next
 	if err := updated.save(); err != nil {
 		c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Failed to save scrollbar. The previous setting is unchanged. Reason: %q.", err)})

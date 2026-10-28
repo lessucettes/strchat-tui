@@ -1,6 +1,9 @@
 package client
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
 const DefaultTheme = "default"
 
@@ -20,6 +23,7 @@ func (c *client) setTheme(name string) {
 		return
 	}
 	next := *c.config
+	next.Views = slices.Clone(next.Views)
 	next.Theme = name
 	if err := next.save(); err != nil {
 		c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Failed to save theme. The previous theme is unchanged. Reason: %q.", err)})

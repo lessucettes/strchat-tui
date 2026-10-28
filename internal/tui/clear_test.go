@@ -129,7 +129,7 @@ func TestClearRepeatedAndRejectedRequests(t *testing.T) {
 	actions := make(chan client.UserAction, 2)
 	ui.actionsChan = actions
 	ui.handleCommand("/clear")
-	ui.handleCommand("/clear")
+	ui.handleCommand("/c")
 	ui.applyEvent(client.DisplayEvent{Type: "CLEARED"})
 	ui.applyEvent(client.DisplayEvent{Type: "INFO", Content: "between clears"})
 	if ui.output.count != 0 {
@@ -139,13 +139,13 @@ func TestClearRepeatedAndRejectedRequests(t *testing.T) {
 	ui.applyEvent(client.DisplayEvent{Type: "INFO", Content: "keep this"})
 	// Both actions are still in the saturated input queue. A failed request must
 	// retain the current history, not clear only one half of the application.
-	ui.handleCommand("/clear")
+	ui.handleCommand("/c")
 	if ui.output.count != 1 || !strings.Contains(ui.output.snapshot()[0], "keep this") {
 		t.Fatal("rejected clear discarded history")
 	}
 	<-actions
 	<-actions
-	ui.handleCommand("/clear extra")
+	ui.handleCommand("/c extra")
 	if len(ui.actionsChan) != 0 || ui.output.count != 1 {
 		t.Fatal("clear with unexpected arguments changed the session")
 	}

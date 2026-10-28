@@ -266,6 +266,26 @@ func (c *client) deleteView(viewName string) {
 
 // Settings
 
+// setArt confirms a selection only after saving it. Re-selecting the same mode
+// still emits an update so the event loop can start a new scene variation.
+func (c *client) setArt(name string) {
+	name = strings.TrimSpace(name)
+	if !validArt(name) {
+		c.emit(DisplayEvent{Type: "ERROR", Content: "Unknown ASCII scene. Use /art to list scenes."})
+		return
+	}
+	next := *c.config
+	// save normalizes view selections; never let that mutate the live config.
+	next.Views = slices.Clone(next.Views)
+	next.Art = name
+	if err := next.save(); err != nil {
+		c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Failed to save ASCII scene. The previous setting is unchanged. Reason: %q.", err)})
+		return
+	}
+	c.config.Art = name
+	c.emit(DisplayEvent{Type: "ART_UPDATE", Content: name})
+}
+
 func (c *client) setNick(nick string) {
 	nick = strings.TrimSpace(nick)
 	c.config.Nick = nick

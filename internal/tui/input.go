@@ -362,7 +362,7 @@ func (t *tui) handleCommand(text string) {
 	case "/me":
 		t.bell()
 		t.applyLocalEvent(client.DisplayEvent{Type: "ERROR", Content: "Usage: /me <action>"})
-	case "/clear":
+	case "/clear", "/c":
 		if payload != "" {
 			t.bell()
 			t.applyLocalEvent(client.DisplayEvent{Type: "ERROR", Content: "Usage: /clear"})
@@ -448,6 +448,8 @@ func (t *tui) handleCommand(text string) {
 		t.submit(client.UserAction{Type: "GET_HELP", Payload: payload})
 	case "/theme", "/t":
 		t.handleTheme(payload)
+	case "/art", "/a":
+		t.handleArt(payload)
 	case "/scrollbar", "/sb":
 		t.submit(client.UserAction{Type: "SET_SCROLLBAR", Payload: payload})
 	default:

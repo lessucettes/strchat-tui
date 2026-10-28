@@ -137,6 +137,7 @@ func (c *client) Run() {
 	c.sendStateUpdate()
 	c.emit(DisplayEvent{Type: "THEME_UPDATE", Content: c.config.Theme})
 	c.emit(DisplayEvent{Type: "SCROLLBAR_UPDATE", Payload: c.config.Scrollbar})
+	c.emit(DisplayEvent{Type: "ART_UPDATE", Content: c.config.Art})
 	retryTimer := time.NewTimer(time.Hour)
 	defer retryTimer.Stop()
 	for c.ctx.Err() == nil {
@@ -261,6 +262,8 @@ func (c *client) handleAction(action UserAction) {
 		c.setNick(action.Payload)
 	case "SET_THEME":
 		c.setTheme(action.Payload)
+	case "SET_ART":
+		c.setArt(action.Payload)
 	case "SET_SCROLLBAR":
 		c.setScrollbar(action.Payload)
 	case "LIST_CHATS":

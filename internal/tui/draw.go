@@ -66,6 +66,7 @@ type layoutPlan struct {
 	logs   bool
 	output bool
 	hints  bool
+	art    bool
 }
 
 // layoutPlanFor picks the layout for a w×h terminal. The mapping is total: any
@@ -81,7 +82,7 @@ func layoutPlanFor(w, h int) layoutPlan {
 	case w < narrowWidth:
 		return layoutPlan{mode: modeNarrow, logs: true, output: true, hints: true}
 	default:
-		return layoutPlan{mode: modeFull, logs: true, output: true, hints: true}
+		return layoutPlan{mode: modeFull, logs: true, output: true, hints: true, art: w >= artMinWidth}
 	}
 }
 
@@ -113,9 +114,15 @@ func (t *tui) rebuildLayout(plan layoutPlan) {
 	switch plan.mode {
 	case modeFull:
 		t.contentGrid.SetRows(0)
-		t.contentGrid.SetColumns(0, 30)
 		t.contentGrid.AddItem(t.withScrollbar(t.outputPane), 0, 0, 1, 1, 0, 0, false)
-		t.contentGrid.AddItem(t.sidebarFlex, 0, 1, 1, 1, 0, 0, false)
+		if plan.art && t.art.scene != nil {
+			t.contentGrid.SetColumns(0, artWidth, 30)
+			t.contentGrid.AddItem(t.art, 0, 1, 1, 1, 0, 0, false)
+			t.contentGrid.AddItem(t.sidebarFlex, 0, 2, 1, 1, 0, 0, false)
+		} else {
+			t.contentGrid.SetColumns(0, 30)
+			t.contentGrid.AddItem(t.sidebarFlex, 0, 1, 1, 1, 0, 0, false)
+		}
 	case modeNarrow:
 		t.contentGrid.SetRows(0, narrowSidebarRows)
 		t.contentGrid.SetColumns(0)
@@ -343,6 +350,7 @@ func (t *tui) render() {
 		s = t.snapshot() // Theme changes invalidate both scrollback cursors.
 	}
 	t.restoreScrollbar(s.scrollbarMode)
+	t.restoreArt(s.artSelection, s.artRevision)
 	view := activeView(s)
 	t.outputPane.enabled = view != nil && view.IsGroup
 	t.outputPane.focus = t.conversationChat(s)

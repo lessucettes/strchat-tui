@@ -12,7 +12,7 @@ import (
 func testClient(t testing.TB) (*client, chan DisplayEvent) {
 	t.Helper()
 	events := make(chan DisplayEvent, 1024)
-	c := newClient(&config{Views: []View{{Name: "lobby"}}, ActiveViewName: "lobby"}, nil, events)
+	c := newClient(&config{Art: DefaultArt, Views: []View{{Name: "lobby"}}, ActiveViewName: "lobby"}, nil, events)
 	t.Cleanup(c.cancel)
 	return c, events
 }

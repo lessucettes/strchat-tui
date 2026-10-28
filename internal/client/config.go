@@ -33,6 +33,7 @@ type filter struct {
 type config struct {
 	Nick           string            `json:"nick,omitempty"`
 	Theme          string            `json:"theme,omitempty"`
+	Art            string            `json:"art"`
 	Scrollbar      ScrollbarPosition `json:"scrollbar"`
 	Views          []View            `json:"views"`
 	ActiveViewName string            `json:"active_view_name"`
@@ -41,6 +42,17 @@ type config struct {
 	Filters        []filter          `json:"filters,omitempty"`
 	Mutes          []filter          `json:"mutes,omitempty"`
 	path           string            `json:"-"`
+}
+
+const DefaultArt = "random"
+
+// ArtScenes returns the scene names shared by configuration and the renderer.
+func ArtScenes() []string {
+	return []string{"herbarium", "interference", "windmill", "skyscraper", "bob", "tank", "snake", "rain", "maze", "spacewars"}
+}
+
+func validArt(name string) bool {
+	return name == DefaultArt || name == "off" || slices.Contains(ArtScenes(), name)
 }
 
 // Windows uses the containing directory's ACL; Unix platforms use owner-only modes.
@@ -91,6 +103,9 @@ func loadConfigFrom(path string) (*config, error) {
 	// Missing (legacy) or unrecognized theme names must not prevent startup.
 	if !validTheme(conf.Theme) {
 		conf.Theme = DefaultTheme
+	}
+	if !validArt(conf.Art) {
+		conf.Art = DefaultArt
 	}
 	conf.normalizeGroupSelections()
 
@@ -192,6 +207,7 @@ func (c *config) save() error {
 func createDefaultConfig(path string) (*config, error) {
 	conf := &config{
 		Theme:          DefaultTheme,
+		Art:            DefaultArt,
 		Scrollbar:      ScrollbarRight,
 		Views:          []View{},
 		ActiveViewName: "",
