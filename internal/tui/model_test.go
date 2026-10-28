@@ -143,6 +143,35 @@ func TestFormatMessageEscapesUntrustedFields(t *testing.T) {
 	}
 }
 
+func TestFormatActionMessage(t *testing.T) {
+	for _, own := range []bool{false, true} {
+		for _, tc := range []struct {
+			content string
+			want    string
+		}{
+			{"/me waves at @a[b] [red]👋", "coffee * e[vil]#abcd waves at @a[b] [red]👋 [id1 12:00:00]"},
+			{"/me\twaves\nagain", "coffee * e[vil]#abcd waves\nagain [id1 12:00:00]"},
+			{"/me", "coffee e[vil]#abcd> /me [id1 12:00:00]"},
+			{"/me   ", "coffee e[vil]#abcd> /me    [id1 12:00:00]"},
+			{"/message hello", "coffee e[vil]#abcd> /message hello [id1 12:00:00]"},
+			{"hello /me waves", "coffee e[vil]#abcd> hello /me waves [id1 12:00:00]"},
+		} {
+			ev := client.DisplayEvent{Nick: "e[vil]", ShortPubKey: "abcd", Content: tc.content,
+				ID: "id1", Timestamp: "12:00:00", IsOwnMessage: own}
+			line := formatMessage(ev, messageStyle{label: "coffee ", nickTag: "[#33ccff]",
+				mention: "@a[b]", ownColor: tcell.ColorLime, metaColor: tcell.ColorGray})
+			view := tview.NewTextView().SetDynamicColors(true)
+			view.SetText(line)
+			if got := view.GetText(true); got != tc.want {
+				t.Errorf("own=%v content=%q: got %q, want %q", own, tc.content, got, tc.want)
+			}
+			if strings.Contains(line, "[red]") || strings.Contains(line, "[vil]") || strings.Contains(line, "[b]") {
+				t.Errorf("action retained injected markup: %q", line)
+			}
+		}
+	}
+}
+
 func TestFormatMessageMentionWithMarkupNickCannotInject(t *testing.T) {
 	ev := client.DisplayEvent{Nick: "me", Content: "hi @a[b] there", ShortPubKey: "ffff", ID: "id4", Timestamp: "12:00:03"}
 	got := formatMessage(ev, messageStyle{mention: "@a[b]", ownColor: tcell.ColorLime, metaColor: tcell.ColorGray})

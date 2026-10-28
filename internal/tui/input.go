@@ -58,7 +58,8 @@ func (t *tui) setupInputHandlers() {
 			return
 		}
 		t.rememberInput(text)
-		if strings.HasPrefix(text, "/") {
+		_, actionMessage := actionText(text)
+		if strings.HasPrefix(text, "/") && !actionMessage {
 			t.handleCommand(text)
 			t.input.SetText("")
 			return
@@ -358,6 +359,9 @@ func (t *tui) handleChatListKeys(event *tcell.EventKey) *tcell.EventKey {
 func (t *tui) handleCommand(text string) {
 	command, payload := splitCommand(text)
 	switch command {
+	case "/me":
+		t.bell()
+		t.applyLocalEvent(client.DisplayEvent{Type: "ERROR", Content: "Usage: /me <action>"})
 	case "/clear":
 		if payload != "" {
 			t.bell()

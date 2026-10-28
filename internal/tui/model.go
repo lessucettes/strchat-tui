@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/gdamore/tcell/v2"
@@ -233,17 +234,42 @@ type messageStyle struct {
 // formatMessage renders one NEW_MESSAGE event as a single TextView markup
 // line. Only our own tags stay active: nick, key, content, id and timestamp
 // are escaped, so message text cannot inject colors or control the layout.
-// Content is rendered as it arrives, including embedded newlines.
+// A leading /me is displayed as an IRC-style action; the event stays unchanged.
+// Embedded newlines are preserved.
 func formatMessage(ev client.DisplayEvent, st messageStyle) string {
 	nick := sanitizeLineForDisplay(ev.Nick)
 	shortKey := sanitizeLineForDisplay(ev.ShortPubKey)
-	content := highlightMention(truncateRunes(ev.Content, maxLineRunes), st.mention, st.ownColor)
+	text := truncateRunes(ev.Content, maxLineRunes)
+	body, action := actionText(text)
+	if action {
+		text = body
+	}
+	content := highlightMention(text, st.mention, st.ownColor)
 	meta := fmt.Sprintf("%s[%s %s][-]", colorTag(st.metaColor), sanitizeLineForDisplay(ev.ID), sanitizeLineForDisplay(ev.Timestamp))
+	if action {
+		nickTag := st.nickTag
+		if ev.IsOwnMessage {
+			nickTag = colorBoldTag(st.ownColor)
+			content = colorTag(st.ownColor) + content + "[-]"
+		}
+		return fmt.Sprintf("%s* %s%s[-::-]#%s %s %s", st.label, nickTag, nick, shortKey, content, meta)
+	}
 	if ev.IsOwnMessage {
 		return fmt.Sprintf("%s%s%s[-::-]#%s> %s%s[-] %s",
 			st.label, colorBoldTag(st.ownColor), nick, shortKey, colorTag(st.ownColor), content, meta)
 	}
 	return fmt.Sprintf("%s%s%s[-::-]#%s> %s %s", st.label, st.nickTag, nick, shortKey, content, meta)
+}
+
+// actionText recognizes only a complete /me prefix with a nonempty body.
+// Input and rendering share this grammar without modifying message content.
+func actionText(text string) (string, bool) {
+	rest, ok := strings.CutPrefix(text, "/me")
+	if !ok {
+		return "", false
+	}
+	body := strings.TrimLeftFunc(rest, unicode.IsSpace)
+	return body, body != "" && len(body) < len(rest)
 }
 
 // highlightMention emphasizes every occurrence of mention in content while

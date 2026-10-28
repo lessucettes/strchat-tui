@@ -64,6 +64,10 @@ var helpCategories = []struct{ name, commands string }{
 	{"general", `  /nick [name]  (Alias: /n)
     Set a nickname. No arguments: use each chat's session nickname.
 
+  /me <action>
+    Display an IRC-style action: * nick#key action.
+    Send ordinary message text with the /me prefix; no protocol changes.
+
   /clear
     Clear messages, input history and known participants.
     Keep Logs, chats, groups, settings, identities and relay connections.
