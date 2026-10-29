@@ -110,10 +110,6 @@ type artScene interface {
 	draw(*artCanvas, time.Duration)
 }
 
-type artSceneFunc func(*artCanvas, time.Duration)
-
-func (f artSceneFunc) draw(c *artCanvas, elapsed time.Duration) { f(c, elapsed) }
-
 // All fields, including scene simulations, belong to the drawing event loop.
 type artPane struct {
 	*tview.Box
@@ -177,13 +173,18 @@ func (p *artPane) Draw(screen tcell.Screen) {
 	p.scene.draw(&p.canvas, p.elapsed)
 	th := p.theme
 	colors := [...]tcell.Color{th.borderColor, th.titleColor, th.titleColor, th.logWarnColor, th.logInfoColor, th.logWarnColor, th.logErrorColor}
+	var styles [len(colors)]tcell.Style
+	for i, color := range colors {
+		styles[i] = tcell.StyleDefault.Foreground(color).Background(th.backgroundColor)
+	}
 	for row := 0; row < p.canvas.h; row++ {
 		for col := 0; col < p.canvas.w; col++ {
 			cell := p.canvas.cells[row*p.canvas.w+col]
 			if cell.ch == 0 || cell.ch == ' ' {
 				continue
 			}
-			screen.Put(x+col, y+row, string(cell.ch), tcell.StyleDefault.Foreground(colors[cell.tone]).Background(th.backgroundColor))
+			i := int(cell.ch - ' ')
+			screen.Put(x+col, y+row, printableASCII[i:i+1], styles[cell.tone])
 		}
 	}
 }
@@ -355,7 +356,7 @@ func newHerbariumScene(seed uint64) artScene {
 			{base: 0.600, tip: 0.820, height: 0.56, bend: 0.06, sway: 0.24, phase: rng.Float64() * 6.28, nodeShift: rng.Float64() * 0.4, style: 3, bloom: 4},
 		}
 	}
-	return artSceneFunc(h.draw)
+	return h
 }
 
 func natHerbPotBounds(w int) (x, width int) {
@@ -621,7 +622,7 @@ func newInterferenceScene(seed uint64) artScene {
 		baseAngle:  rng.Float64() * math.Pi,
 		separation: 9 + rng.Float64()*4,
 	}
-	return artSceneFunc(it.draw)
+	return it
 }
 
 func natInterferenceCell(v float64) (rune, artTone) {
@@ -655,6 +656,23 @@ func (it *natInterference) draw(c *artCanvas, elapsed time.Duration) {
 	cx := float64(w-1) * 0.5
 	cy := float64(h-1) * 0.5
 
+	// Beam directions depend on time, not on the cell. Keep the original
+	// arithmetic order and separate Sin/Cos calls to preserve raster thresholds.
+	var beamCos, beamSin [5]float64
+	switch it.family {
+	case 2:
+		for k := range beamCos {
+			a := float64(k)*2*math.Pi/5 + phase*0.07
+			beamCos[k], beamSin[k] = math.Cos(a), math.Sin(a)
+		}
+	case 4:
+		rot := 0.18 * math.Sin(phase*0.20)
+		for k := 0; k < 3; k++ {
+			a := float64(k)*2*math.Pi/3 + rot
+			beamCos[k], beamSin[k] = math.Cos(a), math.Sin(a)
+		}
+	}
+
 	for y := 0; y < h; y++ {
 		py := float64(y) - cy
 		for x := 0; x < w; x++ {
@@ -672,8 +690,7 @@ func (it *natInterference) draw(c *artCanvas, elapsed time.Duration) {
 			case 2: // five-fold quasicrystal
 				sum := 0.0
 				for k := 0; k < 5; k++ {
-					a := float64(k)*2*math.Pi/5 + phase*0.07
-					sum += math.Cos(0.95*(px*math.Cos(a)+py*math.Sin(a)) + phase + float64(k)*1.3)
+					sum += math.Cos(0.95*(px*beamCos[k]+py*beamSin[k]) + phase + float64(k)*1.3)
 				}
 				v = 0.5 + 0.5*sum/5
 			case 3: // twisted vortex beam
@@ -682,10 +699,8 @@ func (it *natInterference) draw(c *artCanvas, elapsed time.Duration) {
 				v = 0.5 + 0.5*math.Sin(float64(it.n)*ang+0.58*rad-phase*1.8)
 			case 4: // three-beam lattice
 				sum := 0.0
-				rot := 0.18 * math.Sin(phase*0.20)
 				for k := 0; k < 3; k++ {
-					a := float64(k)*2*math.Pi/3 + rot
-					sum += math.Cos(0.68*(px*math.Cos(a)+py*math.Sin(a)) + phase + float64(k)*0.4)
+					sum += math.Cos(0.68*(px*beamCos[k]+py*beamSin[k]) + phase + float64(k)*0.4)
 				}
 				v = 0.5 + 0.5*sum/3
 			default: // Fresnel spiral zone plate
@@ -718,7 +733,7 @@ func newWindmillScene(seed uint64) artScene {
 		seed: seed, phase: rng.Float64() * 2 * math.Pi,
 		rate: 0.35 + rng.Float64()*0.1,
 	}
-	return artSceneFunc(ls.draw)
+	return ls
 }
 
 func (ls *natWindmill) draw(c *artCanvas, elapsed time.Duration) {
@@ -952,7 +967,7 @@ func newRainScene(seed uint64) artScene {
 			period: 3.5 + rng.Float64()*1.5,
 		}
 	}
-	return artSceneFunc(r.draw)
+	return r
 }
 
 func (r *natRain) draw(c *artCanvas, elapsed time.Duration) {

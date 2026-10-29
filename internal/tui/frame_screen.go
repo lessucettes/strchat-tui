@@ -48,6 +48,8 @@ type submittedCell struct {
 	style tcell.Style
 }
 
+const printableASCII = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+
 // newFrameScreen creates the terminal screen and wraps it in the final-frame
 // diff adapter.
 func newFrameScreen() (*frameScreen, error) {
@@ -156,10 +158,9 @@ func (s *frameScreen) SetContent(x, y int, mainc rune, combc []rune, style tcell
 	// tview uses this legacy API for every cell. CellBuffer.SetContent builds
 	// an escaping rune slice/string even for ASCII. Slice immutable text for
 	// that common case; Put still owns grapheme widths and ColorNone handling.
-	const ascii = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
 	if len(combc) == 0 && mainc >= ' ' && mainc <= '~' {
 		i := int(mainc - ' ')
-		s.work.Put(x, y, ascii[i:i+1], style)
+		s.work.Put(x, y, printableASCII[i:i+1], style)
 		return
 	}
 	s.work.SetContent(x, y, mainc, combc, style)
