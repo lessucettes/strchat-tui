@@ -39,11 +39,18 @@ func TestInactiveGroupInfoIsPreviewOnly(t *testing.T) {
 	state := focusGroupState().Payload.(client.StateUpdate)
 	state.Views = append(state.Views, client.View{Name: "preview", IsGroup: true, Children: []string{"lobby", "ucfv0"}})
 	ui.applyEvent(client.DisplayEvent{Type: "STATE_UPDATE", Payload: state})
+	ui.applyEvent(client.DisplayEvent{Type: "PRESENCE_UPDATE", Payload: map[string]int{"ucfv0": 3}})
 	ui.render()
 	ui.openInfo()
 	ui.handleInfoKeys(tcell.NewEventKey(tcell.KeyHome, 0, tcell.ModNone))
+	if got := ui.detailsView.GetText(true); got != " ▶ coffee\n [3] ucfv0\n [0] lobby" {
+		t.Fatalf("active group lost its participant counts: %q", got)
+	}
 	ui.chatList.SetCurrentItem(4)
 	ui.render()
+	if got := ui.detailsView.GetText(true); got != " - lobby\n - ucfv0" {
+		t.Fatalf("inactive group must show dashes, not participant counts: %q", got)
+	}
 	if result := ui.handleInfoKeys(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone)); result == nil {
 		t.Fatal("inactive group preview consumed an arrow as a routing command")
 	}

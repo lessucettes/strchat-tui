@@ -49,12 +49,13 @@ func (t *tui) conversationChat(s modelSnapshot) string {
 	return ""
 }
 
-// groupInfoRow is one chat line in the Info pane. Its count always comes from
-// the presence snapshot; the marker is reserved for the active conversation.
+// groupInfoRow is one chat line in the Info pane. Only the active group shows
+// presence counts; inactive previews use dashes instead of implying zero users.
 type groupInfoRow struct {
-	chat     string
-	users    int
-	selected bool
+	chat      string
+	users     int
+	selected  bool
+	showCount bool
 }
 
 // markup is the dynamic-colors form of the row. The literal count brackets are
@@ -62,6 +63,9 @@ type groupInfoRow struct {
 func (r groupInfoRow) markup(highlight string) string {
 	if r.selected {
 		return fmt.Sprintf(" %s▶ %s[-::-]", highlight, sanitizeLineForDisplay(r.chat))
+	}
+	if !r.showCount {
+		return " - " + sanitizeLineForDisplay(r.chat)
 	}
 	return " " + tview.Escape(fmt.Sprintf("[%d]", r.users)) + " " + sanitizeLineForDisplay(r.chat)
 }
@@ -80,7 +84,7 @@ func (t *tui) groupInfoRows(s modelSnapshot, index int, view client.View) []grou
 	marked := index == s.activeIndex
 	current := t.conversationChat(s)
 	for _, child := range view.Children {
-		rows = append(rows, groupInfoRow{chat: child, users: s.presence[child], selected: marked && child == current})
+		rows = append(rows, groupInfoRow{chat: child, users: s.presence[child], selected: marked && child == current, showCount: marked})
 	}
 	return rows
 }
