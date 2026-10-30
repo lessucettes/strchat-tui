@@ -62,9 +62,12 @@ func TestMouseGroupDestinationUsesWrappedRowsAndPreservesDraft(t *testing.T) {
 	for _, size := range [][2]int{{120, 32}, {58, 10}, {16, 10}} {
 		t.Run(fmt.Sprintf("%dx%d", size[0], size[1]), func(t *testing.T) {
 			s := newSimTUI(t, size[0], size[1])
-			chat := "qqqqqqqqqqqq"
+			// The count prefix makes this row wrap where the old "- " prefix
+			// did not, so hit testing must measure the rendered text.
+			chat := "qqqqqqqqqq"
 			s.onLoop(func() {
 				s.ui.applyEvent(testState(client.View{Name: "mixed", IsGroup: true, Children: []string{"coffee", chat, "lobby"}}))
+				s.ui.applyEvent(client.DisplayEvent{Type: "PRESENCE_UPDATE", Payload: map[string]int{chat: 125}})
 				for i := range 80 {
 					event := testMessage(i)
 					event.Chat = "coffee"

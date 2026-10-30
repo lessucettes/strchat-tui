@@ -21,7 +21,13 @@ var helpCategories = []struct{ name, commands string }{
 
   /del [name]  (Alias: /d)
     Leave a chat or delete a local group.
-    No arguments: use the active chat or group.`},
+    No arguments: use the active chat or group.
+
+  Participant counts use messages and presence from the last five minutes,
+  including you. Messages shows the selected chat's count above two users;
+  Info shows counts for the other group chats.
+  Only the active destination announces presence, every 40-80 seconds.
+  This announces channel participation, not your physical location.`},
 	{"moderation", `  /filter [pattern|number]  (Alias: /f)
     With a pattern: add and enable an inclusion rule.
     With a number: toggle a rule. No arguments: list rules.
@@ -75,8 +81,9 @@ var helpCategories = []struct{ name, commands string }{
     Example: /me waves -> * nick#key waves.
 
   /clear  (Alias: /c)
-    Clear messages, input history and known participants.
-    Keep Logs, chats, groups, settings, identities and relay connections.
+    Clear messages, input history and cached nicknames.
+    Keep Logs, participant counts, chats, groups, settings,
+    identities and relay connections.
 
   /help [category]  (Alias: /h)
     Show one command category. No arguments: show all categories.

@@ -1,10 +1,12 @@
 package tui
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/rivo/tview"
 
 	"github.com/lessucettes/strchat-tui/internal/client"
 )
@@ -45,6 +47,42 @@ func (t *tui) conversationChat(s modelSnapshot) string {
 		return view.Children[0]
 	}
 	return ""
+}
+
+// groupInfoRow is one chat line in the Info pane. Its count always comes from
+// the presence snapshot; the marker is reserved for the active conversation.
+type groupInfoRow struct {
+	chat     string
+	users    int
+	selected bool
+}
+
+// markup is the dynamic-colors form of the row. The literal count brackets are
+// escaped because tview would otherwise parse a bracketed prefix as a tag.
+func (r groupInfoRow) markup(highlight string) string {
+	if r.selected {
+		return fmt.Sprintf(" %s▶ %s[-::-]", highlight, sanitizeLineForDisplay(r.chat))
+	}
+	return " " + tview.Escape(fmt.Sprintf("[%d]", r.users)) + " " + sanitizeLineForDisplay(r.chat)
+}
+
+// lines counts the wrapped rows this row occupies at width. Measuring the exact
+// rendered markup keeps brackets, variable digit widths and Unicode in step
+// with what the TextView draws.
+func (r groupInfoRow) lines(highlight string, width int) int {
+	return max(1, len(tview.WordWrap(r.markup(highlight), max(1, width))))
+}
+
+// groupInfoRows builds Info's rows for a group and the chat-list row currently
+// previewed. Only the active view's chosen child carries the marker.
+func (t *tui) groupInfoRows(s modelSnapshot, index int, view client.View) []groupInfoRow {
+	rows := make([]groupInfoRow, 0, len(view.Children))
+	marked := index == s.activeIndex
+	current := t.conversationChat(s)
+	for _, child := range view.Children {
+		rows = append(rows, groupInfoRow{chat: child, users: s.presence[child], selected: marked && child == current})
+	}
+	return rows
 }
 
 // pruneConversationFocusLocked requires t.mu and never touches widgets.
@@ -138,9 +176,9 @@ func (t *tui) installInfoScroll() {
 			view := activeView(s)
 			if view != nil && view.IsGroup && t.chatList.GetCurrentItem() == s.activeIndex && height > 0 {
 				start, lines := 0, 0
-				for _, chat := range view.Children {
-					lines = groupInfoLines(chat, width)
-					if chat == t.conversationChat(s) {
+				for _, infoRow := range t.groupInfoRows(s, s.activeIndex, *view) {
+					lines = infoRow.lines(colorTag(t.theme.titleColor), width)
+					if infoRow.selected {
 						break
 					}
 					start += lines
@@ -166,10 +204,10 @@ func (t *tui) renderConversationTitles(s modelSnapshot) {
 		t.detailsView.SetTitle(titleInfo)
 	}
 	view := activeView(s)
+	t.outputView.SetTitle(t.messagesTitle(s))
 	if view == nil || !view.IsGroup {
 		return
 	}
-	t.outputView.SetTitle(titleMessages)
 	chat := t.conversationChat(s)
 	text := strings.TrimSpace(t.input.GetText())
 	if strings.HasPrefix(text, "@") {

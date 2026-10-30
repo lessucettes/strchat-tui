@@ -520,6 +520,7 @@ func (c *client) sendStateUpdate() {
 		c.config.ActiveViewName = c.config.Views[0].Name
 	}
 
+	c.syncActivityPolicy()
 	state := StateUpdate{
 		Views:           slices.Clone(c.config.Views),
 		ActiveViewIndex: activeIdx,

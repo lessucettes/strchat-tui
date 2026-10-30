@@ -227,6 +227,7 @@ func (c *client) selectRelaySubscriptions(chats []string, now time.Time) (map[st
 }
 
 func (c *client) updateAllSubscriptions() {
+	c.syncActivityPolicy()
 	var chats []string
 	var viewName string
 	if view := c.getActiveView(); view != nil {

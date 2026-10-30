@@ -26,6 +26,7 @@ const (
 	logsHeight         = 3 // top log pane in the split layouts
 	narrowSidebarRows  = 5 // chat list + details strip in narrow layouts
 	bottomHeight       = 4 // input (3 rows) + hints (1 row)
+	sidebarWidth       = 30
 	maxInputLabelWidth = 24
 )
 
@@ -116,11 +117,11 @@ func (t *tui) rebuildLayout(plan layoutPlan) {
 		t.contentGrid.SetRows(0)
 		t.contentGrid.AddItem(t.withScrollbar(t.outputPane), 0, 0, 1, 1, 0, 0, false)
 		if plan.art && t.art.scene != nil {
-			t.contentGrid.SetColumns(0, artWidth, 30)
+			t.contentGrid.SetColumns(0, artWidth, sidebarWidth)
 			t.contentGrid.AddItem(t.art, 0, 1, 1, 1, 0, 0, false)
 			t.contentGrid.AddItem(t.sidebarFlex, 0, 2, 1, 1, 0, 0, false)
 		} else {
-			t.contentGrid.SetColumns(0, 30)
+			t.contentGrid.SetColumns(0, sidebarWidth)
 			t.contentGrid.AddItem(t.sidebarFlex, 0, 1, 1, 1, 0, 0, false)
 		}
 	case modeNarrow:
@@ -173,6 +174,43 @@ func (t *tui) applyTitles(plan layoutPlan) {
 	t.chatList.SetTitle(titleChatsShort)
 	t.detailsView.SetTitle(titleInfoShort)
 	t.input.SetTitle(titleInputShort)
+}
+
+// messagesTitle names the active conversation's message pane. It adds the
+// participant count only above two users, and never drops the pane shortcut:
+// titles that cannot fit fall back to the compact form.
+func (t *tui) messagesTitle(s modelSnapshot) string {
+	if t.plan.mode != modeFull {
+		return titleMessagesShort
+	}
+	title := titleMessages
+	if users := s.presence[t.conversationChat(s)]; users > 2 {
+		title = fmt.Sprintf("Messages from %d users (%s)", users, titleMessagesShort)
+	}
+	if width := t.messagesWidth(); width > 0 && tview.TaggedStringWidth(title)+2 > width {
+		return titleMessagesShort
+	}
+	return title
+}
+
+// messagesWidth is the message pane's cell width: the drawn rectangle when a
+// frame already assigned one, else the width implied by the current layout.
+func (t *tui) messagesWidth() int {
+	if _, _, width, _ := t.outputView.GetRect(); width > 0 {
+		return width
+	}
+	screen := t.screen.Load()
+	if screen == nil {
+		return 0
+	}
+	width, _ := (*screen).Size()
+	if t.plan.mode == modeFull {
+		width -= sidebarWidth
+		if t.plan.art && t.art.scene != nil {
+			width -= artWidth
+		}
+	}
+	return width
 }
 
 // visible reports whether a primitive is part of the currently rendered root.
@@ -440,10 +478,18 @@ func (t *tui) pruneGroupSelection(views []client.View) {
 
 // detailsPaneKey identifies what the details pane currently shows.
 type detailsPaneKey struct {
-	stateRev  int64
-	relaysRev int64
-	index     int
-	chat      string
+	stateRev    int64
+	relaysRev   int64
+	presenceRev int64
+	index       int
+	chat        string
+}
+
+// withoutPresence compares the inputs that must re-reveal the selected row.
+// Presence-only changes repaint the counts but keep the reader's position.
+func (k detailsPaneKey) withoutPresence() detailsPaneKey {
+	k.presenceRev = 0
+	return k
 }
 
 // updateDetailsView refreshes the info pane from the current model. It is the
@@ -462,10 +508,12 @@ func (t *tui) renderDetails(s modelSnapshot) {
 		// Group Info contains members, not relay status. Background relay
 		// updates must not rebuild it and rewind the user's scroll position.
 		key.relaysRev = 0
+		key.presenceRev = s.presenceRev
 	}
 	if key == t.detailsKey && t.detailsKeySet {
 		return
 	}
+	reveal := !t.detailsKeySet || key.withoutPresence() != t.detailsKey.withoutPresence()
 	t.detailsKey = key
 	t.detailsKeySet = true
 
@@ -475,16 +523,20 @@ func (t *tui) renderDetails(s modelSnapshot) {
 	}
 	selected := s.views[index]
 	if selected.IsGroup {
-		t.infoReveal = true
-		var b strings.Builder
-		for _, child := range selected.Children {
-			if index == s.activeIndex && child == t.conversationChat(s) {
-				fmt.Fprintf(&b, " %s▶ %s[-::-]\n", colorBoldTag(t.theme.titleColor), sanitizeLineForDisplay(child))
-			} else {
-				fmt.Fprintf(&b, " - %s\n", sanitizeLineForDisplay(child))
-			}
+		// Select the conversation explicitly: a presence update alone must
+		// not scroll the pane back to the marked row.
+		if reveal {
+			t.infoReveal = true
 		}
-		fmt.Fprint(t.detailsView, strings.TrimSuffix(b.String(), "\n"))
+		rows := t.groupInfoRows(s, index, selected)
+		var b strings.Builder
+		for i, row := range rows {
+			if i > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString(row.markup(colorBoldTag(t.theme.titleColor)))
+		}
+		fmt.Fprint(t.detailsView, b.String())
 		return
 	}
 

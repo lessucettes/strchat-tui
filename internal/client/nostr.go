@@ -41,7 +41,7 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 	if active == nil || (!active.IsGroup && active.Name != chat) || (active.IsGroup && !slices.Contains(active.Children, chat)) {
 		return
 	}
-	if (ev.Kind == geoChatKind) != isGeohashName(chat) {
+	if chat == "" || (tagKey == "g") != isGeohashName(chat) {
 		return
 	}
 	now := nostr.Now()
@@ -80,6 +80,7 @@ func (c *client) processEvent(ev *nostr.Event, relayURL string) {
 		return
 	}
 	c.seenCache.Add(ev.ID, true)
+	c.activity.observe(chat, pubkey, ev.CreatedAt)
 	content := sanitizeString(truncateString(ev.Content, MaxMsgLen))
 	// Filter the original display text before queueing any external processing.
 	// Rejected messages must not reach a plugin or consume its queue capacity.

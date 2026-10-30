@@ -88,6 +88,10 @@ on each launch; it is not saved and does not configure external plugin traffic.
   relays and peers may retain messages.
 - Each chat uses an in-memory signing key. Restarting creates new identities;
   private keys and message history are not saved.
+- The active chat announces presence with its session key every 40–80 seconds;
+  in a group, only the selected chat announces, at any supported geo precision.
+  Counts include you and keys seen in messages or heartbeats within five minutes,
+  not a verified number of people. Silent reading of an announced chat is public.
 - Settings, joined chats and local groups are stored in the OS user-config
   directory under `strchat-tui/config.json`.
 - A relay acknowledgement confirms acceptance by that relay, not delivery to

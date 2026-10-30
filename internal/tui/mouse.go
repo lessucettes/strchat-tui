@@ -83,19 +83,14 @@ func (t *tui) setupMouse() {
 		_, top, width, _ := t.detailsView.GetInnerRect()
 		offset, _ := t.detailsView.GetScrollOffset()
 		row := y - top + offset
-		for _, chat := range view.Children {
-			lines := groupInfoLines(chat, width)
+		for _, infoRow := range t.groupInfoRows(s, s.activeIndex, *view) {
+			lines := infoRow.lines(colorTag(t.theme.titleColor), width)
 			if row < lines {
-				t.selectConversation(s, chat)
+				t.selectConversation(s, infoRow.chat)
 				return tview.MouseConsumed, nil
 			}
 			row -= lines
 		}
 		return action, event
 	})
-}
-
-// Match Info's word wrapping, including the three-cell selection prefix.
-func groupInfoLines(chat string, width int) int {
-	return max(1, len(tview.WordWrap(" - "+sanitizeLineForDisplay(chat), max(1, width))))
 }

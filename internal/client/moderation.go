@@ -39,6 +39,7 @@ func (c *client) blockUser(payload string) {
 	}
 
 	c.config.BlockedUsers = append(c.config.BlockedUsers, blockedUser{PubKey: pkToBlock, Nick: nickToBlock})
+	c.syncActivityPolicy()
 	c.saveConfig()
 	c.emit(DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Blocked user %s. Their messages will now be hidden.", nickToBlock)})
 }
@@ -82,6 +83,7 @@ func (c *client) unblockUser(payload string) {
 	}
 
 	c.config.BlockedUsers = append(c.config.BlockedUsers[:idxToRemove], c.config.BlockedUsers[idxToRemove+1:]...)
+	c.syncActivityPolicy()
 	c.saveConfig()
 	c.emit(DisplayEvent{Type: "STATUS", Content: fmt.Sprintf("Unblocked user %s.", unblockedNick)})
 }

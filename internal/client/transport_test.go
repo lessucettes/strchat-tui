@@ -455,7 +455,7 @@ func relayWriteRaw(ts *relayTestServer, conn *websocket.Conn, data []byte) bool 
 	return true
 }
 
-// relayREQChats extracts the chat names from a REQ frame's filters.
+// relayREQChats extracts unique chat names from a REQ frame's filters.
 func relayREQChats(t testing.TB, frame []json.RawMessage) []string {
 	t.Helper()
 	var chats []string
@@ -474,20 +474,22 @@ func relayREQChats(t testing.TB, frame []json.RawMessage) []string {
 			}
 		}
 	}
-	return chats
+	slices.Sort(chats)
+	return slices.Compact(chats)
 }
 
-// relayREQSince returns the earliest "since" value carried by a REQ frame's
-// filters.
+// relayREQSince returns the earliest message recovery watermark. Presence has
+// an independent observation window and must not mask a lost message cursor.
 func relayREQSince(t testing.TB, frame []json.RawMessage) (nostr.Timestamp, bool) {
 	t.Helper()
 	var since nostr.Timestamp
 	found := false
 	for _, raw := range frame[2:] {
 		var filter struct {
+			Kinds []nostr.Kind     `json:"kinds"`
 			Since *nostr.Timestamp `json:"since"`
 		}
-		if json.Unmarshal(raw, &filter) != nil || filter.Since == nil {
+		if json.Unmarshal(raw, &filter) != nil || filter.Since == nil || (!slices.Contains(filter.Kinds, geoChatKind) && !slices.Contains(filter.Kinds, ephChatKind)) {
 			continue
 		}
 		if !found || *filter.Since < since {

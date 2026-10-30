@@ -79,6 +79,8 @@ type tui struct {
 	messageTarget   client.MessageTarget
 	recipientRev    uint64
 	groupFocus      map[string]string // latest local choices, including pending saves
+	presence        map[string]int    // complete participant counts by exact chat name
+	presenceRev     int64
 	output          *lineBuffer
 	logs            *lineBuffer
 	outputSynced    int64
@@ -433,6 +435,10 @@ func (t *tui) applyEvent(ev client.DisplayEvent) {
 			t.mu.Unlock()
 			t.markDirty()
 		}
+	case "PRESENCE_UPDATE":
+		if counts, ok := ev.Payload.(map[string]int); ok {
+			t.applyPresenceUpdate(counts)
+		}
 	case "THEME_UPDATE":
 		t.mu.Lock()
 		t.themeName = ev.Content
@@ -575,6 +581,16 @@ func (t *tui) applyRelaysUpdate(ev client.DisplayEvent) {
 	t.markDirty()
 }
 
+// applyPresenceUpdate replaces the participant counts with the client's
+// complete snapshot. Presence is independent of the message-clearing boundary.
+func (t *tui) applyPresenceUpdate(counts map[string]int) {
+	t.mu.Lock()
+	t.presence = maps.Clone(counts)
+	t.presenceRev++
+	t.mu.Unlock()
+	t.markDirty()
+}
+
 // applyCompletion stores nickname completion candidates for the input field.
 func (t *tui) applyCompletion(ev client.DisplayEvent) {
 	entries, ok := ev.Payload.([]string)
@@ -635,6 +651,8 @@ type modelSnapshot struct {
 	completionRev int64
 	messageTarget client.MessageTarget
 	recipientRev  uint64
+	presence      map[string]int // immutable after the collector clones it
+	presenceRev   int64
 	dropped       int
 	dropNotice    bool
 	output        lineDelta
@@ -661,6 +679,8 @@ func (t *tui) snapshot() modelSnapshot {
 		completionRev: t.completionRev,
 		messageTarget: t.messageTarget,
 		recipientRev:  t.recipientRev,
+		presence:      t.presence,
+		presenceRev:   t.presenceRev,
 		dropped:       t.dropped,
 		dropNotice:    t.dropNotice,
 		output:        t.lineDeltaLocked(t.output, t.outputSynced),

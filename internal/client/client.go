@@ -13,8 +13,9 @@ import (
 	lru "github.com/hashicorp/golang-lru/v2"
 )
 
-// Run is the only owner of configuration, identities, caches and relay handles.
-// Workers receive immutable snapshots and return results through bounded channels.
+// Run owns configuration, identities, message caches and relay handles. The
+// activity worker owns its separate telemetry state; workers receive immutable
+// snapshots and communicate through bounded, cancellation-aware channels.
 type client struct {
 	config                         *config
 	plugins                        messagePlugins // runtime-only; never persisted
@@ -49,6 +50,8 @@ type client struct {
 	seenCache                      *lru.Cache[nostr.ID, bool]
 	userContext                    *lru.Cache[string, userContext]
 	authorVerify                   *authorVerifyCache
+	presence                       presenceState
+	activity                       *activityTracker
 	filtersCompiled, mutesCompiled []compiledPattern
 }
 
@@ -89,12 +92,13 @@ func newClient(cfg *config, actions <-chan UserAction, events chan<- DisplayEven
 		dialSlots: make(chan struct{}, maxConcurrentRelayDials), dialPace: make(chan struct{}, 1),
 		relayTiming: defaultRelayTiming, relayRetries: retries, geoPlans: make(map[string][][]string),
 		incoming: make(chan relayEvent, 256), outgoing: make(chan publishJob, 8), results: make(chan publishResult, 8),
-		seenCache: seen, userContext: users, retiredKeys: retired}
+		seenCache: seen, userContext: users, retiredKeys: retired, activity: newActivityTracker()}
 	// Retain bounded public precomputation for repeat authors; never identities
 	// or signing material. Entries are admitted only after verification.
 	c.authorVerify = newAuthorVerifyCache(authorVerifyCacheSize)
 	c.rebuildRegexCaches()
 	c.ensureViewIdentities(c.getActiveView())
+	c.syncActivityPolicy()
 	return c
 }
 
@@ -120,6 +124,7 @@ func (c *client) Run() {
 	// draining its queue, or a saturated display leaves the client with no dial,
 	// no subscription and no traffic. updateAllSubscriptions emits its relay
 	// snapshot only after the workers exist.
+	c.wg.Go(func() { c.activity.run(c.ctx, c.eventsChan) })
 	c.wg.Go(c.publishLoop)
 	if c.plugins.OnReceive != nil {
 		if c.receiveJobs == nil {
@@ -140,7 +145,17 @@ func (c *client) Run() {
 	c.emit(DisplayEvent{Type: "ART_UPDATE", Content: c.config.Art})
 	retryTimer := time.NewTimer(time.Hour)
 	defer retryTimer.Stop()
+	presenceTimer := time.NewTimer(time.Hour)
+	defer presenceTimer.Stop()
 	for c.ctx.Err() == nil {
+		c.syncPresenceTarget(time.Now())
+		var presenceC <-chan time.Time
+		if c.presence.chat != "" {
+			presenceTimer.Reset(max(0, time.Until(c.presence.nextSend)))
+			presenceC = presenceTimer.C
+		} else {
+			presenceTimer.Stop()
+		}
 		var retryC <-chan time.Time
 		if c.nextRelayRetry.IsZero() {
 			retryTimer.Stop()
@@ -153,6 +168,8 @@ func (c *client) Run() {
 			return
 		case <-retryC:
 			c.updateAllSubscriptions()
+		case <-presenceC:
+			c.sendPresence(time.Now())
 		case action, ok := <-c.actionsChan:
 			if !ok {
 				return

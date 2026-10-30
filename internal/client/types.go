@@ -70,6 +70,7 @@ type RelayInfo struct {
 // DisplayEvent represents an event sent from the client to the TUI for display.
 // INFO carries command output for Messages. STATUS carries normal operational
 // information for Logs (displayed as INFO); WARN and ERROR are log severities.
+// PRESENCE_UPDATE carries an immutable map[string]int of per-chat counts.
 type DisplayEvent struct {
 	Type         string
 	Timestamp    string

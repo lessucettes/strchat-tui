@@ -65,6 +65,7 @@ type managedRelay struct {
 	keys        map[string]string // owner-only current subscription identities
 	updates     chan relaySubscription
 	publish     chan relayPublish
+	heartbeat   chan relayHeartbeat // best-effort, separate from user publishes
 	connected   bool
 	latency     time.Duration
 	connectedAt time.Time
@@ -154,7 +155,7 @@ func (c *client) updateRelaySubscriptions(desired map[string][]string) {
 		} else if len(c.relays) < maxActiveRelays {
 			subscription := c.subscriptionForRelay(url, chats)
 			ctx, cancel := context.WithCancel(c.ctx)
-			worker := &managedRelay{url: url, cancel: cancel, done: make(chan struct{}), chats: chats, keys: subscription.keys, updates: make(chan relaySubscription, 1), publish: make(chan relayPublish, 1)}
+			worker := &managedRelay{url: url, cancel: cancel, done: make(chan struct{}), chats: chats, keys: subscription.keys, updates: make(chan relaySubscription, 1), publish: make(chan relayPublish, 1), heartbeat: make(chan relayHeartbeat, 1)}
 			worker.retry, _ = c.relayRetries.Peek(url)
 			worker.lastProblem = worker.retry.lastProblem
 			c.relays[url] = worker
@@ -182,9 +183,11 @@ func chatFilters(chats []string, since nostr.Timestamp) []nostr.Filter {
 	var filters []nostr.Filter
 	if len(geo) > 0 {
 		filters = append(filters, nostr.Filter{Kinds: []nostr.Kind{geoChatKind}, Tags: nostr.TagMap{"g": geo}, Since: since, Limit: 200})
+		filters = append(filters, nostr.Filter{Kinds: []nostr.Kind{presenceKind}, Tags: nostr.TagMap{"g": geo}, Since: nostr.Now() - 120, Limit: 200})
 	}
 	if len(topics) > 0 {
 		filters = append(filters, nostr.Filter{Kinds: []nostr.Kind{ephChatKind}, Tags: nostr.TagMap{"d": topics}, Since: since, Limit: 200})
+		filters = append(filters, nostr.Filter{Kinds: []nostr.Kind{presenceKind}, Tags: nostr.TagMap{"d": topics}, Since: nostr.Now() - 120, Limit: 200})
 	}
 	return filters
 }
@@ -318,8 +321,16 @@ func subscribe(ctx context.Context, conn relayConn, sub relaySubscription) error
 	return writeFrame(ctx, conn, frame)
 }
 
-// One reader, one bounded queue, no goroutine per frame. The websocket library
-// handles control frames while Read is active; Ping has a bounded pong deadline.
+type relayReadFrame struct {
+	parts     [relayEnvelopeParts][]byte
+	count     int
+	label, id string
+	event     *nostr.Event
+}
+
+// One reader, bounded queues, no goroutine per frame. Heartbeats bypass the
+// ordinary frame queue as well as incoming; a busy activity worker cannot
+// prevent the reader from reaching a chat message or a WebSocket control frame.
 func (c *client) serveRelay(ctx context.Context, worker *managedRelay, conn relayConn, sub relaySubscription, latency time.Duration) (relaySubscription, bool, error) {
 	ticker := time.NewTicker(relayPingInterval)
 	defer ticker.Stop()
@@ -341,7 +352,7 @@ func (c *client) serveRelayWithPing(ctx context.Context, worker *managedRelay, c
 	defer cancel()
 	defer stopLifetime()
 	// Keep aggregate buffering small when a group uses many relay sockets.
-	frames := make(chan []byte, 4)
+	frames := make(chan relayReadFrame, 4)
 	readerDone := make(chan struct{})
 	// The reader publishes cheap liveness evidence for the serve loop: a
 	// revision advanced after every successful read, and a flag set exactly
@@ -364,14 +375,38 @@ func (c *client) serveRelayWithPing(ctx context.Context, worker *managedRelay, c
 			if kind != relayMessageText {
 				continue
 			}
+			parts, count := splitRelayEnvelope(data)
+			if count < 2 {
+				continue
+			}
+			label, id, validHead := decodeRelayEnvelopeHead(parts[0], parts[1])
+			if !validHead {
+				continue
+			}
+			frame := relayReadFrame{parts: parts, count: count, label: label, id: id}
+			if label == "EVENT" {
+				if id != "chat" || count != 3 {
+					continue
+				}
+				event, err := decodeRelayEvent(parts[2])
+				if err != nil {
+					continue
+				}
+				if event.Kind == presenceKind {
+					c.activity.heartbeat(event)
+					continue
+				}
+				frame.event = event
+				frame.parts = [relayEnvelopeParts][]byte{} // do not retain the raw EVENT too
+			}
 			select {
-			case frames <- data:
+			case frames <- frame:
 				continue
 			default:
 			}
 			readerBlocked.Store(true)
 			select {
-			case frames <- data:
+			case frames <- frame:
 				readerBlocked.Store(false)
 			case <-ctx.Done():
 				readerBlocked.Store(false)
@@ -555,6 +590,19 @@ func (c *client) serveRelayWithPing(ctx context.Context, worker *managedRelay, c
 			} else if err := subscribe(ctx, conn, sub); err != nil {
 				return sub, false, err
 			}
+		case heartbeat := <-worker.heartbeat:
+			// Never wait for an ephemeral EVENT acknowledgement. A pending user
+			// send, queued message or AUTH exchange wins; stale work is dropped.
+			if heartbeat.ctx.Err() != nil || heartbeat.event.CreatedAt < nostr.Now()-80 || pending != nil || len(worker.publish) > 0 || subWait ||
+				sub.keys[heartbeat.event.PubKey.Hex()] == "" ||
+				(auth.challenged && !auth.complete(sub.keys)) {
+				continue
+			}
+			// Once a socket write starts it belongs to the connection lifetime:
+			// interrupting it on a view change can poison the WebSocket writer.
+			if err := writeFrame(ctx, conn, []any{"EVENT", heartbeat.event}); err != nil {
+				return sub, false, err
+			}
 		case request := <-worker.publish:
 			if request.ctx.Err() != nil {
 				request.result <- request.ctx.Err()
@@ -577,18 +625,11 @@ func (c *client) serveRelayWithPing(ctx context.Context, worker *managedRelay, c
 			} else {
 				pendingSent = true
 			}
-		case data, ok := <-frames:
+		case frame, ok := <-frames:
 			if !ok {
 				return sub, false, readErr
 			}
-			parts, count := splitRelayEnvelope(data)
-			if count < 2 {
-				continue
-			}
-			label, id, validHead := decodeRelayEnvelopeHead(parts[0], parts[1])
-			if !validHead {
-				continue
-			}
+			parts, count, label, id := frame.parts, frame.count, frame.label, frame.id
 			switch label {
 			case "AUTH":
 				if count != 2 {
@@ -606,15 +647,8 @@ func (c *client) serveRelayWithPing(ctx context.Context, worker *managedRelay, c
 					return failAuth(fmt.Errorf("relay authentication failed: %w", err))
 				}
 			case "EVENT":
-				if id != "chat" || count != 3 {
-					continue
-				}
-				event, err := decodeRelayEvent(parts[2])
-				if err != nil {
-					continue
-				}
 				select {
-				case c.incoming <- relayEvent{worker: worker, event: event}:
+				case c.incoming <- relayEvent{worker: worker, event: frame.event}:
 				case <-ctx.Done():
 					return sub, false, ctx.Err()
 				}
