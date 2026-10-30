@@ -24,8 +24,8 @@ func TestThemeCommandChangesExistingWidgets(t *testing.T) {
 		command, name string
 		title, input  tcell.Color
 	}{
-		{"/theme blue-gray", "blue-gray", tcell.NewHexColor(0x88b9e8), tcell.NewHexColor(0x243447)},
-		{"/t red-gold", "red-gold", tcell.NewHexColor(0xe8bd65), tcell.NewHexColor(0x421e24)},
+		{"/theme blue-gray", "blue-gray", tcell.NewHexColor(0x51cce6), tcell.NewHexColor(0x243447)},
+		{"/t red-gold", "red-gold", tcell.NewHexColor(0xffc65c), tcell.NewHexColor(0x421e24)},
 		{"/theme 2", "monochrome", tcell.ColorWhite, tcell.ColorWhite},
 		{"/theme default", "default", defaultTheme.titleColor, defaultTheme.inputBgColor},
 	} {

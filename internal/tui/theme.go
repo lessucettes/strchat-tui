@@ -63,28 +63,28 @@ var monochromeTheme = &theme{
 
 var blueGrayTheme = &theme{
 	backgroundColor: tcell.NewHexColor(0x171e28),
-	textColor:       tcell.NewHexColor(0xcbd5e1),
-	borderColor:     tcell.NewHexColor(0x526780),
-	titleColor:      tcell.NewHexColor(0x88b9e8),
+	textColor:       tcell.NewHexColor(0xe0e4eb),
+	borderColor:     tcell.NewHexColor(0x4f62a8),
+	titleColor:      tcell.NewHexColor(0x51cce6),
 	inputBgColor:    tcell.NewHexColor(0x243447),
-	inputTextColor:  tcell.NewHexColor(0xd6e8fa),
-	logInfoColor:    tcell.NewHexColor(0x93a4b8),
-	logWarnColor:    tcell.NewHexColor(0xe8cc88),
-	logErrorColor:   tcell.NewHexColor(0xf08c96),
-	nickPalette:     []string{"[#88b9e8]", "[#b8a1df]", "[#e8cc88]", "[#8dc6c0]", "[#dba5ba]"},
+	inputTextColor:  tcell.NewHexColor(0x4de3f2),
+	logInfoColor:    tcell.NewHexColor(0x4e97d1),
+	logWarnColor:    tcell.NewHexColor(0xf0c45a),
+	logErrorColor:   tcell.NewHexColor(0xf06464),
+	nickPalette:     []string{"[#56c8e8]", "[#d77de0]", "[#f0c45a]", "[#73bf83]", "[#f27e68]"},
 }
 
 var redGoldTheme = &theme{
 	backgroundColor: tcell.NewHexColor(0x211719),
-	textColor:       tcell.NewHexColor(0xead9c5),
-	borderColor:     tcell.NewHexColor(0x995052),
-	titleColor:      tcell.NewHexColor(0xe8bd65),
+	textColor:       tcell.NewHexColor(0xe7e3dc),
+	borderColor:     tcell.NewHexColor(0xa75663),
+	titleColor:      tcell.NewHexColor(0xffc65c),
 	inputBgColor:    tcell.NewHexColor(0x421e24),
-	inputTextColor:  tcell.NewHexColor(0xffdc91),
-	logInfoColor:    tcell.NewHexColor(0xb79c90),
+	inputTextColor:  tcell.NewHexColor(0xffd34d),
+	logInfoColor:    tcell.NewHexColor(0x61b8be),
 	logWarnColor:    tcell.NewHexColor(0xf3bf59),
 	logErrorColor:   tcell.NewHexColor(0xff7878),
-	nickPalette:     []string{"[#e8bd65]", "[#e796a5]", "[#f3bf59]", "[#c5a5de]", "[#ed9b73]"},
+	nickPalette:     []string{"[#e77db2]", "[#69c4c9]", "[#f3bf59]", "[#6ebf7d]", "[#ff8059]"},
 }
 
 // Ordered for stable /theme numbers. Themes are immutable after initialization.
@@ -191,10 +191,15 @@ func (t *tui) applyInputTheme() {
 // avoids retaining raw events, and keeps mutable themes out of collector/log
 // goroutines. Only complete trusted tags match: escaped user text is untouched.
 func (th *theme) scrollbackColors() *strings.Replacer {
+	ownColor := th.inputTextColor
+	if th == monochromeTheme {
+		// Black input text needs the white field; chat stays on black.
+		ownColor = th.textColor
+	}
 	var pairs []string
 	for _, colors := range [][2]tcell.Color{
 		{defaultTheme.titleColor, th.titleColor},
-		{defaultTheme.inputTextColor, th.inputTextColor},
+		{defaultTheme.inputTextColor, ownColor},
 		{defaultTheme.logInfoColor, th.logInfoColor},
 		{defaultTheme.logWarnColor, th.logWarnColor},
 		{defaultTheme.logErrorColor, th.logErrorColor},

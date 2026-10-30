@@ -27,7 +27,11 @@ func TestThemeRecolorsRetainedScrollback(t *testing.T) {
 			if text := s.ui.outputView.GetText(false); !strings.Contains(text, want) {
 				t.Errorf("%s: old info was not recolored: want %q", name, want)
 			}
-			if text := s.ui.outputView.GetText(false); !strings.Contains(text, colorBoldTag(s.ui.theme.inputTextColor)+"me") {
+			ownColor := s.ui.theme.inputTextColor
+			if name == "monochrome" {
+				ownColor = tcell.ColorWhite
+			}
+			if text := s.ui.outputView.GetText(false); !strings.Contains(text, colorBoldTag(ownColor)+"me") {
 				t.Errorf("%s: old own message was not recolored", name)
 			}
 			if text := s.ui.outputView.GetText(true); !strings.Contains(text, "retained message [#32cd32]") {
@@ -49,6 +53,76 @@ func TestThemeRecolorsRetainedScrollback(t *testing.T) {
 		want := onLoopValue(s, func() tcell.Color { return s.ui.theme.titleColor })
 		if fg.Hex() != want.Hex() {
 			t.Errorf("%s: rendered retained info color = %v, want %v", name, fg, want)
+		}
+	}
+}
+
+// Linux VT exposes eight colors to tcell. Distinct RGB pastels can all become
+// the same gray there, so check rendered roles after tcell's palette matching.
+func TestThemeReadabilityInLimitedPalettes(t *testing.T) {
+	s := newSimTUI(t, 140, 40)
+	s.ui.applyEvent(client.DisplayEvent{Type: "STATE_UPDATE", Payload: client.StateUpdate{
+		Views: []client.View{{Name: "lobby"}},
+	}})
+	for i := 0; i < 5; i++ {
+		s.ui.applyEvent(client.DisplayEvent{
+			Type: "NEW_MESSAGE", Chat: "lobby", Nick: fmt.Sprintf("Voice%d", i),
+			FullPubKey: strings.Repeat("00", 31) + fmt.Sprintf("%x0", i+1),
+			Content:    "palette body",
+		})
+	}
+	s.ui.applyEvent(client.DisplayEvent{
+		Type: "NEW_MESSAGE", Chat: "lobby", Nick: "me", IsOwnMessage: true,
+		Content: "palette own message",
+	})
+	s.ui.applyEvent(client.DisplayEvent{Type: "INFO", Content: "palette notice"})
+
+	s.onLoop(func() { s.ui.input.SetText("palette draft") })
+	for _, entry := range themes {
+		s.ui.applyEvent(client.DisplayEvent{Type: "THEME_UPDATE", Content: entry.name})
+		s.draw()
+		styles := make(map[string]tcell.Style)
+		for _, text := range []string{"palette body", "palette own message", "palette notice", "palette draft", titleInput, "Voice0", "Voice1", "Voice2", "Voice3", "Voice4"} {
+			x, y := s.findByPrefix(text)
+			if x < 0 {
+				t.Fatalf("%s: %q is not rendered", entry.name, text)
+			}
+			styles[text] = s.styleAt(x, y)
+		}
+		border := onLoopValue(s, func() tcell.Color { return s.ui.outputView.GetBorderColor() })
+		for _, count := range []int{8, 16, 256} {
+			palette := make([]tcell.Color, count)
+			for i := range palette {
+				palette[i] = tcell.PaletteColor(i)
+			}
+			foreground := make(map[string]tcell.Color)
+			for role, style := range styles {
+				fg, bg, _ := style.Decompose()
+				fg, bg = tcell.FindColor(fg, palette), tcell.FindColor(bg, palette)
+				foreground[role] = fg
+				if fg == bg {
+					t.Errorf("%s/%d: %s disappears into its background", entry.name, count, role)
+				}
+			}
+			if entry.name == "monochrome" {
+				continue
+			}
+			if foreground[titleInput] == tcell.FindColor(border, palette) {
+				t.Errorf("%s/%d: focused and inactive borders merge", entry.name, count)
+			}
+			if foreground["palette notice"] == foreground["palette body"] {
+				t.Errorf("%s/%d: information accent merges with body text", entry.name, count)
+			}
+			if foreground["palette own message"] == foreground["palette body"] {
+				t.Errorf("%s/%d: own messages merge with other messages", entry.name, count)
+			}
+			nicks := make(map[tcell.Color]bool)
+			for i := 0; i < 5; i++ {
+				nicks[foreground[fmt.Sprintf("Voice%d", i)]] = true
+			}
+			if len(nicks) != 5 {
+				t.Errorf("%s/%d: five nickname accents collapse to %d colors", entry.name, count, len(nicks))
+			}
 		}
 	}
 }
