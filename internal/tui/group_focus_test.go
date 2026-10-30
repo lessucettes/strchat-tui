@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/rivo/tview"
+	"github.com/rivo/uniseg"
 
 	"github.com/lessucettes/strchat-tui/internal/client"
 )
@@ -145,15 +147,15 @@ func TestPresenceUpdatesTitleAndInfoWithoutRewinding(t *testing.T) {
 			return strings.Contains(s.ui.detailsView.GetText(true), "[125] room-00-short-presence")
 		})
 	})
-	if got := onLoopValue(s, func() string { return s.ui.outputView.GetTitle() }); got != titleMessages {
-		t.Fatalf("title with two participants = %q, want %q", got, titleMessages)
+	if got := onLoopValue(s, func() string { return s.ui.outputView.GetTitle() }); got != "coffee (Alt+O)" {
+		t.Fatalf("title with two participants = %q", got)
 	}
 
 	s.events <- client.DisplayEvent{Type: "PRESENCE_UPDATE", Payload: presenceCounts(3)}
 	waitFor(t, 5*time.Second, func() bool {
-		return s.matches(func() bool { return strings.Contains(s.ui.outputView.GetTitle(), "from 3 users") })
+		return s.matches(func() bool { return strings.Contains(s.ui.outputView.GetTitle(), "· 3 users") })
 	})
-	if got := onLoopValue(s, func() string { return s.ui.outputView.GetTitle() }); got != "Messages from 3 users (Alt+O)" {
+	if got := onLoopValue(s, func() string { return s.ui.outputView.GetTitle() }); got != "coffee · 3 users (Alt+O)" {
 		t.Fatalf("title with three participants = %q", got)
 	}
 
@@ -176,7 +178,7 @@ func TestPresenceUpdatesTitleAndInfoWithoutRewinding(t *testing.T) {
 	}
 	s.events <- client.DisplayEvent{Type: "PRESENCE_UPDATE", Payload: presenceCounts(4)}
 	waitFor(t, 5*time.Second, func() bool {
-		return s.matches(func() bool { return strings.Contains(s.ui.outputView.GetTitle(), "from 4 users") })
+		return s.matches(func() bool { return strings.Contains(s.ui.outputView.GetTitle(), "· 4 users") })
 	})
 	s.draw()
 	if row := onLoopValue(s, func() int { row, _ := s.ui.detailsView.GetScrollOffset(); return row }); row != 6 {
@@ -210,7 +212,7 @@ func TestPresenceUpdatesTitleAndInfoWithoutRewinding(t *testing.T) {
 	logsBefore := onLoopValue(s, func() string { return s.ui.logsView.GetText(true) })
 	enterText(s, "/clear")
 	s.draw()
-	if got := onLoopValue(s, func() string { return s.ui.outputView.GetTitle() }); got != "Messages from 3 users (Alt+O)" {
+	if got := onLoopValue(s, func() string { return s.ui.outputView.GetTitle() }); got != "deep-target · 3 users (Alt+O)" {
 		t.Fatalf("clear changed the participant title: %q", got)
 	}
 	info = onLoopValue(s, func() string { return s.ui.detailsView.GetText(true) })
@@ -229,7 +231,7 @@ func TestPresenceUpdatesTitleAndInfoWithoutRewinding(t *testing.T) {
 		return s.matches(func() bool { return strings.Contains(s.ui.logsView.GetText(true), "presence barrier") })
 	})
 	s.draw()
-	if got := onLoopValue(s, func() string { return s.ui.outputView.GetTitle() }); got != "Messages from 9 users (Alt+O)" {
+	if got := onLoopValue(s, func() string { return s.ui.outputView.GetTitle() }); got != "deep-target · 9 users (Alt+O)" {
 		t.Fatalf("clear blocked a live presence update: %q", got)
 	}
 
@@ -237,25 +239,71 @@ func TestPresenceUpdatesTitleAndInfoWithoutRewinding(t *testing.T) {
 	s.events <- client.DisplayEvent{Type: "PRESENCE_UPDATE", Payload: presenceCounts(4)}
 	waitFor(t, 5*time.Second, func() bool {
 		// deep-target is the active conversation and has three participants.
-		return s.matches(func() bool { return strings.Contains(s.ui.outputView.GetTitle(), "from 3 users") })
+		return s.matches(func() bool { return strings.Contains(s.ui.outputView.GetTitle(), "· 3 users") })
 	})
 
-	// An ordinary active view uses the same threshold, and a layout without
-	// room for the count keeps the compact title with its shortcut.
+	// Ordinary chats and narrow layouts retain their name, count and shortcut.
 	state := presenceGroupState().Payload.(client.StateUpdate)
 	state.ActiveViewIndex = 1
 	s.events <- client.DisplayEvent{Type: "STATE_UPDATE", Payload: state}
 	waitFor(t, 5*time.Second, func() bool {
-		return s.matches(func() bool { return strings.Contains(s.ui.outputView.GetTitle(), "from 4 users") })
+		return s.matches(func() bool { return strings.Contains(s.ui.outputView.GetTitle(), "· 4 users") })
 	})
 	s.resize(80, 24)
 	s.draw()
-	if got := onLoopValue(s, func() string { return s.ui.outputView.GetTitle() }); got != titleMessagesShort {
-		t.Fatalf("compact layout title = %q, want %q", got, titleMessagesShort)
+	if got := onLoopValue(s, func() string { return s.ui.outputView.GetTitle() }); got != "coffee · 4 users (Alt+O)" {
+		t.Fatalf("narrow layout title = %q", got)
+	}
+	s.resize(58, 10)
+	s.draw()
+	if got := onLoopValue(s, func() string { return s.ui.outputView.GetTitle() }); got != "coffee · 4 users (Alt+O)" {
+		t.Fatalf("tiny layout title = %q", got)
 	}
 	s.resize(120, 32)
 	s.draw()
-	if got := onLoopValue(s, func() string { return s.ui.outputView.GetTitle() }); got != "Messages from 4 users (Alt+O)" {
+	if got := onLoopValue(s, func() string { return s.ui.outputView.GetTitle() }); got != "coffee · 4 users (Alt+O)" {
 		t.Fatalf("full layout title after resize = %q", got)
+	}
+}
+
+func TestConversationTitleClipsNamesBeforeMetadata(t *testing.T) {
+	for index, name := range []string{
+		strings.Repeat("long-room-", 20),
+		strings.Repeat("カフェe\u0301👩‍💻", 20),
+		"[red]\n" + strings.Repeat("room-", 20),
+	} {
+		for _, width := range []int{24, 40, 80} {
+			t.Run(fmt.Sprintf("name%d/width%d", index, width), func(t *testing.T) {
+				ui := newIdleTUI(t, 16)
+				ui.applyEvent(client.DisplayEvent{Type: "STATE_UPDATE", Payload: client.StateUpdate{
+					Views:           []client.View{{Name: "group", IsGroup: true, Children: []string{"other", name}, SelectedChat: name}},
+					ActiveViewIndex: 0,
+				}})
+				ui.applyEvent(client.DisplayEvent{Type: "PRESENCE_UPDATE", Payload: map[string]int{name: 27}})
+				ui.outputView.SetRect(0, 0, width, 8)
+				ui.render()
+				title := ui.outputView.GetTitle()
+				const suffix = " · 27 users (Alt+O)"
+				if !strings.HasSuffix(title, "…"+suffix) || tview.TaggedStringWidth(title) > width-2 {
+					t.Fatalf("long name displaced metadata or overflowed %d cells: %q", width, title)
+				}
+				prefix := strings.TrimSuffix(title, "…"+suffix)
+				// Compare complete grapheme prefixes, escaped only after clipping.
+				plain := strings.ReplaceAll(name, "\n", " ")
+				boundary := prefix == ""
+				g := uniseg.NewGraphemes(plain)
+				var kept strings.Builder
+				for g.Next() {
+					kept.WriteString(g.Str())
+					if tview.Escape(kept.String()) == prefix {
+						boundary = true
+						break
+					}
+				}
+				if !boundary {
+					t.Fatalf("title split a grapheme or interpreted chat markup: %q", title)
+				}
+			})
+		}
 	}
 }

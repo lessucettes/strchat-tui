@@ -350,7 +350,7 @@ func TestMessageAppearsOnScreen(t *testing.T) {
 	if !strings.Contains(screen, "alice") {
 		t.Fatalf("sender not on screen:\n%s", screen)
 	}
-	if !strings.Contains(screen, "Messages") {
+	if !strings.Contains(screen, "chat (Alt+O)") {
 		t.Fatalf("message pane title missing:\n%s", screen)
 	}
 }

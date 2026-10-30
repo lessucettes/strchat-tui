@@ -176,41 +176,75 @@ func (t *tui) applyTitles(plan layoutPlan) {
 	t.input.SetTitle(titleInputShort)
 }
 
-// messagesTitle names the active conversation's message pane. It adds the
-// participant count only above two users, and never drops the pane shortcut:
-// titles that cannot fit fall back to the compact form.
+// messagesTitle names the selected chat, not the group's combined feed. Reserve
+// the participant count and shortcut first; only the chat name is ellipsized.
 func (t *tui) messagesTitle(s modelSnapshot) string {
-	if t.plan.mode != modeFull {
+	chat := strings.ReplaceAll(sanitizeRunes(t.conversationChat(s)), "\n", " ")
+	if chat == "" {
+		if t.plan.mode == modeFull {
+			return titleMessages
+		}
 		return titleMessagesShort
 	}
-	title := titleMessages
-	if users := s.presence[t.conversationChat(s)]; users > 2 {
-		title = fmt.Sprintf("Messages from %d users (%s)", users, titleMessagesShort)
+	users := s.presence[t.conversationChat(s)]
+	suffix := " (" + titleMessagesShort + ")"
+	if users > 2 {
+		suffix = fmt.Sprintf(" · %d users (%s)", users, titleMessagesShort)
 	}
-	if width := t.messagesWidth(); width > 0 && tview.TaggedStringWidth(title)+2 > width {
-		return titleMessagesShort
+	if width := t.messagesWidth(); width > 0 {
+		available := width - 2 // Leave both border corners intact.
+		nameWidth := available - uniseg.StringWidth(suffix)
+		if nameWidth < 1 {
+			compact := strings.TrimPrefix(suffix, " · ")
+			if users > 2 && uniseg.StringWidth(compact) <= available {
+				return compact
+			}
+			return titleMessagesShort
+		}
+		chat = truncateCells(chat, nameWidth)
 	}
-	return title
+	return tview.Escape(chat) + suffix
 }
 
-// messagesWidth is the message pane's cell width: the drawn rectangle when a
-// frame already assigned one, else the width implied by the current layout.
+// BeforeDraw runs before the layout updates widget rectangles. Derive the
+// current width from the screen so the first frame after a resize fits too.
 func (t *tui) messagesWidth() int {
-	if _, _, width, _ := t.outputView.GetRect(); width > 0 {
-		return width
-	}
 	screen := t.screen.Load()
 	if screen == nil {
-		return 0
+		_, _, width, _ := t.outputView.GetRect()
+		return width
 	}
 	width, _ := (*screen).Size()
-	if t.plan.mode == modeFull {
+	if t.plan.mode == modeFull && !t.outputMaximized {
 		width -= sidebarWidth
 		if t.plan.art && t.art.scene != nil {
 			width -= artWidth
 		}
 	}
 	return width
+}
+
+// truncateCells clips plain text without splitting graphemes. Escape markup
+// after clipping, so literal brackets never become partial formatting tags.
+func truncateCells(text string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	if uniseg.StringWidth(text) <= maxWidth {
+		return text
+	}
+	var clipped strings.Builder
+	g := uniseg.NewGraphemes(text)
+	width := 0
+	for g.Next() {
+		if width+g.Width() > maxWidth-1 {
+			break
+		}
+		clipped.WriteString(g.Str())
+		width += g.Width()
+	}
+	clipped.WriteRune('…')
+	return clipped.String()
 }
 
 // visible reports whether a primitive is part of the currently rendered root.
@@ -591,22 +625,7 @@ func (t *tui) renderInputLabel(s modelSnapshot) {
 				return r
 			}
 		}, sanitizeRunes(nick))
-		maxNickWidth := maxWidth - len(" > ")
-		if uniseg.StringWidth(nick) > maxNickWidth {
-			maxNickWidth-- // Reserve one cell for the truncation marker.
-			var clipped strings.Builder
-			g := uniseg.NewGraphemes(nick)
-			width := 0
-			for g.Next() {
-				if width+g.Width() > maxNickWidth {
-					break
-				}
-				clipped.WriteString(g.Str())
-				width += g.Width()
-			}
-			clipped.WriteRune('…')
-			nick = clipped.String()
-		}
+		nick = truncateCells(nick, maxWidth-len(" > "))
 		if nick != "" {
 			label = sanitizeLineForDisplay(nick) + " > "
 		}
