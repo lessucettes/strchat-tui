@@ -443,6 +443,12 @@ func (t *tui) render() {
 		t.logsView.sync(s.logs)
 		t.setLogsSynced(s.logs.upto)
 	}
+	if s.stateRev != t.chatListRev {
+		switch command, _ := splitCommand(t.input.GetText()); command {
+		case "/set", "/s", "/del", "/d":
+			t.input.Autocomplete()
+		}
+	}
 	t.renderChatList(s)
 	t.renderDetails(s)
 	t.renderConversationTitles(s)

@@ -42,8 +42,12 @@ outer:
 		}
 
 		for _, v := range c.config.Views {
-			if !v.IsGroup && v.Name == name {
-				existingChats = append(existingChats, name)
+			if v.Name == name {
+				if v.IsGroup {
+					c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Chat %q: Name is already used by a group.", name)})
+				} else {
+					existingChats = append(existingChats, name)
+				}
 				continue outer
 			}
 		}
@@ -115,13 +119,32 @@ func (c *client) createGroup(payload string) {
 
 	sort.Strings(validMembers)
 
-	name := groupName(validMembers)
-
 	for _, view := range c.config.Views {
-		if view.Name == name {
-			c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Group %q: A group with these chats already exists.", name)})
-			return
+		if view.IsGroup && len(view.Children) == len(validMembers) {
+			members := slices.Clone(view.Children)
+			sort.Strings(members)
+			if slices.Equal(members, validMembers) {
+				c.emit(DisplayEvent{Type: "ERROR", Content: fmt.Sprintf("Group %q: A group with these chats already exists.", view.Name)})
+				return
+			}
 		}
+	}
+
+	var name string
+nextName:
+	for offset := range groupNameCount {
+		candidate := groupName(validMembers, offset)
+		for _, view := range c.config.Views {
+			if view.Name == candidate {
+				continue nextName
+			}
+		}
+		name = candidate
+		break
+	}
+	if name == "" {
+		c.emit(DisplayEvent{Type: "ERROR", Content: "Cannot create group: All three-word group names are already in use."})
+		return
 	}
 
 	newView := View{Name: name, IsGroup: true, Children: validMembers}

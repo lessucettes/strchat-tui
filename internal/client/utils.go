@@ -2,6 +2,7 @@ package client
 
 import (
 	"fmt"
+	"hash/fnv"
 	"net/url"
 	"strings"
 	"unicode"
@@ -150,14 +151,22 @@ func normalizeRelayURL(raw string) (string, error) {
 	return u.String(), nil
 }
 
-func groupName(validMembers []string) string {
-	var sum uint32
-	for _, m := range validMembers {
-		for i := 0; i < len(m); i++ {
-			sum = (sum*33 + uint32(m[i])) ^ uint32(i)
-		}
+const groupNameCount = len(tokiPonaNouns) * len(tokiPonaNouns) * len(tokiPonaNouns)
+
+// groupName expects sorted, unique chat names; offset probes alternative names.
+func groupName(sortedMembers []string, offset int) string {
+	h := fnv.New64a()
+	for _, member := range sortedMembers {
+		_, _ = h.Write([]byte(member))
+		_, _ = h.Write([]byte{0}) // Preserve chat boundaries.
 	}
-	return fmt.Sprintf("Group-%06x", sum&0xFFFFFF)
+	sum := h.Sum64()%uint64(groupNameCount) + uint64(offset)
+	var words [3]string
+	for i := range words {
+		words[i] = tokiPonaNouns[sum%uint64(len(tokiPonaNouns))]
+		sum /= uint64(len(tokiPonaNouns))
+	}
+	return strings.Join(words[:], "-")
 }
 
 func npubToTokiPona(pubkey string) string {

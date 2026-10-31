@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -475,6 +476,8 @@ func splitCommand(text string) (command, payload string) {
 func (t *tui) handleAutocomplete(currentText string) []string {
 	command, payload := splitCommand(currentText)
 	switch command {
+	case "/set", "/s", "/del", "/d":
+		return t.completeViewName(currentText)
 	case "/block", "/unblock", "/b", "/ub":
 		if payload == "" {
 			return nil
@@ -498,6 +501,47 @@ func (t *tui) handleAutocomplete(currentText string) []string {
 		return nil
 	}
 	return append([]string(nil), t.completionEntries...)
+}
+
+// completeViewName replaces only the final #prefix argument, keeping prior input.
+func (t *tui) completeViewName(text string) []string {
+	args := strings.Fields(text)
+	if len(args) < 2 {
+		return nil
+	}
+	token := args[len(args)-1]
+	if !strings.HasPrefix(token, "#") || !strings.HasSuffix(text, token) {
+		return nil
+	}
+	args = args[:len(args)-1]
+	if (args[0] == "/del" || args[0] == "/d") && len(args) != 1 {
+		return nil
+	}
+	views := t.snapshot().views
+	var group *client.View
+	if len(args) > 1 {
+		for i := range views {
+			if views[i].IsGroup && views[i].Name == args[1] {
+				group = &views[i]
+				break
+			}
+		}
+	}
+	if group != nil && len(args) != 2 {
+		return nil
+	}
+	var entries []string
+	for _, view := range views {
+		if len(args) > 1 && (view.IsGroup || slices.Contains(args[1:], view.Name) ||
+			(group != nil && !slices.Contains(group.Children, view.Name))) {
+			continue
+		}
+		if strings.HasPrefix(view.Name, token[1:]) {
+			entries = append(entries, text[:len(text)-len(token)]+view.Name)
+		}
+	}
+	sort.Strings(entries)
+	return entries
 }
 
 // rememberInput retains submitted messages and commands on the event loop only.

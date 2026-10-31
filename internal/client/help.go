@@ -23,6 +23,10 @@ var helpCategories = []struct{ name, commands string }{
     Leave a chat or delete a local group.
     No arguments: use the active chat or group.
 
+  In /set and /del, type # or #prefix to complete a chat or group name.
+  Enter selects a suggestion and removes #; Enter again runs the command.
+  Example: /set coffee #lo -> /set coffee lobby.
+
   Participant counts use messages and presence from the last five minutes,
   including you. Messages shows the selected chat's count above two users;
   Info shows counts for the other group chats.

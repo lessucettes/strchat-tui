@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -635,6 +636,112 @@ func TestLogOutputIsCapturedAndBounded(t *testing.T) {
 	if lines := s.ui.modelLogCount(); lines != maxLogLines {
 		t.Fatalf("log ring retained %d lines, want %d", lines, maxLogLines)
 	}
+}
+
+func TestChatAndGroupCompletionUsesCommandContext(t *testing.T) {
+	ui := newIdleTUI(t, 1)
+	ui.applyEvent(testState(
+		client.View{Name: "lobby"}, client.View{Name: "coffee"}, client.View{Name: "coding"},
+		client.View{Name: "meli-kiwen-pan", IsGroup: true, Children: []string{"coffee", "lobby"}},
+	))
+	for _, tc := range []struct {
+		input string
+		want  []string
+	}{
+		{"/set #", []string{"/set coding", "/set coffee", "/set lobby", "/set meli-kiwen-pan"}},
+		{"/set #co", []string{"/set coding", "/set coffee"}},
+		{"/s #me", []string{"/s meli-kiwen-pan"}},
+		{"/del #me", []string{"/del meli-kiwen-pan"}},
+		{"/d #lo", []string{"/d lobby"}},
+		{" /set	coffee  #", []string{" /set	coffee  coding", " /set	coffee  lobby"}},
+		{"/set\u2003#lo", []string{"/set\u2003lobby"}},
+		{"/set coffee lobby #", []string{"/set coffee lobby coding"}},
+		{"/set meli-kiwen-pan #", []string{"/set meli-kiwen-pan coffee", "/set meli-kiwen-pan lobby"}},
+		{"/s meli-kiwen-pan #co", []string{"/s meli-kiwen-pan coffee"}},
+		{"/set meli-kiwen-pan #cod", nil},
+		{"/set meli-kiwen-pan coffee #", nil},
+		{"/del coffee #", nil},
+		{"/set coffee#", nil},
+		{"/set co", nil},
+		{"/set #missing", nil},
+		{"/set #co ", nil},
+		{"/join #co", nil},
+		{"hello #co", nil},
+	} {
+		got := ui.handleAutocomplete(tc.input)
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("autocomplete(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestChatAndGroupCompletionPreservesInputAndDispatch(t *testing.T) {
+	s := newSimTUI(t, 100, 30)
+	s.events <- testState(
+		client.View{Name: "coffee"}, client.View{Name: "lobby"}, client.View{Name: "кофе"},
+		client.View{Name: "meli-kiwen-pan", IsGroup: true, Children: []string{"coffee", "lobby"}},
+	)
+	waitFor(t, time.Second, func() bool {
+		return s.matches(func() bool { return s.ui.chatList.GetItemCount() == 4 })
+	})
+	for _, tc := range []struct {
+		input, completed string
+		want             client.UserAction
+	}{
+		{"/set #co", "/set coffee", client.UserAction{Type: "ACTIVATE_VIEW", Payload: "coffee"}},
+		{"/s coffee #lo", "/s coffee lobby", client.UserAction{Type: "CREATE_GROUP", Payload: "coffee,lobby"}},
+		{"/set meli-kiwen-pan #lo", "/set meli-kiwen-pan lobby", client.UserAction{Type: "ACTIVATE_VIEW", Payload: "meli-kiwen-pan", Chat: "lobby"}},
+		{"/del #me", "/del meli-kiwen-pan", client.UserAction{Type: "DELETE_VIEW", Payload: "meli-kiwen-pan"}},
+		{"/d #ко", "/d кофе", client.UserAction{Type: "DELETE_VIEW", Payload: "кофе"}},
+	} {
+		s.onLoop(func() {
+			s.ui.input.SetText(tc.input)
+			s.ui.input.Autocomplete()
+			s.ui.app.ForceDraw()
+		})
+		if screen := s.text(); !strings.Contains(screen, tc.completed) {
+			t.Fatalf("completion for %q not displayed:\n%s", tc.input, screen)
+		}
+		s.key(tcell.KeyEnter, 0, tcell.ModNone)
+		waitFor(t, time.Second, func() bool {
+			return s.matches(func() bool { return s.ui.input.GetText() == tc.completed })
+		})
+		select {
+		case action := <-s.actions:
+			t.Fatalf("completion unexpectedly submitted %+v", action)
+		default:
+		}
+		s.key(tcell.KeyEnter, 0, tcell.ModNone)
+		select {
+		case action := <-s.actions:
+			if action != tc.want {
+				t.Fatalf("completed command submitted %+v, want %+v", action, tc.want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("completed command %q was not submitted", tc.completed)
+		}
+	}
+	// Clear recreates the editor; a subsequent state update must refresh its menu.
+	s.onLoop(func() {
+		s.ui.clearSession()
+		s.ui.applyEvent(client.DisplayEvent{Type: "CLEARED"})
+		s.ui.input.SetText("/set #me")
+		s.ui.input.Autocomplete()
+		s.ui.applyEvent(testState(client.View{Name: "coffee"}, client.View{Name: "lobby"},
+			client.View{Name: "meli-toki-pona", IsGroup: true, Children: []string{"coffee", "lobby"}}))
+		s.ui.render()
+		s.ui.app.ForceDraw()
+	})
+	if action := <-s.actions; action.Type != "CLEAR" {
+		t.Fatalf("clear submitted %+v", action)
+	}
+	if screen := s.text(); !strings.Contains(screen, "/set meli-toki-pona") || strings.Contains(screen, "/set meli-kiwen-pan") {
+		t.Fatalf("completion menu retained outdated views after clear:\n%s", screen)
+	}
+	s.key(tcell.KeyEnter, 0, tcell.ModNone)
+	waitFor(t, time.Second, func() bool {
+		return s.matches(func() bool { return s.ui.input.GetText() == "/set meli-toki-pona" })
+	})
 }
 
 func TestAutocompleteKeepsBlockCompletionBehavior(t *testing.T) {
