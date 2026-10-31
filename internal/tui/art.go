@@ -1065,7 +1065,6 @@ func (r *natRain) drawRain(c *artCanvas, t float64, waterTop int) {
 
 const (
 	storySnakeTick   = 300 * time.Millisecond
-	storySnakeMaxLen = 12
 	storySnakeMinLen = 4
 )
 
@@ -1472,8 +1471,8 @@ func (s *skyscraperScene) draw(c *artCanvas, elapsed time.Duration) {
 		mx := w - 5
 		c.put(mx+1, 0, '_', artWarm)
 		c.put(mx+2, 0, '_', artWarm)
-		c.put(mx, 1, '(', artWarm)
-		c.put(mx+3, 1, ')', artWarm)
+		// Opaque spaces hide stars inside the outline, below passing clouds.
+		c.text(mx, 1, "(  )", artWarm)
 		c.put(mx+1, 2, '-', artWarm)
 		c.put(mx+2, 2, '-', artWarm)
 	}
@@ -2201,10 +2200,9 @@ func (s *snakeScene) step(w, h int, now time.Duration) {
 	s.head = s.body[0]
 
 	if len(s.apples) > 0 && s.head.x == s.apples[0].x && s.head.y == s.apples[0].y {
+		// Fruit is always ahead of the upward-only head, so a finite climb
+		// bounds growth without stopping it after an arbitrary number of bites.
 		s.length += 2
-		if s.length > storySnakeMaxLen {
-			s.length = storySnakeMaxLen
-		}
 		s.biteX, s.biteY = s.apples[0].x, s.apples[0].y
 		s.biteUntil = now + 500*time.Millisecond
 		s.apples = s.apples[:0]

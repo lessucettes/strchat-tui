@@ -317,40 +317,53 @@ func TestArtStoriesInteractions(t *testing.T) {
 			}
 		}
 	})
-	t.Run("snake reaches and eats apple", func(t *testing.T) {
-		scene := newStoryScene("snake", 42)
-		var c artCanvas
-		apple := storyPoint{-1, -1}
-		previousY, ate := 25, false
-		for frame := 0; frame < 36; frame++ {
-			c.reset(16, 25)
-			scene.draw(&c, time.Duration(frame)*storySnakeTick)
-			head, nextApple := storyPoint{-1, -1}, storyPoint{-1, -1}
-			for y := 0; y < c.h; y++ {
-				for x := 0; x < c.w; x++ {
-					cell := c.cells[y*c.w+x]
-					if cell.ch == 'O' && cell.tone == artAccent {
-						head = storyPoint{x, y}
+	t.Run("snake keeps growing as it eats apples", func(t *testing.T) {
+		for _, height := range []int{25, 64} {
+			for _, seed := range []uint64{1, 42, 999} {
+				scene := newStoryScene("snake", seed)
+				var c artCanvas
+				apple := storyPoint{-1, -1}
+				previousY, eaten := height, 0
+				growAt, beforeGrowth := -1, 0
+				for frame := 0; frame < height+3; frame++ {
+					c.reset(16, height)
+					scene.draw(&c, time.Duration(frame)*storySnakeTick)
+					head, nextApple := storyPoint{-1, -1}, storyPoint{-1, -1}
+					segments := 0
+					for i, cell := range c.cells {
+						switch cell {
+						case artCell{'O', artAccent}:
+							head = storyPoint{i % c.w, i / c.w}
+							segments++
+						case artCell{'o', artLeaf}, artCell{'~', artLeaf}:
+							segments++
+						case artCell{'@', artDanger}:
+							nextApple = storyPoint{i % c.w, i / c.w}
+						}
 					}
-					if cell.ch == '@' && cell.tone == artDanger {
-						nextApple = storyPoint{x, y}
+					if head.x >= 0 {
+						if head.y > previousY {
+							t.Fatal("snake moved down before leaving the screen")
+						}
+						previousY = head.y
 					}
+					if frame == growAt && segments != beforeGrowth+2 {
+						t.Fatalf("height=%d seed=%d apple=%d: visible body did not grow by two segments (%d -> %d)", height, seed, eaten, beforeGrowth, segments)
+					}
+					if head == apple && apple.x >= 0 && nextApple != apple {
+						eaten++
+						// Growth retains the tail over the next two steps. Check
+						// before the head exits, when clipping cannot hide it.
+						if head.y >= 3 {
+							growAt, beforeGrowth = frame+2, segments
+						}
+					}
+					apple = nextApple
+				}
+				if eaten == 0 || (height == 64 && eaten < 5) {
+					t.Fatalf("height=%d seed=%d: too few apples to exercise continued growth: %d", height, seed, eaten)
 				}
 			}
-			if head.x >= 0 {
-				if head.y > previousY {
-					t.Fatal("snake moved down before leaving the screen")
-				}
-				previousY = head.y
-			}
-			if head == apple && apple.x >= 0 && nextApple != apple {
-				ate = true
-				break
-			}
-			apple = nextApple
-		}
-		if !ate {
-			t.Fatal("snake never reached and consumed its apple")
 		}
 	})
 }
@@ -576,6 +589,11 @@ func TestArtSceneComposition(t *testing.T) {
 				}
 				covered = covered || visible < 6
 				exposed = exposed || visible == 6
+				for _, x := range []int{12, 13} {
+					if cell := c.cells[c.w+x]; cell.ch == '*' || cell.ch == '.' {
+						t.Fatalf("seed=%d second=%d: star %q shines through the moon interior at x=%d", seed, second, cell.ch, x)
+					}
+				}
 			}
 			if len(frames) < 4 {
 				t.Fatal("clouds are missing or not drifting")
