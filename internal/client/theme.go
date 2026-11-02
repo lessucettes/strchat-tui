@@ -9,7 +9,7 @@ const DefaultTheme = "default"
 
 func validTheme(name string) bool {
 	switch name {
-	case DefaultTheme, "monochrome", "blue-gray", "red-gold":
+	case DefaultTheme, "monochrome", "blue-gray", "red-gold", "kawaii":
 		return true
 	}
 	return false

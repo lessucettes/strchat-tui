@@ -15,7 +15,7 @@ func TestThemeCommandChangesExistingWidgets(t *testing.T) {
 	originalStyles := tview.Styles
 	s.onLoop(func() { s.ui.handleCommand("/theme") })
 	s.draw()
-	for _, name := range []string{"default", "monochrome", "blue-gray", "red-gold"} {
+	for _, name := range []string{"default", "monochrome", "blue-gray", "red-gold", "5. kawaii"} {
 		if !strings.Contains(s.text(), name) {
 			t.Fatalf("/theme did not list %q", name)
 		}
@@ -26,6 +26,8 @@ func TestThemeCommandChangesExistingWidgets(t *testing.T) {
 	}{
 		{"/theme blue-gray", "blue-gray", tcell.NewHexColor(0x51cce6), tcell.NewHexColor(0x243447)},
 		{"/t red-gold", "red-gold", tcell.NewHexColor(0xffc65c), tcell.NewHexColor(0x421e24)},
+		{"/theme 5", "kawaii", tcell.NewHexColor(0xf075c5), tcell.NewHexColor(0x35213f)},
+		{"/t kawaii", "kawaii", tcell.NewHexColor(0xf075c5), tcell.NewHexColor(0x35213f)},
 		{"/theme 2", "monochrome", tcell.ColorWhite, tcell.ColorWhite},
 		{"/theme default", "default", defaultTheme.titleColor, defaultTheme.inputBgColor},
 	} {

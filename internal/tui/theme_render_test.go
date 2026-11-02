@@ -19,7 +19,7 @@ func TestThemeRecolorsRetainedScrollback(t *testing.T) {
 	s.ui.applyEvent(client.DisplayEvent{Type: "NEW_MESSAGE", Chat: "lobby", Nick: "me", IsOwnMessage: true, Content: "retained message [#32cd32]"})
 	s.ui.applyEvent(client.DisplayEvent{Type: "ERROR", Content: "retained error"})
 	s.draw()
-	for _, name := range []string{"blue-gray", "monochrome", "red-gold", "default"} {
+	for _, name := range []string{"blue-gray", "monochrome", "red-gold", "kawaii", "default"} {
 		s.ui.applyEvent(client.DisplayEvent{Type: "THEME_UPDATE", Content: name})
 		s.draw()
 		s.onLoop(func() {
@@ -76,8 +76,14 @@ func TestThemeReadabilityInLimitedPalettes(t *testing.T) {
 		Content: "palette own message",
 	})
 	s.ui.applyEvent(client.DisplayEvent{Type: "INFO", Content: "palette notice"})
+	for _, level := range []string{"STATUS", "WARN", "ERROR"} {
+		s.ui.applyEvent(client.DisplayEvent{Type: level, Content: "palette " + level})
+	}
 
-	s.onLoop(func() { s.ui.input.SetText("palette draft") })
+	s.onLoop(func() {
+		s.ui.setFocus(s.ui.input)
+		s.ui.input.SetText("palette draft")
+	})
 	for _, entry := range themes {
 		s.ui.applyEvent(client.DisplayEvent{Type: "THEME_UPDATE", Content: entry.name})
 		s.draw()
@@ -90,6 +96,19 @@ func TestThemeReadabilityInLimitedPalettes(t *testing.T) {
 			styles[text] = s.styleAt(x, y)
 		}
 		border := onLoopValue(s, func() tcell.Color { return s.ui.outputView.GetBorderColor() })
+		s.onLoop(func() { s.ui.setMaximized(maximizeLogs) })
+		s.draw()
+		for _, text := range []string{"palette STATUS", "palette WARN", "palette ERROR"} {
+			x, y := s.findByPrefix(text)
+			if x < 0 {
+				t.Fatalf("%s: %q is not rendered in Logs", entry.name, text)
+			}
+			styles[text] = s.styleAt(x, y)
+		}
+		s.onLoop(func() {
+			s.ui.setMaximized(maximizeNone)
+			s.ui.setFocus(s.ui.input)
+		})
 		for _, count := range []int{8, 16, 256} {
 			palette := make([]tcell.Color, count)
 			for i := range palette {
@@ -133,7 +152,7 @@ func TestThemeInvalidSelectionAndLocalState(t *testing.T) {
 	ui.applyEvent(client.DisplayEvent{Type: "THEME_UPDATE", Content: "blue-gray"})
 	ui.render()
 	selected := ui.theme
-	for _, arg := range []string{"0", "5", "-1", "missing", "red-gold extra", "[red]"} {
+	for _, arg := range []string{"0", "6", "-1", "missing", "red-gold extra", "[red]"} {
 		ui.handleCommand("/theme " + arg)
 		if ui.theme != selected {
 			t.Fatalf("invalid argument %q changed the theme", arg)

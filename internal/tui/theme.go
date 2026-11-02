@@ -87,6 +87,23 @@ var redGoldTheme = &theme{
 	nickPalette:     []string{"[#e77db2]", "[#69c4c9]", "[#f3bf59]", "[#6ebf7d]", "[#ff8059]"},
 }
 
+// kawaiiTheme adapts Sailor Moon's rose/lilac, mint and gold to dark surfaces.
+// References: lospec.com/palette-list/heart-gem and /sailor-moon-background.
+// Accents stay chromatic after tcell's eight-color Linux VT quantization;
+// near-white pastels would otherwise merge with ordinary message bodies.
+var kawaiiTheme = &theme{
+	backgroundColor: tcell.NewHexColor(0x201827),
+	textColor:       tcell.NewHexColor(0xeee8ef),
+	borderColor:     tcell.NewHexColor(0x548fa4),
+	titleColor:      tcell.NewHexColor(0xf075c5),
+	inputBgColor:    tcell.NewHexColor(0x35213f),
+	inputTextColor:  tcell.NewHexColor(0xff72bd),
+	logInfoColor:    tcell.NewHexColor(0x66bdc8),
+	logWarnColor:    tcell.NewHexColor(0xf2ce76),
+	logErrorColor:   tcell.NewHexColor(0xff788b),
+	nickPalette:     []string{"[#68cbd5]", "[#d48cd4]", "[#f2ce76]", "[#7ac587]", "[#ff858e]"},
+}
+
 // Ordered for stable /theme numbers. Themes are immutable after initialization.
 var themes = []struct {
 	name  string
@@ -96,6 +113,7 @@ var themes = []struct {
 	{"monochrome", monochromeTheme},
 	{"blue-gray", blueGrayTheme},
 	{"red-gold", redGoldTheme},
+	{"kawaii", kawaiiTheme},
 }
 
 // handleTheme lists locally but delegates saves to the config owner. The UI
