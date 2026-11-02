@@ -81,7 +81,7 @@ func configFromEnv() config {
 		key:           strings.TrimSpace(os.Getenv("TRANSLATE_PLUGIN_API_KEY")),
 		token:         strings.TrimSpace(os.Getenv("TRANSLATE_PLUGIN_ACCESS_TOKEN")),
 		scope:         env("TRANSLATE_PLUGIN_SCOPE", "GIGACHAT_API_PERS"),
-		target:        env("TRANSLATE_PLUGIN_TARGET_LANGUAGE", "French"),
+		target:        env("TRANSLATE_PLUGIN_TARGET_LANGUAGE", "English"),
 		receiveTarget: env("TRANSLATE_PLUGIN_RECEIVE_LANGUAGE", "Russian"),
 		client:        &http.Client{Timeout: httpTimeout},
 	}

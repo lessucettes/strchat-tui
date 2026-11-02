@@ -23,7 +23,7 @@ func TestRunTranslatesMessages(t *testing.T) {
 	for _, tt := range []struct {
 		plugin, content, language, translation, sendLanguage, receiveLanguage string
 	}{
-		{"on_send", "Привет\nмир", "French", "Bonjour\nle monde", "", ""},
+		{"on_send", "Привет\nмир", "English", "Hello\nworld", "", ""},
 		{"on_receive", "Bonjour\nle monde", "Russian", "Привет\nмир", "", ""},
 		{"on_send", "Привет\nмир", "Italian", "Ciao\nmondo", "Italian", "German"},
 		{"on_receive", "Bonjour\nle monde", "German", "Hallo\nWelt", "Italian", "German"},

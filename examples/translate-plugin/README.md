@@ -1,8 +1,9 @@
 # translate-plugin
 
-Translates strchat-tui messages with GigaChat: `on_send` into French and
-`on_receive` into Russian by default. The implementation uses only the Go
-standard library and takes no command-line arguments.
+Translates strchat-tui messages with GigaChat: `on_send` into English and
+`on_receive` into Russian by default, regardless of the source language.
+The implementation uses only the Go standard library and takes no command-line
+arguments.
 
 ## Build
 
@@ -37,8 +38,8 @@ the HTTP client also has a 30-second timeout. The launch above sets the client's
 process timeout to 35 seconds instead of the default 10 seconds.
 
 The client does not run `on_receive` for its own messages, including local send
-feedback and recognized relay echoes. Your outgoing French text therefore stays
-French on your screen; other senders' admitted messages are translated into
+feedback and recognized relay echoes. Your outgoing English text therefore stays
+English on your screen; other senders' admitted messages are translated into
 Russian. Validation and filter/mute checks still apply to both.
 
 ## Input and output
@@ -59,7 +60,7 @@ translation.
 Successful outgoing translation:
 
 ```json
-{"version":1,"action":"replace","content":"Bonjour !"}
+{"version":1,"action":"replace","content":"Hello!"}
 ```
 
 For `plugin:"on_receive"`, `content:"Bonjour !"` is translated into Russian:
@@ -91,7 +92,7 @@ defaults below; credentials have no default.
 | `TRANSLATE_PLUGIN_API_KEY` | unset | Authorization key used as `Authorization: Basic <key>`. |
 | `TRANSLATE_PLUGIN_ACCESS_TOKEN` | unset | Token used as `Authorization: Bearer <token>`; skips OAuth. |
 | `TRANSLATE_PLUGIN_SCOPE` | `GIGACHAT_API_PERS` | OAuth scope. |
-| `TRANSLATE_PLUGIN_TARGET_LANGUAGE` | `French` | Outgoing target language in the system instruction. |
+| `TRANSLATE_PLUGIN_TARGET_LANGUAGE` | `English` | Outgoing target language in the system instruction. |
 | `TRANSLATE_PLUGIN_RECEIVE_LANGUAGE` | `Russian` | Incoming target language in the system instruction. |
 
 ## API requests
