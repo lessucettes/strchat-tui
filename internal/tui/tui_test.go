@@ -756,7 +756,7 @@ func TestAutocompleteKeepsBlockCompletionBehavior(t *testing.T) {
 		t.Fatalf("autocomplete(/block ) = %v, want nil", got)
 	}
 	ui.completionEntries = []string{"@dave#1111"}
-	if got := ui.handleAutocomplete("hi @da"); len(got) != 1 || got[0] != "@dave#1111" {
+	if got := ui.handleAutocomplete("hi @da"); len(got) != 1 || got[0] != "hi @dave#1111" {
 		t.Fatalf("autocomplete(nick) = %v", got)
 	}
 	if got := ui.handleAutocomplete("hi @dave#1111"); got != nil {

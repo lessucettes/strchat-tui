@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/rivo/tview"
 
 	"github.com/lessucettes/strchat-tui/internal/client"
 )
@@ -39,14 +40,48 @@ func (t *tui) setupHandlers() {
 
 // Rebind the fresh editor after clear, without replacing its layout primitive.
 func (t *tui) setupInputHandlers() {
-	t.input.SetAutocompleteUseTags(false)
-	t.input.SetAutocompleteFunc(t.handleAutocomplete)
-	t.input.SetAcceptanceFunc(func(text string, _ rune) bool {
+	accept := func(text string, _ rune) bool {
 		if len(text) > client.MaxMsgLen && graphemeLen(text) > client.MaxMsgLen {
 			t.bell()
 			return false
 		}
 		return true
+	}
+	t.input.SetAcceptanceFunc(accept)
+	// Keep literal replacements separate from popup labels: tview strips tags
+	// on navigation/click, and a long shared draft would hide the nicknames.
+	var entries, labels []string
+	var keepEntries bool
+	t.input.SetAutocompleteUseTags(true)
+	t.input.SetAutocompleteFunc(func(text string) []string {
+		if keepEntries {
+			// Navigation previews the replacement without changing the choices.
+			// tview v0.42.0 defers one refresh; later updates rebuild them.
+			keepEntries = false
+			return labels
+		}
+		entries = t.handleAutocomplete(text)
+		prefix := ""
+		if nick, complete := extractNickPrefix(text); nick != "" && !complete {
+			prefix = text[:strings.LastIndex(text, "@")]
+		}
+		labels = make([]string, len(entries))
+		for i, entry := range entries {
+			labels[i] = tview.Escape(strings.TrimPrefix(entry, prefix))
+		}
+		return labels
+	})
+	t.input.SetAutocompletedFunc(func(_ string, index, source int) bool {
+		if index < 0 || index >= len(entries) {
+			return true
+		}
+		text := entries[index]
+		if !accept(text, 0) {
+			return false
+		}
+		keepEntries = source == tview.AutocompletedNavigate && text != t.input.GetText()
+		t.input.SetText(text)
+		return source != tview.AutocompletedNavigate
 	})
 	t.applyInputTheme()
 	// Enter sends the message or runs the slash command.
@@ -106,7 +141,7 @@ func (t *tui) setupInputHandlers() {
 			t.lastNickQuery = ""
 			return
 		}
-		if !complete && strings.Contains(text, "#") && t.lastNickQuery == "" {
+		if strings.Contains(nick, "#") && t.lastNickQuery == "" {
 			return
 		}
 		if nick != "" && nick != t.lastNickQuery {
@@ -150,6 +185,9 @@ func (t *tui) setupInputHandlers() {
 		} else {
 			t.input.SetText(t.inputHistory[len(t.inputHistory)-t.historyOffset])
 		}
+		// SetText does not refresh the popup, and this capture consumes the key
+		// before InputField can run its normal autocomplete refresh.
+		t.input.Autocomplete()
 		return nil
 	})
 
@@ -500,7 +538,14 @@ func (t *tui) handleAutocomplete(currentText string) []string {
 	if nick == "" || len(t.completionEntries) == 0 {
 		return nil
 	}
-	return append([]string(nil), t.completionEntries...)
+	// InputField replaces the whole draft with a selected entry. Preserve
+	// everything before the mention, including an earlier routing recipient.
+	prefix := currentText[:strings.LastIndex(currentText, "@")]
+	entries := make([]string, 0, len(t.completionEntries))
+	for _, entry := range t.completionEntries {
+		entries = append(entries, prefix+entry)
+	}
+	return entries
 }
 
 // completeViewName replaces only the final #prefix argument, keeping prior input.

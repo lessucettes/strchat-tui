@@ -10,6 +10,45 @@ import (
 	"github.com/lessucettes/strchat-tui/internal/client"
 )
 
+func TestMentionPreservesMessageBodyColor(t *testing.T) {
+	s := newSimTUI(t, 140, 40)
+	s.ui.applyEvent(client.DisplayEvent{Type: "STATE_UPDATE", Payload: client.StateUpdate{
+		Views: []client.View{{Name: "lobby"}}, ChatNicks: map[string]string{"lobby": "self"},
+	}})
+	for _, message := range []struct {
+		text string
+		own  bool
+	}{
+		{"own-before @self own-after", true},
+		{"/me action-before @self action-after", true},
+		{"incoming-before @self incoming-after", false},
+	} {
+		s.ui.applyEvent(client.DisplayEvent{Type: "NEW_MESSAGE", Chat: "lobby", Nick: "sender", Content: message.text, IsOwnMessage: message.own})
+	}
+	for _, entry := range themes {
+		s.ui.applyEvent(client.DisplayEvent{Type: "THEME_UPDATE", Content: entry.name})
+		s.draw()
+		for _, prefix := range []string{"own", "action", "incoming"} {
+			x, y := s.findByPrefix(prefix + "-before")
+			endX, endY := s.findByPrefix(prefix + "-after")
+			if x < 0 || endX < 0 {
+				t.Fatalf("%s: %s message is not visible", entry.name, prefix)
+			}
+			before, _, _ := s.styleAt(x, y).Decompose()
+			after, _, attrs := s.styleAt(endX, endY).Decompose()
+			want := onLoopValue(s, func() tcell.Color {
+				if prefix == "incoming" || entry.name == "monochrome" {
+					return s.ui.theme.textColor
+				}
+				return s.ui.theme.inputTextColor
+			})
+			if before != after || after.Hex() != want.Hex() || attrs&tcell.AttrBold != 0 {
+				t.Errorf("%s: %s body style changed after mention: %v -> %v, attrs %v", entry.name, prefix, before, after, attrs)
+			}
+		}
+	}
+}
+
 func TestThemeRecolorsRetainedScrollback(t *testing.T) {
 	s := newSimTUI(t, 120, 40)
 	s.ui.applyEvent(client.DisplayEvent{Type: "STATE_UPDATE", Payload: client.StateUpdate{

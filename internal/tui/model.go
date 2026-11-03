@@ -244,7 +244,11 @@ func formatMessage(ev client.DisplayEvent, st messageStyle) string {
 	if action {
 		text = body
 	}
-	content := highlightMention(text, st.mention, st.ownColor)
+	bodyColor := tcell.ColorDefault
+	if ev.IsOwnMessage {
+		bodyColor = st.ownColor
+	}
+	content := highlightMention(text, st.mention, st.ownColor, bodyColor)
 	meta := fmt.Sprintf("%s[%s %s][-]", colorTag(st.metaColor), sanitizeLineForDisplay(ev.ID), sanitizeLineForDisplay(ev.Timestamp))
 	if action {
 		nickTag := st.nickTag
@@ -274,7 +278,7 @@ func actionText(text string) (string, bool) {
 
 // highlightMention emphasizes every occurrence of mention in content while
 // escaping everything else, including the mention itself.
-func highlightMention(content, mention string, color tcell.Color) string {
+func highlightMention(content, mention string, color, bodyColor tcell.Color) string {
 	if mention == "" || !strings.Contains(content, mention) {
 		return sanitizeForDisplay(content)
 	}
@@ -286,6 +290,9 @@ func highlightMention(content, mention string, color tcell.Color) string {
 			b.WriteString(colorBoldTag(color))
 			b.WriteString(sanitizeForDisplay(mention))
 			b.WriteString("[-::-]")
+			if bodyColor.Valid() {
+				b.WriteString(colorTag(bodyColor))
+			}
 		}
 		b.WriteString(sanitizeForDisplay(part))
 	}
